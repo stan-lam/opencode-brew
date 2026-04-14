@@ -1,0 +1,280 @@
+.gitPanel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.branchSelector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.branchSelector:hover {
+  background-color: var(--bg-hover);
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+}
+
+.actionBtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.actionBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.commitBox {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.commitInput {
+  width: 100%;
+  resize: none;
+  margin-bottom: 8px;
+  font-size: var(--font-size-sm);
+}
+
+.commitBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px;
+  background-color: var(--accent-blue);
+  color: white;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.commitBtn:hover:not(:disabled) {
+  background-color: #005a9e;
+}
+
+.commitBtn:disabled {
+  background-color: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.changes {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.section {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background-color var(--transition-fast);
+}
+
+.sectionHeader:hover {
+  background-color: var(--bg-hover);
+}
+
+.count {
+  background-color: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.sectionAction {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.sectionAction:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.fileList {
+  padding: 4px 8px 8px;
+}
+
+.emptyText {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  padding: 8px;
+  text-align: center;
+}
+
+.fileItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.fileItem:hover {
+  background-color: var(--bg-hover);
+}
+
+.fileStatus {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  width: 14px;
+  text-align: center;
+}
+
+.fileName {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.filePath {
+  flex: 1;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileAction {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+
+.fileItem:hover .fileAction {
+  opacity: 1;
+}
+
+.fileAction:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 20px;
+}
+
+.empty svg {
+  color: var(--text-muted);
+}
+
+.empty p {
+  font-size: var(--font-size-sm);
+}
+
+.initBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background-color: var(--accent-blue);
+  color: white;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.initBtn:hover:not(:disabled) {
+  background-color: #005a9e;
+}
+
+.initBtn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.error {
+  color: var(--accent-red);
+  font-size: var(--font-size-xs);
+  margin-top: 8px;
+}
+
+.statusMessage {
+  padding: 8px;
+  background-color: var(--bg-tertiary);
+  color: var(--accent-green);
+  font-size: var(--font-size-xs);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.errorMessage {
+  padding: 8px;
+  background-color: rgba(255, 85, 85, 0.1);
+  color: var(--accent-red);
+  font-size: var(--font-size-xs);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

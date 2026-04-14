@@ -1,0 +1,128 @@
+.settingsPanel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.categories {
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.category {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  text-align: left;
+  transition: all var(--transition-fast);
+}
+
+.category:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.category.active {
+  background-color: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.title {
+  font-size: var(--font-size-lg);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+
+.settingsList {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settingItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+}
+
+.settingInfo {
+  flex: 1;
+  min-width: 0;
+  margin-right: 16px;
+}
+
+.settingLabel {
+  display: block;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.settingDescription {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.settingControl {
+  flex-shrink: 0;
+}
+
+.settingControl select,
+.settingControl input[type="number"],
+.settingControl input[type="text"] {
+  min-width: 100px;
+  padding: 4px 8px;
+  font-size: var(--font-size-sm);
+}
+
+.settingControl input[type="number"] {
+  width: 80px;
+}
+
+.toggle {
+  width: 40px;
+  height: 22px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 11px;
+  position: relative;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.toggle.on {
+  background-color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+.toggleThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background-color: white;
+  border-radius: 50%;
+  transition: transform var(--transition-fast);
+}
+
+.toggle.on .toggleThumb {
+  transform: translateX(18px);
+}

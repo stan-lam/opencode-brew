@@ -1,0 +1,210 @@
+.searchBar {
+  background: var(--bg-secondary, #252526);
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  padding: 6px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.searchRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.replaceRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 28px;
+}
+
+.toggleReplace {
+  background: none;
+  border: none;
+  color: var(--text-secondary, #858585);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.toggleReplace:hover {
+  background: var(--bg-hover, #2a2d2e);
+  color: var(--text-primary, #cccccc);
+}
+
+.inputWrapper {
+  position: relative;
+  flex: 1;
+  max-width: 300px;
+  display: flex;
+  align-items: center;
+  background: var(--bg-input, #3c3c3c);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 4px;
+}
+
+.inputWrapper:focus-within {
+  border-color: var(--accent-color, #0e639c);
+}
+
+.searchInput {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-primary, #cccccc);
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+  min-width: 0;
+}
+
+.searchInput::placeholder {
+  color: var(--text-muted, #5a5a5a);
+}
+
+.searchInput.error {
+  color: var(--error-color, #f48771);
+}
+
+.inputOptions {
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+  gap: 2px;
+}
+
+.optionButton {
+  background: none;
+  border: none;
+  color: var(--text-muted, #5a5a5a);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+}
+
+.optionButton:hover {
+  background: var(--bg-hover, #2a2d2e);
+  color: var(--text-secondary, #858585);
+}
+
+.optionButton.active {
+  background: var(--accent-color, #0e639c);
+  color: white;
+}
+
+.replaceInputWrapper {
+  flex: 1;
+  max-width: 300px;
+}
+
+.replaceInput {
+  width: 100%;
+  background: var(--bg-input, #3c3c3c);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 4px;
+  color: var(--text-primary, #cccccc);
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+}
+
+.replaceInput:focus {
+  border-color: var(--accent-color, #0e639c);
+}
+
+.replaceInput::placeholder {
+  color: var(--text-muted, #5a5a5a);
+}
+
+.matchInfo {
+  color: var(--text-secondary, #858585);
+  font-size: 12px;
+  min-width: 70px;
+  text-align: center;
+}
+
+.navButtons {
+  display: flex;
+  gap: 2px;
+}
+
+.navButton {
+  background: none;
+  border: none;
+  color: var(--text-secondary, #858585);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.navButton:hover:not(:disabled) {
+  background: var(--bg-hover, #2a2d2e);
+  color: var(--text-primary, #cccccc);
+}
+
+.navButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.replaceButtons {
+  display: flex;
+  gap: 4px;
+}
+
+.replaceButton {
+  background: var(--bg-button, #3c3c3c);
+  border: 1px solid var(--border-color, #3c3c3c);
+  color: var(--text-primary, #cccccc);
+  cursor: pointer;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.replaceButton:hover:not(:disabled) {
+  background: var(--bg-hover, #4a4a4a);
+}
+
+.replaceButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.closeButton {
+  background: none;
+  border: none;
+  color: var(--text-secondary, #858585);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  margin-left: auto;
+}
+
+.closeButton:hover {
+  background: var(--bg-hover, #2a2d2e);
+  color: var(--text-primary, #cccccc);
+}
+
+.errorMessage {
+  color: var(--error-color, #f48771);
+  font-size: 11px;
+  padding-left: 28px;
+}

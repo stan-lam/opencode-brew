@@ -1,0 +1,11 @@
+.editorArea {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-primary);
+}
+
+.editorContent {
+  flex: 1;
+  overflow: hidden;
+}
