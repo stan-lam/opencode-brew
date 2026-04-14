@@ -1,0 +1,51 @@
+.statusBar {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--accent-blue);
+  padding: 0 8px;
+  font-size: var(--font-size-xs);
+  color: white;
+}
+
+.left,
+.right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  height: 22px;
+  color: inherit;
+  transition: background-color var(--transition-fast);
+}
+
+.item:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.item svg {
+  flex-shrink: 0;
+}
+
+.errorIcon {
+  color: #ff6b6b;
+}
+
+.warningIcon {
+  color: #ffc107;
+}
+
+.okIcon {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.hasProblems {
+  background-color: rgba(255, 255, 255, 0.1);
+}

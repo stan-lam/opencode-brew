@@ -1,0 +1,134 @@
+.problemsPanel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.summary {
+  display: flex;
+  gap: 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.summaryItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.errorIcon {
+  color: var(--accent-red);
+}
+
+.warningIcon {
+  color: var(--accent-yellow);
+}
+
+.infoIcon {
+  color: var(--accent-blue);
+}
+
+.problemList {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.empty svg {
+  color: var(--accent-green);
+}
+
+.empty p {
+  font-size: var(--font-size-sm);
+}
+
+.fileGroup {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.fileHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background-color var(--transition-fast);
+}
+
+.fileHeader:hover {
+  background-color: var(--bg-hover);
+}
+
+.fileName {
+  flex: 1;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileCount {
+  background-color: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.problems {
+  padding: 4px 8px 8px;
+}
+
+.problemItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px 6px 24px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.problemItem:hover {
+  background-color: var(--bg-hover);
+}
+
+.problemItem svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.message {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.location {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  font-family: var(--font-family-mono);
+}
+
+.source {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  background-color: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
