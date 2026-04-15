@@ -15,7 +15,7 @@ pub struct HistoryEntry {
 
 fn get_db_path() -> PathBuf {
     let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push("OpenIDE");
+    path.push("OpenCodeBrew");
     std::fs::create_dir_all(&path).ok();
     path.push("history.db");
     path
