@@ -16,9 +16,16 @@ import {
   Image as ImageIcon,
   Paperclip,
   Terminal as TerminalIcon,
+  Check,
+  Zap,
+  ListChecks,
+  Circle,
+  Loader,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
-import { dialog, fs, history } from '../../services/tauri';
-import { useAIStore, AIMessage, MessageAttachment, AgentMode } from '../../store/aiStore';
+import { ai, appEvents, dialog, fs, history, shell } from '../../services/tauri';
+import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask } from '../../store/aiStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
@@ -443,15 +450,29 @@ function detectActionableTasks(content: string): string[] {
 function parseFileOperations(content: string): FileOperation[] {
   const operations: FileOperation[] = [];
   
-  // Parse create_file tags
+  // Parse create_file tags — complete (with closing tag) first
   const createRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)<\/create_file>/g;
   let match;
+  const completePaths = new Set<string>();
   while ((match = createRegex.exec(content)) !== null) {
+    completePaths.add(match[1]);
     operations.push({
       type: 'create',
       path: match[1],
       content: match[2].trim(),
     });
+  }
+
+  // Also parse INCOMPLETE create_file tags (streaming — no closing tag yet)
+  // Capture from the open tag up to the next open tag, closing tag, or end of string
+  const incompleteCreateRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)(?=<create_file|<edit_file|<delete_file|<\/create_file|$)/g;
+  let m2;
+  while ((m2 = incompleteCreateRegex.exec(content)) !== null) {
+    if (completePaths.has(m2[1])) continue; // already captured as complete
+    const code = m2[2].trim();
+    if (code.length > 0) {
+      operations.push({ type: 'create', path: m2[1], content: code });
+    }
   }
   
   // Parse edit_file tags
@@ -606,13 +627,18 @@ function parsePlanComponents(content: string): {
     plans.push({ title, overview, approaches, tasks, architecture, considerations });
   }
 
-  // Parse <checklist> tags
-  const checklistRegex = /<checklist\s+title="([^"]+)">([\s\S]*?)<\/checklist>/g;
+  // Parse <checklist> tags (support any attributes, extract title if present)
+  const checklistRegex = /<checklist([^>]*)>([\s\S]*?)<\/checklist>/g;
   while ((match = checklistRegex.exec(content)) !== null) {
-    const title = match[1];
+    const attrs = match[1];
+    const titleMatch = attrs.match(/title="([^"]+)"/i);
+    const title = titleMatch ? titleMatch[1] : 'Checklist';
     const items = match[2].split('\n')
-      .filter(l => l.trim().startsWith('- ['))
-      .map(l => l.trim().substring(2).trim());
+      .map(l => l.trim())
+      .filter(l => l.startsWith('-'))
+      // Strip leading "- [ ] ", "- [x] ", "- [X] ", "- " etc. to get plain task text
+      .map(l => l.replace(/^-\s*(?:\[[ xX>-]\]\s*)?/, '').trim())
+      .filter(l => l.length > 0);
     checklists.push({ title, items });
   }
 
@@ -1062,21 +1088,67 @@ function PlanView({ plan }: { plan: Plan }) {
 }
 
 // Component to display a checklist
-function ChecklistView({ checklist }: { checklist: Checklist }) {
+function ChecklistView({ checklist, onImplementInAgent }: {
+  checklist: Checklist;
+  onImplementInAgent?: (tasks: string[]) => void;
+}) {
+  const [checked, setChecked] = useState<boolean[]>(() =>
+    new Array(checklist.items.length).fill(false)
+  );
+
+  const completedCount = checked.filter(Boolean).length;
+  const totalCount = checklist.items.length;
+  const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
+
+  const toggleItem = (idx: number) => {
+    setChecked(prev => prev.map((v, i) => (i === idx ? !v : v)));
+  };
+
   return (
     <div className={styles.checklistContainer}>
       <div className={styles.checklistHeader}>
-        <span className={styles.checklistIcon}>✓</span>
-        <h4 className={styles.checklistTitle}>{checklist.title}</h4>
+        <div className={styles.checklistHeaderLeft}>
+          <ListChecks size={15} className={styles.checklistIcon} />
+          <h4 className={styles.checklistTitle}>{checklist.title}</h4>
+        </div>
+        <span className={styles.checklistProgress}>
+          {completedCount}/{totalCount}
+        </span>
+      </div>
+      <div className={styles.checklistProgressBar}>
+        <div
+          className={styles.checklistProgressFill}
+          style={{ width: `${progress}%` }}
+        />
       </div>
       <ul className={styles.checklistItems}>
         {checklist.items.map((item, idx) => (
-          <li key={idx} className={styles.checklistItem}>
-            <input type="checkbox" className={styles.checklistCheckbox} />
-            <span>{item}</span>
+          <li
+            key={idx}
+            className={`${styles.checklistItem} ${checked[idx] ? styles.checklistItemDone : ''}`}
+            onClick={() => toggleItem(idx)}
+          >
+            <input
+              type="checkbox"
+              checked={checked[idx]}
+              onChange={() => {}}
+              className={styles.checklistCheckbox}
+            />
+            <span className={styles.checklistItemText}>{item}</span>
           </li>
         ))}
       </ul>
+      {onImplementInAgent && (
+        <div className={styles.checklistFooter}>
+          <button
+            className={styles.checklistImplementBtn}
+            onClick={() => onImplementInAgent(checklist.items)}
+          >
+            <Zap size={13} />
+            Implement in Agent Mode
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1286,11 +1358,27 @@ function MessageBubble({ message, onOperationsChange }: {
   const [codeBlockTasks, setCodeBlockTasks] = useState<string[]>([]);
   const { currentWorkspace} = useWorkspaceStore();
   const { openFile } = useEditorStore();
-  const { agentMode, setAgentMode } = useAIStore();
+  const { agentMode, setAgentMode, sendMessage, setAgentTasks, queuePrompt } = useAIStore();
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(message.content);
   };
+
+  // Switch to agent mode and auto-send tasks one-by-one so progress can be tracked
+  const handleImplementInAgent = useCallback((tasks: string[]) => {
+    if (tasks.length === 0) return;
+    setAgentMode('agent');
+    setAgentTasks(tasks);
+    // Send first task immediately; queue the rest so each gets its own focused response
+    sendMessage(
+      `Implement task 1 of ${tasks.length}: ${tasks[0]}\n\nCreate or edit files as needed. Reply when done.`
+    );
+    tasks.slice(1).forEach((task, i) => {
+      queuePrompt(
+        `Implement task ${i + 2} of ${tasks.length}: ${task}\n\nCreate or edit files as needed. Reply when done.`
+      );
+    });
+  }, [setAgentMode, sendMessage, setAgentTasks, queuePrompt]);
 
   // Parse file operations and plan components from assistant messages
   useEffect(() => {
@@ -1322,12 +1410,25 @@ function MessageBubble({ message, onOperationsChange }: {
         });
       }
       
-      // Detect actionable tasks in Plan Mode
+      // Detect actionable tasks and code blocks in Plan Mode
       if (agentMode === 'plan') {
         const tasks = detectActionableTasks(message.content);
         setActionableTasks(tasks);
+
+        const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+        const detectedCodeBlocks: string[] = [];
+        let match;
+        while ((match = codeBlockRegex.exec(message.content)) !== null) {
+          const lang = match[1] || 'code';
+          const codeContent = match[2].trim();
+          if (lang.toLowerCase() === 'mermaid') continue;
+          const preview = codeContent.split('\n').slice(0, 3).join('; ').substring(0, 80);
+          detectedCodeBlocks.push(`Implement ${lang || 'code'}: ${preview}${codeContent.length > 80 ? '...' : ''}`);
+        }
+        setCodeBlockTasks(detectedCodeBlocks);
       } else {
         setActionableTasks([]);
+        setCodeBlockTasks([]);
       }
     }
   }, [message.content, isUser, agentMode]);
@@ -1337,95 +1438,86 @@ function MessageBubble({ message, onOperationsChange }: {
   const getCleanedContent = (content: string): string => {
     let cleaned = content;
     
-    // In plan mode, detect and remove code blocks
+    // In plan mode, remove code blocks (detection happens in useEffect, not here)
     if (agentMode === 'plan') {
-      const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
-      const detectedCodeBlocks: string[] = [];
-      let match;
-      
-      while ((match = codeBlockRegex.exec(content)) !== null) {
-        const lang = match[1] || 'code';
-        const codeContent = match[2].trim();
-        
-        // Skip mermaid diagrams (they're allowed for architecture)
-        if (lang.toLowerCase() === 'mermaid') {
-          continue;
-        }
-        
-        // Create task description from code block
-        const lines = codeContent.split('\n').slice(0, 3); // First 3 lines
-        const preview = lines.join('; ').substring(0, 80);
-        const taskDesc = `Implement ${lang || 'code'}: ${preview}${codeContent.length > 80 ? '...' : ''}`;
-        detectedCodeBlocks.push(taskDesc);
-      }
-      
-      // Update code block tasks if any were found
-      if (detectedCodeBlocks.length > 0) {
-        setCodeBlockTasks(detectedCodeBlocks);
-      }
-      
-      // Remove all code blocks except mermaid
-      cleaned = cleaned.replace(/```(?!mermaid)(\w*)\n[\s\S]*?```/g, () => {
-        return `\n**[Code block removed - Switch to Agent Mode to see implementation]**\n`;
+      // Remove all code blocks except mermaid — use double newlines to preserve paragraph breaks
+      cleaned = cleaned.replace(/```(?!mermaid)(\w*)[^\n]*\n[\s\S]*?```/g, () => {
+        return `\n\n*[Code block hidden — switch to Agent Mode to see implementation]*\n\n`;
       });
     }
     
-    // Remove complete file operation tags (with closing tags)
-    cleaned = cleaned.replace(/<create_file\s+path="[^"]*">[\s\S]*?<\/create_file>/gi, '');
-    cleaned = cleaned.replace(/<edit_file[\s\S]*?<\/edit_file>/gi, '');
-    cleaned = cleaned.replace(/<delete_file\s+path="[^"]*"\s*\/>/gi, '');
-    
-    // Handle streaming/incomplete file operations - wrap content in code blocks for display
-    // This shows the code as it streams with proper formatting
-    if (agentMode !== 'plan') {
-      // If there's an opening create_file tag without a closing tag, wrap content in code block
-      cleaned = cleaned.replace(/<create_file\s+path="([^"]*)">([\s\S]*)$/gi, (match, path, content) => {
-        // Extract the file extension from path for language hint
-        const ext = path.split('.').pop()?.toLowerCase() || '';
-        const langMap: Record<string, string> = {
-          'ts': 'typescript', 'tsx': 'typescript', 'js': 'javascript', 'jsx': 'javascript',
-          'css': 'css', 'html': 'html', 'json': 'json', 'md': 'markdown',
-          'py': 'python', 'rs': 'rust', 'go': 'go', 'java': 'java'
-        };
-        const lang = langMap[ext] || ext;
-        
-        return `\n**Creating \`${path}\`**\n\n\`\`\`${lang}\n${content}\`\`\``;
-      });
-      
-      // Same for edit_file with old/new content
-      cleaned = cleaned.replace(/<edit_file\s+([^>]*)>([\s\S]*)$/gi, (match, attrs, content) => {
-        // Try to extract path
-        const pathMatch = attrs.match(/path="([^"]*)"/);
+    const langFromPath = (p: string): string => {
+      const ext = p.split('.').pop()?.toLowerCase() || '';
+      const m: Record<string, string> = {
+        'ts': 'typescript', 'tsx': 'typescript', 'js': 'javascript', 'jsx': 'javascript',
+        'css': 'css', 'html': 'html', 'json': 'json', 'md': 'markdown',
+        'py': 'python', 'rs': 'rust', 'go': 'go', 'java': 'java',
+        'sh': 'bash', 'toml': 'toml', 'yaml': 'yaml', 'yml': 'yaml',
+      };
+      return m[ext] || ext;
+    };
+
+    // ── Step 1: Replace COMPLETE file-op tags with a labelled code block ──────
+    // create_file (with closing tag)
+    cleaned = cleaned.replace(
+      /<create_file\s+path="([^"]+)">([\s\S]*?)<\/create_file>/gi,
+      (_, path, code) =>
+        `\n\n**Creating \`${path}\`**\n\n\`\`\`${langFromPath(path)}\n${code.replace(/\n$/, '')}\n\`\`\`\n\n`
+    );
+    // edit_file (with closing tag) — show new content if available, else show whole block
+    cleaned = cleaned.replace(
+      /<edit_file\s+([^>]*)>([\s\S]*?)<\/edit_file>/gi,
+      (_, attrs, body) => {
+        const pathMatch = attrs.match(/path="([^"]+)"/i);
         const path = pathMatch ? pathMatch[1] : 'file';
-        
-        const ext = path.split('.').pop()?.toLowerCase() || '';
-        const langMap: Record<string, string> = {
-          'ts': 'typescript', 'tsx': 'typescript', 'js': 'javascript', 'jsx': 'javascript',
-          'css': 'css', 'html': 'html', 'json': 'json', 'md': 'markdown',
-          'py': 'python', 'rs': 'rust', 'go': 'go', 'java': 'java'
-        };
-        const lang = langMap[ext] || ext;
-        
-        // Extract new_content if available
-        const newContentMatch = content.match(/<new_content>([\s\S]*?)(?:<\/new_content>|$)/i);
-        const newContent = newContentMatch ? newContentMatch[1] : '';
-        
-        if (newContent) {
-          return `\n**Editing \`${path}\`**\n\n\`\`\`${lang}\n${newContent}\`\`\``;
-        }
-        
-        return `\n**Editing \`${path}\`...**\n`;
-      });
+        const newMatch = body.match(/<new_content>([\s\S]*?)<\/new_content>/i);
+        const code = newMatch ? newMatch[1] : body;
+        return `\n\n**Editing \`${path}\`**\n\n\`\`\`${langFromPath(path)}\n${code.replace(/\n$/, '')}\n\`\`\`\n\n`;
+      }
+    );
+    // delete_file
+    cleaned = cleaned.replace(
+      /<delete_file\s+path="([^"]+)"\s*\/>/gi,
+      (_, path) => `\n\n~~Deleting \`${path}\`~~\n\n`
+    );
+
+    // ── Step 2: Handle INCOMPLETE (streaming) file-op tags ────────────────────
+    // Process each incomplete create_file individually by repeatedly replacing
+    // the first open tag up to (but not including) the next open tag or end of string.
+    let safetyLimit = 20;
+    while (safetyLimit-- > 0) {
+      const incompleteCreate = /<create_file\s+path="([^"]+)">([\s\S]*?)(?=<create_file|<edit_file|<delete_file|$)/i;
+      const m2 = incompleteCreate.exec(cleaned);
+      if (!m2) break;
+      const path = m2[1];
+      const code = m2[2];
+      const replacement = `\n\n**Creating \`${path}\`** *(writing...)*\n\n\`\`\`${langFromPath(path)}\n${code.replace(/\n$/, '')}\n\`\`\`\n\n`;
+      cleaned = cleaned.slice(0, m2.index) + replacement + cleaned.slice(m2.index + m2[0].length);
+    }
+    // Same for incomplete edit_file
+    safetyLimit = 20;
+    while (safetyLimit-- > 0) {
+      const incompleteEdit = /<edit_file\s+([^>]*)>([\s\S]*?)(?=<create_file|<edit_file|<delete_file|$)/i;
+      const m3 = incompleteEdit.exec(cleaned);
+      if (!m3) break;
+      const attrs = m3[1];
+      const body = m3[2];
+      const pathMatch = attrs.match(/path="([^"]+)"/i);
+      const path = pathMatch ? pathMatch[1] : 'file';
+      const newMatch = body.match(/<new_content>([\s\S]*?)(?:<\/new_content>|$)/i);
+      const code = newMatch ? newMatch[1] : body;
+      const replacement = `\n\n**Editing \`${path}\`** *(writing...)*\n\n\`\`\`${langFromPath(path)}\n${code.replace(/\n$/, '')}\n\`\`\`\n\n`;
+      cleaned = cleaned.slice(0, m3.index) + replacement + cleaned.slice(m3.index + m3[0].length);
     }
     
-    // Remove <plan>...</plan> blocks (entire block) - handle with or without title
-    cleaned = cleaned.replace(/<plan(?:\s+title="[^"]*")?>([\s\S]*?)<\/plan>/gi, '');
+    // Remove <plan>...</plan> blocks (entire block) - any attributes
+    cleaned = cleaned.replace(/<plan(?:\s[^>]*)?>([\s\S]*?)<\/plan>/gi, '');
     
-    // Remove <checklist>...</checklist> blocks
-    cleaned = cleaned.replace(/<checklist(?:\s+title="[^"]*")?>([\s\S]*?)<\/checklist>/gi, '');
+    // Remove <checklist>...</checklist> blocks (any attributes)
+    cleaned = cleaned.replace(/<checklist(?:\s[^>]*)?>([\s\S]*?)<\/checklist>/gi, '');
     
-    // Remove <decision>...</decision> blocks
-    cleaned = cleaned.replace(/<decision(?:\s+question="[^"]*")?>([\s\S]*?)<\/decision>/gi, '');
+    // Remove <decision>...</decision> blocks (any attributes)
+    cleaned = cleaned.replace(/<decision(?:\s[^>]*)?>([\s\S]*?)<\/decision>/gi, '');
     
     // Remove individual plan component tags (in case they appear outside of plan blocks)
     cleaned = cleaned.replace(/<overview>[\s\S]*?<\/overview>/gi, '');
@@ -1438,13 +1530,20 @@ function MessageBubble({ message, onOperationsChange }: {
     cleaned = cleaned.replace(/<old_content>[\s\S]*?<\/old_content>/gi, '');
     cleaned = cleaned.replace(/<new_content>[\s\S]*?<\/new_content>/gi, '');
     
-    // Remove any remaining XML-like tags as fallback (opening and closing pairs)
-    // This catches custom tags like <design-system>, <foo-bar>, etc.
-    // Match pattern: <tag-name [attributes]>content</tag-name> where tag can have hyphens
-    cleaned = cleaned.replace(/<([a-z][a-z0-9\-_]*)(?:\s+[^>]*)?>([\s\S]*?)<\/\1>/gi, '');
-    
-    // Remove standalone opening/closing XML tags that might be left (including hyphenated names)
-    cleaned = cleaned.replace(/<\/?[a-z][a-z0-9\-_]*(?:\s+[^>]*)?\s*\/?>/gi, '');
+    // Remove any remaining known plan component wrapper tags (opening and closing, no content strip)
+    // Only target the specific known tag names to avoid eating real words in the response.
+    const knownTags = ['plan', 'checklist', 'decision', 'overview', 'approach', 'pros', 'cons',
+      'tasks', 'architecture', 'considerations', 'old_content', 'new_content',
+      'create_file', 'edit_file', 'delete_file', 'summary'];
+    const knownTagPattern = knownTags.join('|');
+    // Remove paired known tags that still have content inside
+    cleaned = cleaned.replace(
+      new RegExp(`<(${knownTagPattern})(\\s[^>]*)?>([\\s\\S]*?)<\\/\\1>`, 'gi'), ''
+    );
+    // Remove any leftover standalone opening/closing tags for known names only
+    cleaned = cleaned.replace(
+      new RegExp(`<\\/?(?:${knownTagPattern})(?:\\s[^>]*)?\\s*/?>`, 'gi'), ''
+    );
     
     // Clean up excessive whitespace/newlines that may be left
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
@@ -1506,7 +1605,11 @@ function MessageBubble({ message, onOperationsChange }: {
             <PlanView key={idx} plan={plan} />
           ))}
           {planComponents.checklists.map((checklist, idx) => (
-            <ChecklistView key={idx} checklist={checklist} />
+            <ChecklistView
+              key={idx}
+              checklist={checklist}
+              onImplementInAgent={agentMode === 'plan' ? handleImplementInAgent : undefined}
+            />
           ))}
           {planComponents.decisions.map((decision, idx) => (
             <DecisionView key={idx} decision={decision} />
@@ -1522,8 +1625,75 @@ function MessageBubble({ message, onOperationsChange }: {
       {!isUser && agentMode === 'plan' && actionableTasks.length >= 2 && (
         <ActionableTasksSuggestion 
           tasks={actionableTasks} 
-          onSwitchToAgent={() => setAgentMode('agent')} 
+          onSwitchToAgent={() => handleImplementInAgent(actionableTasks)} 
         />
+      )}
+    </div>
+  );
+}
+
+// ─── Agent Task Progress Panel ────────────────────────────────────────────────
+function AgentTaskProgress({ tasks, onClear }: { tasks: AgentTask[]; onClear: () => void }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const completed = tasks.filter(t => t.status === 'completed').length;
+  const total = tasks.length;
+  const progressPct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const allDone = completed === total;
+
+  return (
+    <div className={`${styles.agentTaskProgress} ${allDone ? styles.agentTaskProgressDone : ''}`}>
+      <div
+        className={styles.agentTaskProgressHeader}
+        onClick={() => setCollapsed(v => !v)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={e => e.key === 'Enter' && setCollapsed(v => !v)}
+      >
+        <div className={styles.agentTaskProgressTitle}>
+          <ListChecks size={13} />
+          <span>Agent Tasks</span>
+          <span className={styles.agentTaskProgressCount}>{completed}/{total}</span>
+          {allDone && <span className={styles.agentTaskDoneLabel}>All done</span>}
+        </div>
+        <div className={styles.agentTaskProgressActions}>
+          {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          <button
+            className={styles.agentTaskClearBtn}
+            onClick={e => { e.stopPropagation(); onClear(); }}
+            title="Clear task list"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      </div>
+
+      <div className={styles.agentTaskProgressBarWrap}>
+        <div
+          className={styles.agentTaskProgressBarFill}
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+
+      {!collapsed && (
+        <div className={styles.agentTaskList}>
+          {tasks.map((task) => (
+            <div
+              key={task.id}
+              className={`${styles.agentTaskItem} ${styles[`agentTaskStatus_${task.status.replace('-', '_')}`]}`}
+            >
+              <span className={styles.agentTaskIcon}>
+                {task.status === 'completed' ? (
+                  <Check size={12} />
+                ) : task.status === 'in-progress' ? (
+                  <Loader size={12} className={styles.agentTaskSpinner} />
+                ) : (
+                  <Circle size={12} />
+                )}
+              </span>
+              <span className={styles.agentTaskText}>{task.text}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -1666,12 +1836,12 @@ function MarkdownRenderer({ content }: { content: string }) {
                 const text = symbolMatch[2];
                 const isChecked = ['☑', '☒', '✓', '✗', '✔', '✅'].includes(symbol);
                 listItems.push(
-                  <li key={idx} className={styles.checklistItem}>
+                  <li key={idx} className={styles.mdChecklistItem}>
                     <input 
                       type="checkbox" 
                       checked={isChecked} 
                       readOnly 
-                      className={styles.checkbox}
+                      className={styles.mdCheckbox}
                     />
                     <span>{renderInline(text)}</span>
                   </li>
@@ -1685,12 +1855,12 @@ function MarkdownRenderer({ content }: { content: string }) {
                 const isChecked = checkboxMatch[1].toLowerCase() === 'x';
                 const text = checkboxMatch[2];
                 listItems.push(
-                  <li key={idx} className={styles.checklistItem}>
+                  <li key={idx} className={styles.mdChecklistItem}>
                     <input 
                       type="checkbox" 
                       checked={isChecked} 
                       readOnly 
-                      className={styles.checkbox}
+                      className={styles.mdCheckbox}
                     />
                     <span>{renderInline(text)}</span>
                   </li>
@@ -1743,24 +1913,15 @@ function MarkdownRenderer({ content }: { content: string }) {
         continue;
       }
 
-      // Headers
-      if (line.startsWith('# ')) {
-        elements.push(<h1 key={key++} className={styles.mdH1}>{renderInline(line.slice(2))}</h1>);
-        i++;
-        continue;
-      }
-      if (line.startsWith('## ')) {
-        elements.push(<h2 key={key++} className={styles.mdH2}>{renderInline(line.slice(3))}</h2>);
-        i++;
-        continue;
-      }
-      if (line.startsWith('### ')) {
-        elements.push(<h3 key={key++} className={styles.mdH3}>{renderInline(line.slice(4))}</h3>);
-        i++;
-        continue;
-      }
-      if (line.startsWith('#### ')) {
-        elements.push(<h4 key={key++} className={styles.mdH4}>{renderInline(line.slice(5))}</h4>);
+      // Headers — match `# ` with optional space so `##✅ Title` and `## Title` both work
+      const headingMatch = line.match(/^(#{1,6})\s*(.*)/);
+      if (headingMatch && headingMatch[2].trim().length > 0) {
+        const level = headingMatch[1].length;
+        const headingContent = renderInline(headingMatch[2].trim());
+        if (level === 1) elements.push(<h1 key={key++} className={styles.mdH1}>{headingContent}</h1>);
+        else if (level === 2) elements.push(<h2 key={key++} className={styles.mdH2}>{headingContent}</h2>);
+        else if (level === 3) elements.push(<h3 key={key++} className={styles.mdH3}>{headingContent}</h3>);
+        else elements.push(<h4 key={key++} className={styles.mdH4}>{headingContent}</h4>);
         i++;
         continue;
       }
@@ -1778,18 +1939,18 @@ function MarkdownRenderer({ content }: { content: string }) {
         while (i < lines.length && lines[i].match(/^[\s]*[-*+]\s/)) {
           const itemContent = lines[i].replace(/^[\s]*[-*+]\s/, '');
           
-          // Check for checkbox syntax: [ ] or [x] or [X]
-          const checkboxMatch = itemContent.match(/^(\[[ xX]\])\s+(.+)$/);
+          // Check for checkbox syntax: [ ] or [x] or [X] (with or without space after bracket)
+          const checkboxMatch = itemContent.match(/^(\[[ xX]\])\s*(.+)$/);
           if (checkboxMatch) {
             const isChecked = checkboxMatch[1].toLowerCase() === '[x]';
             const text = checkboxMatch[2];
             listItems.push(
-              <li key={key++} className={styles.checklistItem}>
+              <li key={key++} className={styles.mdChecklistItem}>
                 <input 
                   type="checkbox" 
                   checked={isChecked} 
                   readOnly 
-                  className={styles.checkbox}
+                  className={styles.mdCheckbox}
                 />
                 <span>{renderInline(text)}</span>
               </li>
@@ -1830,10 +1991,13 @@ function MarkdownRenderer({ content }: { content: string }) {
         continue;
       }
 
-      // Tables - detect lines with | separators (supports both |a|b| and a|b formats)
-      // Check if this line and the next form a table (header + separator pattern)
-      const hasTablePipe = line.includes('|');
+      // Tables - detect lines that look like proper table rows (start with | or have 2+ pipes)
+      const trimmedLine = line.trim();
+      const pipeCount = (line.match(/\|/g) || []).length;
+      // A proper table row must start with | OR have at least 2 | separators in the middle
+      const looksLikeTableRow = trimmedLine.startsWith('|') || pipeCount >= 2;
       const nextLine = i + 1 < lines.length ? lines[i + 1] : '';
+      
       const isSeparatorLine = (l: string): boolean => {
         // Separator can be |---|---| or just ---|---
         const trimmed = l.trim();
@@ -1841,43 +2005,92 @@ function MarkdownRenderer({ content }: { content: string }) {
           ? trimmed.slice(1, -1) 
           : trimmed;
         const cells = withoutOuterPipes.split('|');
-        return cells.length > 0 && cells.every(cell => /^[\s:-]+$/.test(cell) && cell.includes('-'));
+        return cells.length >= 1 && cells.every(cell => /^[\s:-]+$/.test(cell) && cell.includes('-'));
       };
       
-      if (hasTablePipe && isSeparatorLine(nextLine)) {
+      // Check if separator is embedded in current line (malformed AI output like "Header | Col |---|---|")
+      const hasEmbeddedSeparator = /\|[\s:-]*-{2,}[\s:-]*\|/.test(trimmedLine);
+      
+      // Also check if line has a separator-like cell pattern (e.g., "|--------|" at end)
+      const hasTrailingSeparator = /\|-{3,}\|?\s*$/.test(trimmedLine);
+      
+      // Detect table: next line is separator OR current line has embedded separator followed by more table rows
+      const isTableStart = looksLikeTableRow && (
+        isSeparatorLine(nextLine) || 
+        (hasEmbeddedSeparator && pipeCount >= 3) ||
+        (hasTrailingSeparator && pipeCount >= 2)
+      );
+      
+      // Log table detection for debugging
+      if (pipeCount >= 2) {
+        console.log('[MarkdownRenderer] Potential table line:', {
+          line: line.substring(0, 80),
+          pipeCount,
+          looksLikeTableRow,
+          hasEmbeddedSeparator,
+          hasTrailingSeparator,
+          nextLineIsSep: isSeparatorLine(nextLine),
+          isTableStart
+        });
+      }
+      
+      if (isTableStart) {
+        console.log('[MarkdownRenderer] Table detected at line', i, ':', line);
         const tableRows: string[][] = [];
         let hasHeader = false;
         
-        // Helper to parse a table row (handles both |a|b| and a|b formats)
+        // Helper to parse a table row - filters out separator cells (cells that are only dashes/colons)
         const parseTableRow = (row: string): string[] => {
           let trimmed = row.trim();
           // Remove outer pipes if present
           if (trimmed.startsWith('|')) trimmed = trimmed.slice(1);
           if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1);
-          return trimmed.split('|').map(cell => cell.trim());
+          // Split and filter out separator-like cells (only contain -, :, or whitespace)
+          return trimmed.split('|')
+            .map(cell => cell.trim())
+            .filter(cell => !/^[\s:-]*-{2,}[\s:-]*$/.test(cell));
         };
         
-        // Helper to check if line is part of the table
+        // Helper to check if line is part of the table (starts with | or has 2+ pipes)
         const isTableRow = (l: string): boolean => {
-          return l.includes('|');
+          const t = l.trim();
+          return t.startsWith('|') || (l.match(/\|/g) || []).length >= 2;
         };
+        
+        // Helper to check if a cell looks like a separator
+        const isSeparatorCell = (cell: string): boolean => /^[\s:-]*-{2,}[\s:-]*$/.test(cell.trim());
         
         // Collect all table rows
         while (i < lines.length && isTableRow(lines[i])) {
           const row = lines[i];
-          // Check if this is a separator row
+          // Check if this is a pure separator row
           if (isSeparatorLine(row)) {
             hasHeader = tableRows.length > 0;
             i++;
             continue;
           }
-          tableRows.push(parseTableRow(row));
+          
+          // Check if row has embedded separator (malformed output) - extract only data cells
+          const rawCells = row.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+          const dataCells = rawCells.filter(c => !isSeparatorCell(c) && c.length > 0);
+          const hasSeparatorCells = rawCells.some(c => isSeparatorCell(c));
+          
+          if (dataCells.length > 0) {
+            tableRows.push(dataCells);
+          }
+          
+          // If this row had separator cells mixed in, treat rows before as header
+          if (hasSeparatorCells && tableRows.length > 0) {
+            hasHeader = true;
+          }
+          
           i++;
         }
         
         if (tableRows.length > 0) {
           const headerRow = hasHeader ? tableRows[0] : null;
           const bodyRows = hasHeader ? tableRows.slice(1) : tableRows;
+          console.log('[MarkdownRenderer] Rendering table:', { hasHeader, headerRow, bodyRowCount: bodyRows.length });
           
           elements.push(
             <div key={key++} className={styles.tableWrapper}>
@@ -1921,111 +2134,95 @@ function MarkdownRenderer({ content }: { content: string }) {
     return elements;
   };
 
-  const renderInline = (text: string): React.ReactNode => {
-    // Use regex to find all inline patterns and split text accordingly
-    const patterns = [
-      { regex: /`([^`]+)`/g, render: (match: string, content: string, key: number) => 
-        <code key={key} className={styles.inlineCode}>{content}</code> },
-      { regex: /\*\*([^*]+)\*\*/g, render: (match: string, content: string, key: number) => 
-        <strong key={key}>{content}</strong> },
-      { regex: /\*([^*]+)\*/g, render: (match: string, content: string, key: number) => 
-        <em key={key}>{content}</em> },
-      { regex: /\[([^\]]+)\]\(([^)]+)\)/g, render: (match: string, text: string, url: string, key: number) => 
-        <a key={key} href={url} target="_blank" rel="noopener noreferrer">{text}</a> },
-    ];
+  const renderInline = (rawText: string): React.ReactNode => {
+    // Clean up orphaned markers that the model sometimes outputs mid-stream or after list-stripping.
+    // Orphaned ** (odd count) → strip the extra one.
+    // Orphaned ` (odd count outside triple fences) → strip the extra one.
+    let text = rawText;
+    const boldMarkerCount = (text.match(/\*\*/g) || []).length;
+    if (boldMarkerCount % 2 !== 0) {
+      // Remove the last unmatched ** 
+      text = text.replace(/\*\*(?!.*\*\*)/, '');
+    }
+    const backtickCount = (text.match(/(?<!`)`(?!`)/g) || []).length;
+    if (backtickCount % 2 !== 0) {
+      // Remove the last unmatched single backtick
+      text = text.replace(/`(?=[^`]*$)/, '');
+    }
 
-    // Find all matches with their positions
-    interface Match {
+    interface InlineMatch {
       start: number;
       end: number;
       element: React.ReactNode;
     }
-    
-    const matches: Match[] = [];
+
+    const matches: InlineMatch[] = [];
     let key = 0;
 
-    // Inline code `text`
+    const noOverlap = (start: number, end: number) =>
+      !matches.some(m => start < m.end && end > m.start);
+
+    // Inline code `text` — processed first so backticks shield bold/italic inside
     const codeRegex = /`([^`]+)`/g;
-    let match;
-    while ((match = codeRegex.exec(text)) !== null) {
+    let m: RegExpExecArray | null;
+    while ((m = codeRegex.exec(text)) !== null) {
       matches.push({
-        start: match.index,
-        end: match.index + match[0].length,
-        element: <code key={key++} className={styles.inlineCode}>{match[1]}</code>
+        start: m.index,
+        end: m.index + m[0].length,
+        element: <code key={key++} className={styles.inlineCode}>{m[1]}</code>,
       });
     }
 
-    // Bold **text**
-    const boldRegex = /\*\*([^*]+)\*\*/g;
-    while ((match = boldRegex.exec(text)) !== null) {
-      // Check if this overlaps with existing matches
-      const overlaps = matches.some(m => 
-        (match!.index >= m.start && match!.index < m.end) ||
-        (match!.index + match![0].length > m.start && match!.index + match![0].length <= m.end)
-      );
-      if (!overlaps) {
+    // Bold **text** — use .+? (lazy) so * inside content doesn't break the match
+    const boldRegex = /\*\*(.+?)\*\*/g;
+    while ((m = boldRegex.exec(text)) !== null) {
+      if (noOverlap(m.index, m.index + m[0].length)) {
         matches.push({
-          start: match.index,
-          end: match.index + match[0].length,
-          element: <strong key={key++}>{match[1]}</strong>
+          start: m.index,
+          end: m.index + m[0].length,
+          element: <strong key={key++}>{m[1]}</strong>,
         });
       }
     }
 
-    // Italic *text* (but not inside **)
-    const italicRegex = /(?<!\*)\*([^*]+)\*(?!\*)/g;
-    while ((match = italicRegex.exec(text)) !== null) {
-      const overlaps = matches.some(m => 
-        (match!.index >= m.start && match!.index < m.end) ||
-        (match!.index + match![0].length > m.start && match!.index + match![0].length <= m.end)
-      );
-      if (!overlaps) {
+    // Italic *text* — exclude ** (look-ahead/behind)
+    const italicRegex = /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+    while ((m = italicRegex.exec(text)) !== null) {
+      if (noOverlap(m.index, m.index + m[0].length)) {
         matches.push({
-          start: match.index,
-          end: match.index + match[0].length,
-          element: <em key={key++}>{match[1]}</em>
+          start: m.index,
+          end: m.index + m[0].length,
+          element: <em key={key++}>{m[1]}</em>,
         });
       }
     }
 
     // Links [text](url)
     const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-    while ((match = linkRegex.exec(text)) !== null) {
-      const overlaps = matches.some(m => 
-        (match!.index >= m.start && match!.index < m.end) ||
-        (match!.index + match![0].length > m.start && match!.index + match![0].length <= m.end)
-      );
-      if (!overlaps) {
+    while ((m = linkRegex.exec(text)) !== null) {
+      if (noOverlap(m.index, m.index + m[0].length)) {
         matches.push({
-          start: match.index,
-          end: match.index + match[0].length,
-          element: <a key={key++} href={match[2]} target="_blank" rel="noopener noreferrer">{match[1]}</a>
+          start: m.index,
+          end: m.index + m[0].length,
+          element: <a key={key++} href={m[2]} target="_blank" rel="noopener noreferrer">{m[1]}</a>,
         });
       }
     }
 
-    // Sort matches by start position
-    matches.sort((a, b) => a.start - b.start);
+    if (matches.length === 0) return text;
 
-    // Build result
-    if (matches.length === 0) {
-      return text;
-    }
+    matches.sort((a, b) => a.start - b.start);
 
     const parts: React.ReactNode[] = [];
     let lastEnd = 0;
-
-    for (const m of matches) {
-      if (m.start > lastEnd) {
-        parts.push(text.slice(lastEnd, m.start));
-      }
-      parts.push(m.element);
-      lastEnd = m.end;
+    for (const match of matches) {
+      // Skip overlapping matches (can happen with the lazy regexes)
+      if (match.start < lastEnd) continue;
+      if (match.start > lastEnd) parts.push(text.slice(lastEnd, match.start));
+      parts.push(match.element);
+      lastEnd = match.end;
     }
-
-    if (lastEnd < text.length) {
-      parts.push(text.slice(lastEnd));
-    }
+    if (lastEnd < text.length) parts.push(text.slice(lastEnd));
 
     return <>{parts}</>;
   };
@@ -2325,6 +2522,7 @@ export function AIPanel() {
     thinkingStatus,
     promptQueue,
     agentMode,
+    agentTasks,
     createConversation,
     setActiveConversation,
     setAgentMode,
@@ -2333,6 +2531,7 @@ export function AIPanel() {
     clearQueue,
     stopStreaming,
     refreshAvailableModels,
+    clearAgentTasks,
   } = useAIStore();
 
   const { currentWorkspace } = useWorkspaceStore();
@@ -2351,6 +2550,7 @@ export function AIPanel() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const forceScrollRef = useRef(false);
   const { deleteConversation, importConversationsFromPath } = useAIStore();
+  const prevIsStreamingRef = useRef(false);
 
   // Verify and update applied status of pending operations based on actual file state
   useEffect(() => {
@@ -2437,7 +2637,7 @@ export function AIPanel() {
   }, [input, resizeTextarea]);
 
   useEffect(() => {
-    if (config.provider === 'ollama') {
+    if (config.provider === 'ollama' || config.provider === 'copilot') {
       refreshAvailableModels();
     }
   }, [config.provider, refreshAvailableModels]);
@@ -2445,6 +2645,9 @@ export function AIPanel() {
   const isVisionModel = useCallback(() => {
     if (config.provider === 'openai' || config.provider === 'claude') {
       return true; // OpenAI and Claude support vision
+    }
+    if (config.provider === 'copilot') {
+      return true;
     }
     if (config.provider === 'ollama') {
       const modelLower = config.model.toLowerCase();
@@ -2461,7 +2664,8 @@ export function AIPanel() {
     return false;
   }, [config.provider, config.model]);
 
-  const handleAttachClick = () => {
+  const handleAttachClick = async () => {
+    console.log('[AIPanel] handleAttachClick called, isVisionModel:', isVisionModel());
     if (!isVisionModel()) {
       const shouldContinue = window.confirm(
         `⚠️ Vision Support Not Available\n\n` +
@@ -2474,7 +2678,8 @@ export function AIPanel() {
         `• ollama pull bakllava     (BakLLaVA variant)\n` +
         `• ollama pull minicpm-v    (MiniCPM Vision)\n\n` +
         `OpenAI: gpt-4o, gpt-4-turbo\n` +
-        `Claude: Any Claude 3+ model\n\n` +
+        `Claude: Any Claude 3+ model\n` +
+        `Copilot: Any model\n\n` +
         `Do you want to open Settings to change the model?`
       );
       
@@ -2483,66 +2688,285 @@ export function AIPanel() {
       }
       return;
     }
-    fileInputRef.current?.click();
+    
+    // Use Tauri's dialog API for file selection (more reliable than hidden file input in webview)
+    console.log('[AIPanel] Opening file dialog via Tauri API');
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: true,
+        filters: [
+          { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'] },
+          { name: 'Documents', extensions: ['pdf', 'txt', 'md', 'json', 'xml'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      console.log('[AIPanel] Dialog returned:', selected);
+      
+      if (selected) {
+        const paths = Array.isArray(selected) ? selected : [selected];
+        if (paths.length > 0) {
+          await handleFilePathUpload(paths);
+        }
+      }
+    } catch (error) {
+      console.error('[AIPanel] Failed to open file dialog:', error);
+      // Fallback to hidden file input
+      console.log('[AIPanel] Falling back to file input click');
+      fileInputRef.current?.click();
+    }
   };
 
-  const handleFileUpload = async (files: FileList | File[]) => {
+  const uint8ToBase64 = useCallback((bytes: Uint8Array) => {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }, []);
+
+  const getMimeTypeFromName = useCallback((name: string) => {
+    const ext = name.split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'bmp':
+        return 'image/bmp';
+      case 'svg':
+      case 'svgz':
+        return 'image/svg+xml';
+      default:
+        return 'application/octet-stream';
+    }
+  }, []);
+
+  const appendAttachments = useCallback((newAttachments: MessageAttachment[]) => {
+    console.log('[AIPanel] appendAttachments called with', newAttachments.length, 'attachments');
+    newAttachments.forEach(a => console.log('[AIPanel]   -', a.name, a.type));
+    setAttachments((prev) => [...prev, ...newAttachments]);
+  }, []);
+
+  const readFileAsDataUrl = useCallback((file: File) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  const handleFileUpload = useCallback(async (files: FileList | File[]) => {
+    console.log('[AIPanel] handleFileUpload called with', files.length, 'files');
     const fileArray = Array.from(files);
     const newAttachments: MessageAttachment[] = [];
 
     for (const file of fileArray) {
-      const isImage = file.type.startsWith('image/');
+      console.log('[AIPanel] Processing file:', file.name, 'type:', file.type, 'size:', file.size);
+      const mimeType = file.type || getMimeTypeFromName(file.name);
+      const isImage = mimeType.startsWith('image/');
       
       if (isImage) {
-        // Convert image to base64
-        const reader = new FileReader();
-        const base64 = await new Promise<string>((resolve) => {
-          reader.onload = () => resolve(reader.result as string);
-          reader.readAsDataURL(file);
-        });
+        try {
+          if (typeof file.arrayBuffer === 'function') {
+            const buffer = await file.arrayBuffer();
+            const base64 = uint8ToBase64(new Uint8Array(buffer));
+            const dataUrl = `data:${mimeType};base64,${base64}`;
+            newAttachments.push({
+              id: crypto.randomUUID(),
+              type: 'image',
+              name: file.name,
+              data: dataUrl,
+              mimeType,
+              size: file.size,
+            });
+          } else {
+            const dataUrl = await readFileAsDataUrl(file);
+            newAttachments.push({
+              id: crypto.randomUUID(),
+              type: 'image',
+              name: file.name,
+              data: dataUrl,
+              mimeType,
+              size: file.size,
+            });
+          }
+        } catch (error) {
+          console.error('Failed to read image attachment:', error);
+          newAttachments.push({
+            id: crypto.randomUUID(),
+            type: 'file',
+            name: file.name,
+            mimeType,
+            size: file.size,
+          });
+        }
 
-        newAttachments.push({
-          id: crypto.randomUUID(),
-          type: 'image',
-          name: file.name,
-          data: base64,
-          mimeType: file.type,
-          size: file.size,
-        });
       } else {
         // For other files, just store metadata
         newAttachments.push({
           id: crypto.randomUUID(),
           type: 'file',
           name: file.name,
-          mimeType: file.type,
+          mimeType,
           size: file.size,
         });
       }
     }
 
-    setAttachments([...attachments, ...newAttachments]);
-  };
+    appendAttachments(newAttachments);
+  }, [appendAttachments, getMimeTypeFromName, readFileAsDataUrl, uint8ToBase64]);
+
+  const handleFilePathUpload = useCallback(async (paths: string[]) => {
+    console.log('[AIPanel] handleFilePathUpload called with paths:', paths);
+    if (paths.length === 0) {
+      console.log('[AIPanel] handleFilePathUpload: no paths, returning');
+      return;
+    }
+    const { readFile } = await import('@tauri-apps/plugin-fs');
+    const newAttachments: MessageAttachment[] = [];
+
+    for (const path of paths) {
+      try {
+        console.log('[AIPanel] Processing path:', path);
+        const info = await fs.getFileInfo(path);
+        console.log('[AIPanel] File info:', info);
+        if (!info.is_file) {
+          console.log('[AIPanel] Skipping non-file:', path);
+          continue;
+        }
+
+        const name = path.split('/').pop() || path;
+        const mimeType = getMimeTypeFromName(name);
+        const isImage = mimeType.startsWith('image/');
+        console.log('[AIPanel] File name:', name, 'mimeType:', mimeType, 'isImage:', isImage);
+
+        if (isImage) {
+          console.log('[AIPanel] Reading image file...');
+          const bytes = await readFile(path);
+          console.log('[AIPanel] Read bytes:', bytes?.length || bytes?.byteLength);
+          const uint8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          const base64 = uint8ToBase64(uint8);
+          const dataUrl = `data:${mimeType};base64,${base64}`;
+          console.log('[AIPanel] Created dataUrl, length:', dataUrl.length);
+
+          newAttachments.push({
+            id: crypto.randomUUID(),
+            type: 'image',
+            name,
+            data: dataUrl,
+            mimeType,
+            size: info.size,
+          });
+        } else {
+          newAttachments.push({
+            id: crypto.randomUUID(),
+            type: 'file',
+            name,
+            mimeType,
+            size: info.size,
+          });
+        }
+        console.log('[AIPanel] Successfully processed file:', name);
+      } catch (error) {
+        console.error('[AIPanel] Failed to read dropped file:', path, error);
+      }
+    }
+
+    if (newAttachments.length > 0) {
+      appendAttachments(newAttachments);
+    }
+  }, [appendAttachments, fs, getMimeTypeFromName, uint8ToBase64]);
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDragging(true);
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDragging(false);
   };
 
-  const handleDrop = async (e: React.DragEvent) => {
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDragging(false);
-    
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      await handleFileUpload(files);
-    }
+    // Don't process files here - Tauri's native drag-drop handles file processing
+    // This handler only manages visual state
   };
+
+  useEffect(() => {
+    let unlistenDrop: (() => void) | null = null;
+    let unlistenHover: (() => void) | null = null;
+    let unlistenCancel: (() => void) | null = null;
+
+    const setup = async () => {
+      console.log('[AIPanel] Setting up Tauri native file drop listeners');
+      unlistenDrop = await appEvents.onFileDrop(async (paths) => {
+        console.log('[AIPanel] Tauri file-drop event received, paths:', paths);
+        setIsDragging(false);
+        await handleFilePathUpload(paths);
+      });
+      unlistenHover = await appEvents.onFileDropHover((paths) => {
+        console.log('[AIPanel] Tauri file-drop-hover event, paths:', paths);
+        setIsDragging(true);
+      });
+      unlistenCancel = await appEvents.onFileDropCancel(() => {
+        console.log('[AIPanel] Tauri file-drop-cancelled event');
+        setIsDragging(false);
+      });
+      console.log('[AIPanel] Tauri native file drop listeners set up');
+    };
+
+    setup();
+
+    return () => {
+      unlistenDrop?.();
+      unlistenHover?.();
+      unlistenCancel?.();
+    };
+  }, [handleFilePathUpload]);
+
+  useEffect(() => {
+    // Only handle visual feedback for drag state
+    // File processing is done by Tauri's native drag-drop events
+    const handleWindowDragOver = (event: DragEvent) => {
+      event.preventDefault();
+      setIsDragging(true);
+    };
+    const handleWindowDragLeave = (event: DragEvent) => {
+      event.preventDefault();
+      if (event.target === document.documentElement) {
+        setIsDragging(false);
+      }
+    };
+    const handleWindowDrop = (event: DragEvent) => {
+      event.preventDefault();
+      setIsDragging(false);
+      // Don't process files here - Tauri's native drag-drop handles it
+    };
+
+    window.addEventListener('dragover', handleWindowDragOver, true);
+    window.addEventListener('dragleave', handleWindowDragLeave, true);
+    window.addEventListener('drop', handleWindowDrop, true);
+
+    return () => {
+      window.removeEventListener('dragover', handleWindowDragOver, true);
+      window.removeEventListener('dragleave', handleWindowDragLeave, true);
+      window.removeEventListener('drop', handleWindowDrop, true);
+    };
+  }, []);
 
   const removeAttachment = (id: string) => {
     setAttachments(attachments.filter(a => a.id !== id));
@@ -2606,13 +3030,19 @@ export function AIPanel() {
       }
 
       try {
-        const fullPath = `${currentWorkspace.rootPath}/${item.operation.path}`;
+        // Normalize paths: remove leading slashes from operation path, normalize double slashes
+        const normalizedOpPath = item.operation.path.replace(/^\/+/, '');
+        const fullPath = `${currentWorkspace.rootPath}/${normalizedOpPath}`.replace(/\/+/g, '/');
+        console.log(`[FileOps] Workspace root: ${currentWorkspace.rootPath}`);
+        console.log(`[FileOps] Operation path (raw): ${item.operation.path}`);
+        console.log(`[FileOps] Operation path (normalized): ${normalizedOpPath}`);
+        console.log(`[FileOps] Full path: ${fullPath}`);
         
         if (item.operation.type === 'create') {
           // Check if file already exists
           const fileExists = await fs.pathExists(fullPath);
           if (fileExists) {
-            console.log(`File already exists, skipping: ${item.operation.path}`);
+            console.log(`[FileOps] File already exists, skipping: ${item.operation.path}`);
             // Mark as applied even though we skipped it
             updatedOps[i] = { ...updatedOps[i], applied: true };
             skippedCount++;
@@ -2621,7 +3051,23 @@ export function AIPanel() {
           
           // Ensure parent directory exists
           await ensureParentDir(fullPath, item.operation.path);
+          console.log(`[FileOps] Writing file: ${fullPath} (${(item.operation.content || '').length} bytes)`);
           await fs.writeFile(fullPath, item.operation.content || '');
+          // Verify write succeeded by checking file exists now
+          const verifyExists = await fs.pathExists(fullPath);
+          console.log(`[FileOps] Write complete: ${fullPath}, verified exists: ${verifyExists}`);
+          // Read back the file to double-verify it was written
+          try {
+            const readBack = await fs.readFile(fullPath);
+            const bytesWritten = (item.operation.content || '').length;
+            const bytesRead = readBack.length;
+            console.log(`[FileOps] Verification: wrote ${bytesWritten} bytes, read back ${bytesRead} bytes`);
+            if (bytesRead !== bytesWritten) {
+              console.warn(`[FileOps] WARNING: Byte mismatch! File may not have been written correctly.`);
+            }
+          } catch (readErr) {
+            console.error(`[FileOps] FAILED to read back file - it may not have been created:`, readErr);
+          }
           // Save to local history
           await history.save(item.operation.path, item.operation.content || '').catch(console.error);
           await openFile(fullPath);
@@ -2669,8 +3115,9 @@ export function AIPanel() {
     markFileOperationsAsKept(operationIds);
 
     if (successCount > 0) {
+      console.log(`[FileOps] SUCCESS: Applied ${successCount} file(s) to: ${currentWorkspace.rootPath}`);
       window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: { message: `Applied ${successCount} file operation(s)${skippedCount > 0 ? `, skipped ${skippedCount} already applied` : ''}`, type: 'success' }
+        detail: { message: `Applied ${successCount} file(s) to ${currentWorkspace.rootPath}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`, type: 'success' }
       }));
     } else if (skippedCount > 0) {
       window.dispatchEvent(new CustomEvent('show-notification', {
@@ -2678,6 +3125,20 @@ export function AIPanel() {
       }));
     }
   };
+
+  // Auto-apply file operations when streaming ends in agent mode
+  useEffect(() => {
+    const wasStreaming = prevIsStreamingRef.current;
+    prevIsStreamingRef.current = isStreaming;
+
+    if (wasStreaming && !isStreaming && agentMode === 'agent') {
+      const pending = allPendingOps.filter(op => !op.applied);
+      if (pending.length === 0) return;
+      // Small delay to let parseFileOperations finish updating allPendingOps state
+      setTimeout(() => { handleKeepAllOperations(); }, 400);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStreaming]);
 
   const handleUndoAllOperations = () => {
     setAllPendingOps([]);
@@ -2735,28 +3196,34 @@ export function AIPanel() {
     };
 
     try {
-      const fullPath = `${currentWorkspace.rootPath}/${item.operation.path}`;
+      // Normalize paths: remove leading slashes from operation path, normalize double slashes
+      const normalizedOpPath = item.operation.path.replace(/^\/+/, '');
+      const fullPath = `${currentWorkspace.rootPath}/${normalizedOpPath}`.replace(/\/+/g, '/');
+      console.log(`[FileOps] Single accept - full path: ${fullPath}`);
       
       if (item.operation.type === 'create') {
         // Check if file already exists
         const fileExists = await fs.pathExists(fullPath);
         if (fileExists) {
-          console.log(`File already exists, skipping: ${item.operation.path}`);
+          console.log(`[FileOps] File already exists, skipping: ${normalizedOpPath}`);
           // Mark as applied even though we skipped it
           setAllPendingOps(prev => prev.map((op, idx) => 
             idx === index ? { ...op, applied: true } : op
           ));
           window.dispatchEvent(new CustomEvent('show-notification', {
-            detail: { message: `File already exists: ${item.operation.path}`, type: 'info' }
+            detail: { message: `File already exists: ${normalizedOpPath}`, type: 'info' }
           }));
           return;
         }
         
         // Ensure parent directory exists
-        await ensureParentDir(fullPath, item.operation.path);
+        await ensureParentDir(fullPath, normalizedOpPath);
+        console.log(`[FileOps] Writing file: ${fullPath}`);
         await fs.writeFile(fullPath, item.operation.content || '');
+        const verifyExists = await fs.pathExists(fullPath);
+        console.log(`[FileOps] Write complete, verified: ${verifyExists}`);
         // Save to local history
-        await history.save(item.operation.path, item.operation.content || '').catch(console.error);
+        await history.save(normalizedOpPath, item.operation.content || '').catch(console.error);
         await openFile(fullPath);
       } else if (item.operation.type === 'edit') {
         if (item.operation.mode === 'replace' && item.operation.oldContent && item.operation.newContent) {
@@ -2818,7 +3285,8 @@ export function AIPanel() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    // Allow submission if there's text OR attachments
+    if (!input.trim() && attachments.length === 0) return;
 
     const message = input;
     const messageAttachments = attachments;
@@ -3023,6 +3491,12 @@ export function AIPanel() {
                 </div>
               </div>
             )}
+            {agentMode === 'agent' && agentTasks.length > 0 && (
+              <AgentTaskProgress
+                tasks={agentTasks}
+                onClear={clearAgentTasks}
+              />
+            )}
             {activeConversation.messages.map((message) => (
               <MessageBubble 
                 key={message.id} 
@@ -3113,36 +3587,6 @@ export function AIPanel() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        {attachments.length > 0 && (
-          <div className={styles.attachments}>
-            {attachments.map((attachment) => (
-              <div key={attachment.id} className={styles.attachmentItem}>
-                {attachment.type === 'image' ? (
-                  <div className={styles.attachmentPreview}>
-                    <img src={attachment.data} alt={attachment.name} className={styles.attachmentImage} />
-                    <div className={styles.attachmentOverlay}>
-                      <ImageIcon size={16} />
-                      <span className={styles.attachmentName}>{attachment.name}</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className={styles.attachmentFile}>
-                    <Paperclip size={16} />
-                    <span className={styles.attachmentName}>{attachment.name}</span>
-                  </div>
-                )}
-                <button
-                  type="button"
-                  className={styles.removeAttachment}
-                  onClick={() => removeAttachment(attachment.id)}
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
         <form 
           className={styles.inputArea} 
           onSubmit={handleSubmit}
@@ -3156,12 +3600,43 @@ export function AIPanel() {
             multiple
             accept="image/*,application/pdf,.txt,.md,.json,.xml"
             style={{ display: 'none' }}
-            onChange={(e) => {
-              if (e.target.files) {
-                handleFileUpload(e.target.files);
+            onChange={async (e) => {
+              console.log('[AIPanel] File input onChange triggered, files:', e.target.files);
+              if (e.target.files && e.target.files.length > 0) {
+                await handleFileUpload(e.target.files);
+                e.target.value = '';
               }
             }}
           />
+          {attachments.length > 0 && (
+            <div className={styles.attachments}>
+              {attachments.map((attachment) => (
+                <div key={attachment.id} className={styles.attachmentItem}>
+                  {attachment.type === 'image' ? (
+                    <div className={styles.attachmentPreview}>
+                      <img src={attachment.data} alt={attachment.name} className={styles.attachmentImage} />
+                      <div className={styles.attachmentOverlay}>
+                        <ImageIcon size={16} />
+                        <span className={styles.attachmentName}>{attachment.name}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className={styles.attachmentFile}>
+                      <Paperclip size={16} />
+                      <span className={styles.attachmentName}>{attachment.name}</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className={styles.removeAttachment}
+                    onClick={() => removeAttachment(attachment.id)}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             className={styles.input}
@@ -3243,7 +3718,7 @@ export function AIPanel() {
               <button
                 type={isStreaming ? "button" : "submit"}
                 className={styles.sendBtn}
-                disabled={!isStreaming && !input.trim()}
+                disabled={!isStreaming && !input.trim() && attachments.length === 0}
                 onClick={isStreaming ? stopStreaming : undefined}
                 title={isStreaming ? 'Stop generating' : (promptQueue.length > 0 ? 'Queue prompt' : 'Send message')}
               >
@@ -3333,8 +3808,230 @@ export function AIPanel() {
   );
 }
 
+type CopilotDeviceCode = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in: number;
+  interval: number;
+};
+
+type CopilotUsageInfo = {
+  total: number;
+  added_this_cycle: number;
+  pending_cancellation: number;
+  pending_invitation: number;
+  active_this_cycle: number;
+  inactive_this_cycle: number;
+  seat_management_setting?: string;
+  plan_type?: string;
+};
+
 function AISettings({ onClose }: { onClose: () => void }) {
   const { config, setConfig, availableModels, refreshAvailableModels } = useAIStore();
+  const [copilotLoggedIn, setCopilotLoggedIn] = useState<boolean | null>(null);
+  const [copilotDevice, setCopilotDevice] = useState<CopilotDeviceCode | null>(null);
+  const [copilotPolling, setCopilotPolling] = useState(false);
+  const [copilotError, setCopilotError] = useState<string | null>(null);
+  const [copilotUsage, setCopilotUsage] = useState<CopilotUsageInfo | null>(null);
+  const [copilotUsageError, setCopilotUsageError] = useState<string | null>(null);
+  const [copilotUsageLoading, setCopilotUsageLoading] = useState(false);
+  const [copilotOrgs, setCopilotOrgs] = useState<string[]>([]);
+  const [copilotOrgsError, setCopilotOrgsError] = useState<string | null>(null);
+  const [copilotOrgsLoading, setCopilotOrgsLoading] = useState(false);
+
+  useEffect(() => {
+    let isActive = true;
+    if (config.provider !== 'copilot') {
+      setCopilotDevice(null);
+      setCopilotPolling(false);
+      setCopilotError(null);
+      setCopilotLoggedIn(null);
+      setCopilotUsage(null);
+      setCopilotUsageError(null);
+      setCopilotUsageLoading(false);
+      setCopilotOrgs([]);
+      setCopilotOrgsError(null);
+      setCopilotOrgsLoading(false);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    ai.copilotLoginStatus()
+      .then((status) => {
+        if (isActive) {
+          setCopilotLoggedIn(status.logged_in);
+        }
+      })
+      .catch(() => {
+        if (isActive) {
+          setCopilotLoggedIn(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [config.provider]);
+
+  useEffect(() => {
+    let isActive = true;
+    if (config.provider !== 'copilot' || !copilotLoggedIn) {
+      setCopilotOrgs([]);
+      setCopilotOrgsError(null);
+      setCopilotOrgsLoading(false);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const loadOrgs = async () => {
+      setCopilotOrgsError(null);
+      setCopilotOrgsLoading(true);
+      try {
+        const orgs = await ai.copilotListOrgs();
+        if (!isActive) return;
+        setCopilotOrgs(orgs);
+        if (!config.copilotUsageOrg && orgs.length > 0) {
+          setConfig({ copilotUsageOrg: orgs[0] });
+        }
+      } catch (error) {
+        const message = error instanceof Error
+          ? error.message
+          : typeof error === 'string'
+          ? error
+          : 'Failed to load organizations.';
+        if (isActive) {
+          setCopilotOrgsError(message);
+        }
+      } finally {
+        if (isActive) {
+          setCopilotOrgsLoading(false);
+        }
+      }
+    };
+
+    loadOrgs();
+
+    return () => {
+      isActive = false;
+    };
+  }, [config.provider, copilotLoggedIn, config.copilotUsageOrg, setConfig]);
+
+  const handleCopilotOrgsLoad = async () => {
+    setCopilotOrgsError(null);
+    setCopilotOrgsLoading(true);
+    try {
+      const orgs = await ai.copilotListOrgs();
+      setCopilotOrgs(orgs);
+      if (!config.copilotUsageOrg && orgs.length > 0) {
+        setConfig({ copilotUsageOrg: orgs[0] });
+      }
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to load organizations.';
+      setCopilotOrgsError(message);
+    } finally {
+      setCopilotOrgsLoading(false);
+    }
+  };
+
+  const handleCopilotLogin = async () => {
+    setCopilotError(null);
+    setCopilotDevice(null);
+    setCopilotPolling(false);
+
+    try {
+      const device = await ai.copilotDeviceLoginStart(config.copilotClientId || undefined);
+      setCopilotDevice(device);
+
+      const verificationUrl = device.verification_uri_complete || device.verification_uri;
+      if (verificationUrl) {
+        await shell.openExternal(verificationUrl);
+      }
+
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(device.user_code);
+        } catch {
+          // Ignore clipboard failures
+        }
+      }
+
+      setCopilotPolling(true);
+      await ai.copilotDeviceLoginPoll(
+        device.device_code,
+        device.interval,
+        device.expires_in,
+        config.copilotClientId || undefined
+      );
+      setCopilotLoggedIn(true);
+      setCopilotDevice(null);
+      refreshAvailableModels();
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to connect to Copilot';
+      setCopilotError(errorMessage);
+      setCopilotLoggedIn(false);
+    } finally {
+      setCopilotPolling(false);
+    }
+  };
+
+  const handleCopilotLogout = async () => {
+    setCopilotError(null);
+    try {
+      await ai.copilotDeviceLogout();
+      setCopilotLoggedIn(false);
+      setCopilotDevice(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to disconnect Copilot';
+      setCopilotError(errorMessage);
+    }
+  };
+
+  const handleCopilotCopyCode = async () => {
+    if (!copilotDevice?.user_code || !navigator.clipboard?.writeText) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(copilotDevice.user_code);
+    } catch {
+      // Ignore clipboard failures
+    }
+  };
+
+  const handleCopilotUsageLoad = async () => {
+    setCopilotUsageError(null);
+    setCopilotUsageLoading(true);
+    try {
+      const org = config.copilotUsageOrg || '';
+      const usage = await ai.copilotBillingInfo(org);
+      setCopilotUsage(usage);
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to load Copilot usage.';
+      setCopilotUsageError(message);
+      setCopilotUsage(null);
+    } finally {
+      setCopilotUsageLoading(false);
+    }
+  };
 
   return (
     <div className={styles.settingsContent}>
@@ -3358,9 +4055,172 @@ function AISettings({ onClose }: { onClose: () => void }) {
             <option value="ollama">Ollama (Local)</option>
             <option value="claude">Claude (Anthropic)</option>
             <option value="openai">OpenAI</option>
+            <option value="copilot">GitHub Copilot</option>
             <option value="custom">Custom Endpoint</option>
           </select>
         </div>
+
+        {config.provider === 'copilot' && (
+          <>
+            <div className={styles.settingGroup}>
+              <label>GitHub Copilot</label>
+              <div className={styles.copilotStatusRow}>
+                <span
+                  className={`${styles.copilotStatus} ${
+                    copilotLoggedIn ? styles.copilotConnected : styles.copilotDisconnected
+                  }`}
+                >
+                  {copilotLoggedIn ? 'Connected' : 'Not connected'}
+                </span>
+                {copilotLoggedIn ? (
+                  <button
+                    className={styles.copilotButton}
+                    onClick={handleCopilotLogout}
+                    type="button"
+                  >
+                    Sign out
+                  </button>
+                ) : (
+                  <button
+                    className={styles.copilotButton}
+                    onClick={handleCopilotLogin}
+                    type="button"
+                  >
+                    Sign in
+                  </button>
+                )}
+              </div>
+              {copilotDevice && (
+                <div className={styles.copilotDeviceBox}>
+                  <div className={styles.copilotDeviceRow}>
+                    <span className={styles.copilotDeviceCode}>{copilotDevice.user_code}</span>
+                    <button
+                      className={styles.copilotButton}
+                      onClick={handleCopilotCopyCode}
+                      type="button"
+                    >
+                      Copy code
+                    </button>
+                    <button
+                      className={styles.copilotButton}
+                      onClick={() => shell.openExternal(copilotDevice.verification_uri_complete || copilotDevice.verification_uri)}
+                      type="button"
+                    >
+                      Open GitHub
+                    </button>
+                  </div>
+                  <p className={styles.settingHint}>
+                    Enter the code at GitHub to finish connecting.
+                    {copilotPolling ? ' Waiting for authorization...' : ''}
+                  </p>
+                </div>
+              )}
+              {!copilotDevice && copilotPolling && (
+                <p className={styles.settingHint}>Waiting for authorization...</p>
+              )}
+              {copilotError && <p className={styles.copilotError}>{copilotError}</p>}
+            </div>
+            <div className={styles.settingGroup}>
+              <label>OAuth Client ID (optional)</label>
+              <input
+                type="text"
+                value={config.copilotClientId || ''}
+                onChange={(e) => setConfig({ copilotClientId: e.target.value })}
+                placeholder="Leave empty to use the default"
+              />
+              <p className={styles.settingHint}>
+                If you see a "Not Found" error, provide a GitHub OAuth app client ID with device flow enabled.
+              </p>
+            </div>
+            <div className={styles.settingGroup}>
+              <label>Quota usage (organization)</label>
+              {copilotOrgs.length > 0 ? (
+                <select
+                  value={config.copilotUsageOrg || ''}
+                  onChange={(e) => setConfig({ copilotUsageOrg: e.target.value })}
+                >
+                  {copilotOrgs.map((org) => (
+                    <option key={org} value={org}>
+                      {org}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={config.copilotUsageOrg || ''}
+                  onChange={(e) => setConfig({ copilotUsageOrg: e.target.value })}
+                  placeholder="Organization name (e.g. my-org)"
+                />
+              )}
+              {!copilotOrgsLoading && copilotOrgs.length === 0 && !copilotOrgsError && (
+                <p className={styles.settingHint}>
+                  No admin-owned organizations found for this account.
+                </p>
+              )}
+              <div className={styles.copilotUsageActions}>
+                <button
+                  className={styles.copilotButton}
+                  onClick={handleCopilotUsageLoad}
+                  type="button"
+                  disabled={copilotUsageLoading}
+                >
+                  {copilotUsageLoading ? 'Loading usage...' : 'Load usage'}
+                </button>
+                <button
+                  className={styles.copilotButton}
+                  onClick={handleCopilotOrgsLoad}
+                  type="button"
+                  disabled={copilotOrgsLoading}
+                >
+                  {copilotOrgsLoading ? 'Loading orgs...' : 'Reload orgs'}
+                </button>
+              </div>
+              {copilotOrgsError && <p className={styles.copilotError}>{copilotOrgsError}</p>}
+              {copilotUsageError && <p className={styles.copilotError}>{copilotUsageError}</p>}
+              {copilotUsage && (
+                <div className={styles.copilotUsageBox}>
+                  <div className={styles.copilotUsageRow}>
+                    <span>Total seats</span>
+                    <span>{copilotUsage.total}</span>
+                  </div>
+                  <div className={styles.copilotUsageRow}>
+                    <span>Active this cycle</span>
+                    <span>{copilotUsage.active_this_cycle}</span>
+                  </div>
+                  <div className={styles.copilotUsageRow}>
+                    <span>Inactive this cycle</span>
+                    <span>{copilotUsage.inactive_this_cycle}</span>
+                  </div>
+                  <div className={styles.copilotUsageRow}>
+                    <span>Added this cycle</span>
+                    <span>{copilotUsage.added_this_cycle}</span>
+                  </div>
+                  <div className={styles.copilotUsageRow}>
+                    <span>Pending invitations</span>
+                    <span>{copilotUsage.pending_invitation}</span>
+                  </div>
+                  <div className={styles.copilotUsageRow}>
+                    <span>Pending cancellations</span>
+                    <span>{copilotUsage.pending_cancellation}</span>
+                  </div>
+                  {(copilotUsage.plan_type || copilotUsage.seat_management_setting) && (
+                    <div className={styles.copilotUsageMeta}>
+                      {copilotUsage.plan_type && <span>Plan: {copilotUsage.plan_type}</span>}
+                      {copilotUsage.seat_management_setting && (
+                        <span>Seat management: {copilotUsage.seat_management_setting}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              <p className={styles.settingHint}>
+                Uses the GitHub Copilot billing API for org owners. If you signed in before this update,
+                sign out and sign in again to grant read:org access. Only admin-owned orgs are shown.
+              </p>
+            </div>
+          </>
+        )}
 
         <div className={styles.settingGroup}>
           <label>Model</label>
@@ -3375,8 +4235,12 @@ function AISettings({ onClose }: { onClose: () => void }) {
                 </option>
               ))}
             </select>
-            {config.provider === 'ollama' && (
-              <button onClick={refreshAvailableModels} title="Refresh models">
+            {(config.provider === 'ollama' || config.provider === 'copilot') && (
+              <button
+                onClick={refreshAvailableModels}
+                title={config.provider === 'copilot' && !copilotLoggedIn ? 'Connect Copilot to load models' : 'Refresh models'}
+                disabled={config.provider === 'copilot' && !copilotLoggedIn}
+              >
                 <RefreshCw size={14} />
               </button>
             )}
@@ -3429,9 +4293,14 @@ function AISettings({ onClose }: { onClose: () => void }) {
               ✅ Vision support available - attach images using the attach button
             </p>
           )}
+          {config.provider === 'copilot' && (
+            <p className={styles.settingHint}>
+              ✅ Vision support available - attach images using the attach button
+            </p>
+          )}
         </div>
 
-        {config.provider !== 'ollama' && (
+        {(config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') && (
           <div className={styles.settingGroup}>
             <label>API Key</label>
             <input

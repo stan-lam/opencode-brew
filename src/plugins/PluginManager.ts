@@ -3,6 +3,16 @@ import { useEditorStore } from '../store/editorStore';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { fs } from '../services/tauri';
 
+async function getPluginsDir(workspacePath: string): Promise<string> {
+  try {
+    const appDataDir = await fs.getAppDataDir();
+    const slug = workspacePath.replace(/[\\/: ]+/g, '_').replace(/^_+/, '');
+    return `${appDataDir}/workspaces/${slug}/plugins`;
+  } catch {
+    return `${workspacePath}/.opencodebrew/plugins`;
+  }
+}
+
 class PluginManagerClass {
   private plugins: Map<string, Plugin> = new Map();
   private commands: Map<string, (...args: any[]) => any> = new Map();
@@ -188,7 +198,7 @@ class PluginManagerClass {
 
   // Load plugins from the workspace plugins directory
   async loadPluginsFromDirectory(workspacePath: string): Promise<void> {
-    const pluginsDir = `${workspacePath}/.opencodebrew/plugins`;
+    const pluginsDir = await getPluginsDir(workspacePath);
     
     try {
       const exists = await fs.pathExists(pluginsDir);
@@ -256,7 +266,7 @@ class PluginManagerClass {
 
   // Install a plugin from a URL or path
   async installPlugin(source: string, workspacePath: string): Promise<boolean> {
-    const pluginsDir = `${workspacePath}/.opencodebrew/plugins`;
+    const pluginsDir = await getPluginsDir(workspacePath);
     
     try {
       // Ensure plugins directory exists

@@ -311,6 +311,118 @@
   line-height: 1.4;
 }
 
+.copilotStatusRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.copilotStatus {
+  font-size: var(--font-size-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-tertiary);
+}
+
+.copilotConnected {
+  color: var(--accent-blue);
+  background-color: rgba(0, 122, 204, 0.15);
+}
+
+.copilotDisconnected {
+  color: var(--text-muted);
+}
+
+.copilotButton {
+  padding: 4px 10px;
+  font-size: var(--font-size-xs);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.copilotButton:hover {
+  background-color: var(--bg-hover);
+}
+
+.copilotButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.copilotDeviceBox {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.copilotDeviceRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.copilotDeviceCode {
+  font-family: var(--font-family-code);
+  font-size: var(--font-size-sm);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.copilotError {
+  margin-top: 4px;
+  font-size: var(--font-size-xs);
+  color: var(--error-color);
+}
+
+.copilotUsageBox {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.copilotUsageRow {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.copilotUsageRow span:last-child {
+  color: var(--text-primary);
+}
+
+.copilotUsageActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.copilotUsageMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
 .warningBox {
   display: flex;
   gap: 12px;
@@ -767,7 +879,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .attachmentItem {
@@ -1103,8 +1215,8 @@
   color: var(--text-muted);
 }
 
-/* Checklist items */
-.checklistItem {
+/* Markdown inline checklist items (- [ ] syntax in markdown) */
+.mdChecklistItem {
   list-style: none !important;
   display: flex;
   align-items: flex-start;
@@ -1113,7 +1225,7 @@
   padding-left: 0;
 }
 
-.checkbox {
+.mdCheckbox {
   margin-top: 3px;
   width: 16px;
   height: 16px;
@@ -1122,7 +1234,7 @@
   flex-shrink: 0;
 }
 
-.checklistItem span {
+.mdChecklistItem span {
   flex: 1;
 }
 
@@ -2304,20 +2416,27 @@
   border-radius: var(--radius-md);
   background-color: var(--bg-secondary);
   overflow: hidden;
+  margin: 4px 0;
 }
 
 .checklistHeader {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
-  background-color: rgba(76, 175, 80, 0.1);
+  justify-content: space-between;
+  padding: 10px 14px;
+  background-color: rgba(0, 122, 204, 0.08);
   border-bottom: 1px solid var(--border-color);
 }
 
+.checklistHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .checklistIcon {
-  font-size: 20px;
-  color: #4caf50;
+  color: var(--accent-blue, #007acc);
+  flex-shrink: 0;
 }
 
 .checklistTitle {
@@ -2327,19 +2446,48 @@
   color: var(--text-primary);
 }
 
+.checklistProgress {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.checklistProgressBar {
+  height: 2px;
+  background: var(--border-color);
+}
+
+.checklistProgressFill {
+  height: 100%;
+  background: var(--accent-blue, #007acc);
+  transition: width 0.3s ease;
+  border-radius: 1px;
+}
+
 .checklistItems {
   list-style: none;
-  padding: 12px;
+  padding: 6px 8px;
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .checklistItem {
   display: flex;
+  flex-direction: row;
   align-items: flex-start;
-  gap: 8px;
-  padding: 8px;
-  border-radius: var(--radius-sm);
-  transition: background-color 0.15s ease;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+  user-select: none;
 }
 
 .checklistItem:hover {
@@ -2347,15 +2495,85 @@
 }
 
 .checklistCheckbox {
-  margin-top: 2px;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  max-width: 16px;
+  max-height: 16px;
+  margin: 2px 0 0 0;
+  padding: 0;
+  border: 1.5px solid var(--border-color, #4a4a4a);
+  border-radius: 4px;
+  background: transparent;
   cursor: pointer;
   flex-shrink: 0;
+  position: relative;
+  transition: all 0.15s ease;
 }
 
-.checklistItem span {
+.checklistCheckbox:checked {
+  background: var(--accent-blue, #007acc);
+  border-color: var(--accent-blue, #007acc);
+}
+
+.checklistCheckbox:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.checklistCheckbox:hover {
+  border-color: var(--accent-blue, #007acc);
+}
+
+.checklistItemText {
+  flex: 1;
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
   line-height: 1.5;
+  transition: all 0.15s ease;
+}
+
+.checklistItemDone .checklistItemText {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.checklistFooter {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.checklistImplementBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-blue, #007acc);
+  background: rgba(0, 122, 204, 0.1);
+  border: 1px solid rgba(0, 122, 204, 0.25);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.checklistImplementBtn:hover {
+  background: rgba(0, 122, 204, 0.18);
+  border-color: rgba(0, 122, 204, 0.4);
+  color: #3794ff;
 }
 
 /* Decision */
@@ -2880,4 +3098,171 @@
   color: #f44336;
 }
 
+/* ── Agent Task Progress Panel ───────────────────────────────────────────── */
+.agentTaskProgress {
+  margin: 8px 12px 4px;
+  border: 1px solid rgba(0, 122, 204, 0.3);
+  border-radius: 8px;
+  background: rgba(0, 122, 204, 0.06);
+  overflow: hidden;
+  flex-shrink: 0;
+}
 
+.agentTaskProgressDone {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.06);
+}
+
+.agentTaskProgressHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.agentTaskProgressHeader:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.agentTaskProgressTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #aaa);
+}
+
+.agentTaskProgressCount {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted, #888);
+  background: rgba(255, 255, 255, 0.07);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.agentTaskDoneLabel {
+  font-size: 11px;
+  font-weight: 500;
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.agentTaskProgressActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted, #888);
+}
+
+.agentTaskClearBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  padding: 2px;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.agentTaskClearBtn:hover {
+  opacity: 1;
+  color: #f44336;
+}
+
+.agentTaskProgressBarWrap {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 0;
+}
+
+.agentTaskProgressBarFill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-blue, #007acc), #3794ff);
+  border-radius: 0 1px 1px 0;
+  transition: width 0.4s ease;
+}
+
+.agentTaskProgressDone .agentTaskProgressBarFill {
+  background: linear-gradient(90deg, #22c55e, #4ade80);
+}
+
+.agentTaskList {
+  padding: 4px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agentTaskItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  transition: background 0.1s;
+}
+
+.agentTaskIcon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+}
+
+.agentTaskText {
+  flex: 1;
+  color: var(--text-secondary, #aaa);
+}
+
+/* pending */
+.agentTaskStatus_pending .agentTaskIcon {
+  color: rgba(255, 255, 255, 0.2);
+}
+.agentTaskStatus_pending .agentTaskText {
+  color: var(--text-muted, #777);
+}
+
+/* in-progress */
+.agentTaskStatus_in_progress {
+  background: rgba(0, 122, 204, 0.08);
+  border-radius: 4px;
+}
+.agentTaskStatus_in_progress .agentTaskIcon {
+  color: var(--accent-blue, #007acc);
+}
+.agentTaskStatus_in_progress .agentTaskText {
+  color: var(--text-primary, #ccc);
+  font-weight: 500;
+}
+
+/* completed */
+.agentTaskStatus_completed .agentTaskIcon {
+  color: #22c55e;
+}
+.agentTaskStatus_completed .agentTaskText {
+  color: var(--text-muted, #777);
+  text-decoration: line-through;
+  text-decoration-color: rgba(34, 197, 94, 0.4);
+}
+
+/* spinner animation for in-progress icon */
+.agentTaskSpinner {
+  animation: agentTaskSpin 1s linear infinite;
+}
+
+@keyframes agentTaskSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

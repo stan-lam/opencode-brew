@@ -106,7 +106,19 @@ pub async fn read_file(path: String) -> Result<String, String> {
 
 #[command]
 pub async fn write_file(path: String, content: String) -> Result<(), String> {
-    fs::write(&path, content).map_err(|e| format!("Failed to write file: {}", e))
+    println!("[Tauri write_file] Writing {} bytes to: {}", content.len(), &path);
+    fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+    // Verify the file was written
+    match fs::metadata(&path) {
+        Ok(meta) => {
+            println!("[Tauri write_file] SUCCESS - file exists, size: {} bytes", meta.len());
+            Ok(())
+        }
+        Err(e) => {
+            println!("[Tauri write_file] ERROR - file not found after write: {}", e);
+            Err(format!("File was not created: {}", e))
+        }
+    }
 }
 
 #[command]
@@ -380,4 +392,16 @@ pub async fn replace_in_file(
         .map_err(|e| format!("Failed to write file: {}", e))?;
 
     Ok(count)
+}
+
+/// Returns the OS-level app data directory for OpenCodeBrew.
+/// On macOS: ~/Library/Application Support/OpenCodeBrew
+/// On Linux: ~/.local/share/OpenCodeBrew
+/// On Windows: %APPDATA%\OpenCodeBrew
+#[command]
+pub fn get_app_data_dir(app: tauri::AppHandle) -> Result<String, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| format!("Failed to get app data dir: {}", e))
 }
