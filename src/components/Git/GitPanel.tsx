@@ -197,9 +197,12 @@ export function GitPanel() {
 
       <div className={styles.changes}>
         <div className={styles.section}>
-          <button
+          <div
             className={styles.sectionHeader}
             onClick={() => setShowStaged(!showStaged)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && setShowStaged(!showStaged)}
           >
             {showStaged ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             <span>Staged Changes</span>
@@ -216,7 +219,7 @@ export function GitPanel() {
                 <Minus size={12} />
               </button>
             )}
-          </button>
+          </div>
           {showStaged && (
             <div className={styles.fileList}>
               {stagedFiles.length === 0 ? (
@@ -238,9 +241,12 @@ export function GitPanel() {
         </div>
 
         <div className={styles.section}>
-          <button
+          <div
             className={styles.sectionHeader}
             onClick={() => setShowUnstaged(!showUnstaged)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && setShowUnstaged(!showUnstaged)}
           >
             {showUnstaged ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             <span>Changes</span>
@@ -257,7 +263,7 @@ export function GitPanel() {
                 <Plus size={12} />
               </button>
             )}
-          </button>
+          </div>
           {showUnstaged && (
             <div className={styles.fileList}>
               {unstagedFiles.length === 0 ? (

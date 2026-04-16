@@ -3,6 +3,7 @@
 let invokeFunc: typeof import('@tauri-apps/api/core').invoke | null = null;
 let listenFunc: typeof import('@tauri-apps/api/event').listen | null = null;
 let dialogModule: typeof import('@tauri-apps/plugin-dialog') | null = null;
+let shellModule: typeof import('@tauri-apps/plugin-shell') | null = null;
 
 async function getInvoke() {
   if (!invokeFunc) {
@@ -25,6 +26,13 @@ async function getDialog() {
     dialogModule = await import('@tauri-apps/plugin-dialog');
   }
   return dialogModule;
+}
+
+async function getShell() {
+  if (!shellModule) {
+    shellModule = await import('@tauri-apps/plugin-shell');
+  }
+  return shellModule;
 }
 
 export interface FileEntry {
@@ -85,6 +93,30 @@ export interface OllamaModel {
   name: string;
   size?: number;
   modified_at?: string;
+}
+
+export interface CopilotDeviceCode {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface CopilotLoginStatus {
+  logged_in: boolean;
+}
+
+export interface CopilotBillingInfo {
+  total: number;
+  added_this_cycle: number;
+  pending_cancellation: number;
+  pending_invitation: number;
+  active_this_cycle: number;
+  inactive_this_cycle: number;
+  seat_management_setting?: string;
+  plan_type?: string;
 }
 
 export interface HistoryEntry {
@@ -165,12 +197,21 @@ export const fs = {
     const invoke = await getInvoke();
     return invoke('unwatch_directory', { path });
   },
+
+  getAppDataDir: async (): Promise<string> => {
+    const invoke = await getInvoke();
+    return invoke('get_app_data_dir');
+  },
 };
 
 export interface FileChangeEvent {
   kind: 'create' | 'modify' | 'remove' | 'access' | 'any' | 'other';
   paths: string[];
   target_window?: string;
+}
+
+export interface FileDropPayload {
+  paths: string[];
 }
 
 // Dialog operations
@@ -202,6 +243,14 @@ export const dialog = {
       defaultPath,
     });
     return result;
+  },
+};
+
+// Shell operations
+export const shell = {
+  openExternal: async (url: string): Promise<void> => {
+    const { open } = await getShell();
+    await open(url);
   },
 };
 
@@ -289,6 +338,51 @@ export const ai = {
     const invoke = await getInvoke();
     return invoke('list_ollama_models', { baseUrl });
   },
+
+  copilotLoginStatus: async (): Promise<CopilotLoginStatus> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_device_login_status');
+  },
+
+  copilotDeviceLoginStart: async (clientId?: string): Promise<CopilotDeviceCode> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_device_login_start', { clientId });
+  },
+
+  copilotDeviceLoginPoll: async (
+    deviceCode: string,
+    interval?: number,
+    expiresIn?: number,
+    clientId?: string
+  ): Promise<boolean> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_device_login_poll', { deviceCode, interval, expiresIn, clientId });
+  },
+
+  copilotDeviceLogout: async (): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_device_logout');
+  },
+
+  listCopilotModels: async (): Promise<string[]> => {
+    const invoke = await getInvoke();
+    return invoke('list_copilot_models');
+  },
+
+  listCopilotVisionModels: async (): Promise<string[]> => {
+    const invoke = await getInvoke();
+    return invoke('list_copilot_vision_models');
+  },
+
+  copilotListOrgs: async (): Promise<string[]> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_list_orgs');
+  },
+
+  copilotBillingInfo: async (org: string): Promise<CopilotBillingInfo> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_billing_info', { org });
+  },
   
   chatOllama: async (
     baseUrl: string | undefined,
@@ -322,6 +416,23 @@ export const ai = {
     return invoke('chat_openai_compatible', {
       baseUrl,
       apiKey,
+      model,
+      messages,
+      temperature,
+      maxTokens,
+      conversationId,
+    });
+  },
+
+  chatCopilot: async (
+    model: string,
+    messages: ChatMessage[],
+    temperature: number | undefined,
+    maxTokens: number | undefined,
+    conversationId: string
+  ): Promise<string> => {
+    const invoke = await getInvoke();
+    return invoke('chat_copilot', {
       model,
       messages,
       temperature,
@@ -431,6 +542,114 @@ export const project = {
   getNpmScripts: async (path: string): Promise<Record<string, string>> => {
     const invoke = await getInvoke();
     return invoke('get_npm_scripts', { path });
+  },
+};
+
+// Tauri v2 drag-drop event payload - structure may vary
+export interface DragDropPayload {
+  type?: 'drop' | 'enter' | 'leave' | 'over';
+  paths?: string[];
+  position?: { x: number; y: number };
+}
+
+// App-level events - Tauri v2 window drag-drop events
+// Use deduplication to prevent duplicate processing from multiple event sources
+let lastDropTime = 0;
+let lastDropPaths: string[] = [];
+
+export const appEvents = {
+  onFileDrop: async (callback: (paths: string[]) => void) => {
+    const listenFn = await getListen();
+    console.log('[tauri.ts] Registering drag-drop listeners');
+    
+    const processDropEvent = (paths: string[], source: string) => {
+      const now = Date.now();
+      const pathsKey = paths.sort().join('|');
+      const lastPathsKey = lastDropPaths.sort().join('|');
+      
+      // Deduplicate: ignore if same paths within 500ms
+      if (now - lastDropTime < 500 && pathsKey === lastPathsKey) {
+        console.log(`[tauri.ts] Ignoring duplicate drop from ${source}`);
+        return;
+      }
+      
+      lastDropTime = now;
+      lastDropPaths = [...paths];
+      console.log(`[tauri.ts] Processing drop from ${source}:`, paths);
+      callback(paths);
+    };
+    
+    const unlisten1 = await listenFn('tauri://drag-drop', (event) => {
+      console.log('[tauri.ts] tauri://drag-drop event:', JSON.stringify(event.payload));
+      const payload = event.payload as DragDropPayload | string[];
+      
+      let paths: string[] | undefined;
+      if (Array.isArray(payload)) {
+        paths = payload;
+      } else if (payload?.paths) {
+        if (!payload.type || payload.type === 'drop') {
+          paths = payload.paths;
+        }
+      }
+      
+      if (paths?.length) {
+        processDropEvent(paths, 'drag-drop');
+      }
+    });
+    
+    const unlisten2 = await listenFn('tauri://file-drop', (event) => {
+      console.log('[tauri.ts] tauri://file-drop event:', JSON.stringify(event.payload));
+      const payload = event.payload as string[] | { paths: string[] };
+      const paths = Array.isArray(payload) ? payload : payload?.paths;
+      if (paths?.length) {
+        processDropEvent(paths, 'file-drop');
+      }
+    });
+    
+    return () => {
+      unlisten1();
+      unlisten2();
+    };
+  },
+  onFileDropHover: async (callback: (paths: string[]) => void) => {
+    const listenFn = await getListen();
+    
+    const unlisten1 = await listenFn('tauri://drag-drop', (event) => {
+      const payload = event.payload as DragDropPayload;
+      if (payload?.type === 'enter' || payload?.type === 'over') {
+        callback(payload?.paths || []);
+      }
+    });
+    
+    const unlisten2 = await listenFn('tauri://file-drop-hover', (event) => {
+      const payload = event.payload as string[] | { paths: string[] };
+      const paths = Array.isArray(payload) ? payload : payload?.paths;
+      callback(paths || []);
+    });
+    
+    return () => {
+      unlisten1();
+      unlisten2();
+    };
+  },
+  onFileDropCancel: async (callback: () => void) => {
+    const listenFn = await getListen();
+    
+    const unlisten1 = await listenFn('tauri://drag-drop', (event) => {
+      const payload = event.payload as DragDropPayload;
+      if (payload?.type === 'leave') {
+        callback();
+      }
+    });
+    
+    const unlisten2 = await listenFn('tauri://file-drop-cancelled', () => {
+      callback();
+    });
+    
+    return () => {
+      unlisten1();
+      unlisten2();
+    };
   },
 };
 

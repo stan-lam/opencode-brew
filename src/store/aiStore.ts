@@ -2,8 +2,15 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { fs } from '../services/tauri';
 
-export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom';
+export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
 export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
+export type AgentTaskStatus = 'pending' | 'in-progress' | 'completed' | 'skipped';
+
+export interface AgentTask {
+  id: string;
+  text: string;
+  status: AgentTaskStatus;
+}
 
 export interface AIMessage {
   id: string;
@@ -37,6 +44,8 @@ export interface AIProviderConfig {
   model: string;
   apiKey?: string;
   baseUrl?: string;
+  copilotClientId?: string;
+  copilotUsageOrg?: string;
   temperature: number;
   maxTokens: number;
   systemPrompt: string;
@@ -51,12 +60,19 @@ interface AIState {
   isStreaming: boolean;
   thinkingStatus: string | null;
   availableModels: Record<AIProvider, string[]>;
+  copilotVisionModels: string[];
   currentWorkspacePath: string | null;
   promptQueue: string[];
   agentMode: AgentMode;
+  agentTasks: AgentTask[];
+  agentTaskIndex: number;
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
   setAgentMode: (mode: AgentMode) => void;
+  setAgentTasks: (tasks: string[]) => void;
+  advanceAgentTask: () => void;
+  updateAgentTaskStatus: (id: string, status: AgentTaskStatus) => void;
+  clearAgentTasks: () => void;
   createConversation: () => void;
   setActiveConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
@@ -75,24 +91,84 @@ interface AIState {
   isFileOperationKept: (operationId: string) => boolean;
 }
 
-const AI_HISTORY_FILE = '.opencodebrew/ai-history.json';
+const AI_HISTORY_FILE = 'ai-history.json';
 
-async function ensureOpenCodeBrewDir(workspacePath: string): Promise<void> {
-  const openCodeBrewDir = `${workspacePath}/.opencodebrew`;
+/**
+ * Converts a workspace filesystem path into a safe directory name by replacing
+ * path separators and colons with underscores and stripping leading underscores.
+ * e.g. /Users/alice/work/myproject → Users_alice_work_myproject
+ */
+function workspaceSlug(workspacePath: string): string {
+  return workspacePath.replace(/[\\/: ]+/g, '_').replace(/^_+/, '');
+}
+
+/**
+ * Returns the centralized storage directory for the given workspace.
+ * ~/Library/Application Support/OpenCodeBrew/workspaces/<slug>/
+ * Falls back to the workspace path itself if the app data dir is unavailable.
+ */
+async function getWorkspaceStorageDir(workspacePath: string): Promise<string> {
   try {
-    const exists = await fs.pathExists(openCodeBrewDir);
+    const appDataDir = await fs.getAppDataDir();
+    const slug = workspaceSlug(workspacePath);
+    return `${appDataDir}/workspaces/${slug}`;
+  } catch (e) {
+    console.warn('Could not resolve app data dir, falling back to workspace path:', e);
+    return `${workspacePath}/.opencodebrew`;
+  }
+}
+
+function formatAIError(error: unknown): string {
+  let errorMessage = '';
+  
+  if (error instanceof Error) {
+    errorMessage = error.message;
+  } else if (typeof error === 'string') {
+    errorMessage = error;
+  } else if (error && typeof error === 'object') {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string') {
+      errorMessage = maybeMessage;
+    } else {
+      const maybeError = (error as { error?: unknown }).error;
+      if (typeof maybeError === 'string') {
+        errorMessage = maybeError;
+      } else {
+        try {
+          errorMessage = JSON.stringify(error);
+        } catch {
+          return 'Failed to get response from AI';
+        }
+      }
+    }
+  } else {
+    return 'Failed to get response from AI';
+  }
+  
+  // Enhance vision-related error messages with helpful guidance
+  if (errorMessage.includes('not supported for vision') || errorMessage.includes('image media type')) {
+    return `${errorMessage}\n\nTip: This model doesn't support images. For Copilot vision, try selecting a gpt-4o model from the dropdown.`;
+  }
+  
+  return errorMessage;
+}
+
+async function ensureStorageDir(storageDir: string): Promise<void> {
+  try {
+    const exists = await fs.pathExists(storageDir);
     if (!exists) {
-      await fs.createDirectory(openCodeBrewDir);
-      console.log('Created .opencodebrew directory at:', openCodeBrewDir);
+      await fs.createDirectory(storageDir);
+      console.log('Created storage directory:', storageDir);
     }
   } catch (e) {
-    console.log('Could not create .opencodebrew directory:', e);
+    console.log('Could not create storage directory:', e);
   }
 }
 
 async function loadHistoryFromFile(workspacePath: string): Promise<AIConversation[]> {
-  const historyPath = `${workspacePath}/${AI_HISTORY_FILE}`;
   try {
+    const storageDir = await getWorkspaceStorageDir(workspacePath);
+    const historyPath = `${storageDir}/${AI_HISTORY_FILE}`;
     const exists = await fs.pathExists(historyPath);
     if (!exists) {
       return [];
@@ -108,9 +184,10 @@ async function loadHistoryFromFile(workspacePath: string): Promise<AIConversatio
 
 async function saveHistoryToFile(workspacePath: string, conversations: AIConversation[]): Promise<void> {
   try {
-    console.log('Saving AI history to:', workspacePath);
-    await ensureOpenCodeBrewDir(workspacePath);
-    const historyPath = `${workspacePath}/${AI_HISTORY_FILE}`;
+    const storageDir = await getWorkspaceStorageDir(workspacePath);
+    console.log('Saving AI history to:', storageDir);
+    await ensureStorageDir(storageDir);
+    const historyPath = `${storageDir}/${AI_HISTORY_FILE}`;
     const data = {
       version: 1,
       savedAt: new Date().toISOString(),
@@ -394,6 +471,8 @@ const defaultConfig: AIProviderConfig = {
   provider: 'ollama',
   model: 'llama3',
   baseUrl: 'http://localhost:11434',
+  copilotClientId: '',
+  copilotUsageOrg: '',
   temperature: 0.7,
   maxTokens: 4096,
   systemPrompt: `You are an expert coding assistant integrated into the OpenCodeBrew code editor. You have access to the user's currently open files and project context.
@@ -424,12 +503,16 @@ export const useAIStore = create<AIState>()(
       currentWorkspacePath: null,
       promptQueue: [],
       agentMode: 'chat',
+      agentTasks: [],
+      agentTaskIndex: -1,
       availableModels: {
         ollama: [],
         claude: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
         openai: ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'],
         custom: [],
+        copilot: ['gpt-4o', 'gpt-4', 'gpt-3.5-turbo'],
       },
+      copilotVisionModels: [],
 
       setConfig: (newConfig) => {
         set((state) => ({
@@ -439,6 +522,37 @@ export const useAIStore = create<AIState>()(
 
       setAgentMode: (mode: AgentMode) => {
         set({ agentMode: mode });
+      },
+
+      setAgentTasks: (taskTexts: string[]) => {
+        const tasks: AgentTask[] = taskTexts.map((text, i) => ({
+          id: `agent-task-${i}-${Date.now()}`,
+          text,
+          status: (i === 0 ? 'in-progress' : 'pending') as AgentTaskStatus,
+        }));
+        set({ agentTasks: tasks, agentTaskIndex: 0 });
+      },
+
+      advanceAgentTask: () => {
+        const { agentTasks, agentTaskIndex } = get();
+        if (agentTasks.length === 0 || agentTaskIndex < 0) return;
+        const nextIndex = agentTaskIndex + 1;
+        const updated = agentTasks.map((t, i) => {
+          if (i === agentTaskIndex) return { ...t, status: 'completed' as AgentTaskStatus };
+          if (i === nextIndex) return { ...t, status: 'in-progress' as AgentTaskStatus };
+          return t;
+        });
+        set({ agentTasks: updated, agentTaskIndex: nextIndex });
+      },
+
+      updateAgentTaskStatus: (id: string, status: AgentTaskStatus) => {
+        set((state) => ({
+          agentTasks: state.agentTasks.map(t => t.id === id ? { ...t, status } : t),
+        }));
+      },
+
+      clearAgentTasks: () => {
+        set({ agentTasks: [], agentTaskIndex: -1 });
       },
 
       setThinkingStatus: (status) => {
@@ -599,6 +713,10 @@ export const useAIStore = create<AIState>()(
             // Use enhanced content with context for the last (current) message
             { role: 'user', content: enhancedContent, attachments: attachments },
           ];
+          // Check for images and override model if needed
+          const hasImageAttachments = messages.some((message) =>
+            message.attachments?.some((attachment) => attachment.type === 'image')
+          );
 
           let responseContent = '';
           const conversationId = conversation.id;
@@ -662,7 +780,13 @@ export const useAIStore = create<AIState>()(
               set({ isStreaming: false, thinkingStatus: null });
               // Auto-save when streaming completes
               get().saveWorkspaceHistory();
-              
+
+              // Advance agent task progress when a response completes in agent mode
+              const { agentMode: currentMode, agentTasks, agentTaskIndex } = get();
+              if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
+                get().advanceAgentTask();
+              }
+
               // Process next queued prompt if any
               const { promptQueue } = get();
               if (promptQueue.length > 0) {
@@ -674,7 +798,51 @@ export const useAIStore = create<AIState>()(
           });
 
           // Update thinking status before API call
-          set({ thinkingStatus: `Connecting to ${config.provider === 'ollama' ? 'Ollama' : config.provider}...` });
+          const providerLabel = config.provider === 'ollama'
+            ? 'Ollama'
+            : config.provider === 'copilot'
+            ? 'GitHub Copilot'
+            : config.provider;
+          set({ thinkingStatus: `Connecting to ${providerLabel}...` });
+
+          let copilotModel = config.model;
+          if (config.provider === 'copilot') {
+            try {
+              const models = get().availableModels.copilot;
+              if (models.length === 0) {
+                const freshModels = await ai.listCopilotModels();
+                if (freshModels.length > 0) {
+                  const uniqueModels = Array.from(new Set(freshModels));
+                  const selectedModel = uniqueModels.includes(copilotModel) ? copilotModel : uniqueModels[0];
+                  set((state) => ({
+                    availableModels: {
+                      ...state.availableModels,
+                      copilot: uniqueModels,
+                    },
+                    config: {
+                      ...state.config,
+                      model: uniqueModels.includes(state.config.model)
+                        ? state.config.model
+                        : selectedModel,
+                    },
+                  }));
+                  copilotModel = selectedModel;
+                }
+              } else if (!models.includes(copilotModel)) {
+                copilotModel = models[0];
+                set((state) => ({
+                  config: {
+                    ...state.config,
+                    model: copilotModel,
+                  },
+                }));
+              }
+              
+              // Vision model selection is handled right before the API call
+            } catch (error) {
+              console.warn('Failed to refresh Copilot models:', error);
+            }
+          }
 
           // Call the appropriate AI backend
           if (config.provider === 'ollama') {
@@ -682,6 +850,32 @@ export const useAIStore = create<AIState>()(
             await ai.chatOllama(
               config.baseUrl || 'http://localhost:11434',
               config.model,
+              messages,
+              config.temperature,
+              config.maxTokens,
+              conversationId
+            );
+          } else if (config.provider === 'copilot') {
+            let finalModel = copilotModel;
+            if (hasImageAttachments) {
+              const visionModels = get().copilotVisionModels;
+              if (visionModels.includes(copilotModel)) {
+                // User's selected model supports vision — use it as-is
+                console.log(`[aiStore] VISION: User model ${copilotModel} supports vision, using it`);
+              } else if (visionModels.length > 0) {
+                // Fall back to gpt-4o variant or first known vision model
+                const preferred = visionModels.find(m => m.startsWith('gpt-4o'))
+                  ?? visionModels.find(m => m.startsWith('gpt-4'))
+                  ?? visionModels[0];
+                finalModel = preferred;
+                console.log(`[aiStore] VISION: ${copilotModel} not in vision list, switching to ${finalModel}`);
+              } else {
+                console.warn('[aiStore] Vision models list empty — using selected model');
+              }
+            }
+            set({ thinkingStatus: 'Waiting for GitHub Copilot to respond...' });
+            await ai.chatCopilot(
+              finalModel,
               messages,
               config.temperature,
               config.maxTokens,
@@ -713,13 +907,14 @@ export const useAIStore = create<AIState>()(
           set({ isStreaming: false, thinkingStatus: null });
           
         } catch (error) {
-          console.error('Failed to send message:', error);
+          const errorText = formatAIError(error);
+          console.error('Failed to send message:', errorText);
           
           // Add error message
           const errorMessage: AIMessage = {
             id: crypto.randomUUID(),
             role: 'assistant',
-            content: `Error: ${error instanceof Error ? error.message : 'Failed to get response from AI'}`,
+            content: `Error: ${errorText}`,
             timestamp: new Date().toISOString(),
           };
           
@@ -744,7 +939,13 @@ export const useAIStore = create<AIState>()(
           });
           // Auto-save after error
           get().saveWorkspaceHistory();
-          
+
+          // Advance agent task (mark as skipped on error) and move on
+          const { agentMode: currentMode, agentTasks, agentTaskIndex } = get();
+          if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
+            get().advanceAgentTask();
+          }
+
           // Process next queued prompt if any
           const { promptQueue } = get();
           if (promptQueue.length > 0) {
@@ -820,12 +1021,42 @@ export const useAIStore = create<AIState>()(
           } catch (error) {
             console.error('Failed to fetch Ollama models:', error);
           }
+        } else if (config.provider === 'copilot') {
+          try {
+            const { ai } = await import('../services/tauri');
+            // Fetch all models and vision-capable models in parallel
+            const [models, visionModels] = await Promise.all([
+              ai.listCopilotModels(),
+              ai.listCopilotVisionModels().catch(() => [] as string[]),
+            ]);
+            const uniqueModels = Array.from(new Set(models));
+            if (uniqueModels.length === 0) {
+              return;
+            }
+            console.log('[aiStore] Copilot vision models:', visionModels);
+            set((state) => ({
+              availableModels: {
+                ...state.availableModels,
+                copilot: uniqueModels,
+              },
+              copilotVisionModels: visionModels,
+              config: {
+                ...state.config,
+                model: uniqueModels.includes(state.config.model)
+                  ? state.config.model
+                  : uniqueModels[0],
+              },
+            }));
+          } catch (error) {
+            console.error('Failed to fetch Copilot models:', error);
+          }
         }
       },
 
       importConversationsFromPath: async (sourcePath: string) => {
         try {
-          const historyPath = `${sourcePath}/${AI_HISTORY_FILE}`;
+          const storageDir = await getWorkspaceStorageDir(sourcePath);
+          const historyPath = `${storageDir}/${AI_HISTORY_FILE}`;
           const exists = await fs.pathExists(historyPath);
           
           if (!exists) {
@@ -911,7 +1142,7 @@ export const useAIStore = create<AIState>()(
       name: 'opencodebrew-ai',
       partialize: (state) => ({
         config: state.config,
-        // Conversations are now stored per-workspace in .openide/ai-history.json
+        // Conversations are stored per-workspace in the app data dir
       }),
     }
   )
