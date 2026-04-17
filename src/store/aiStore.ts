@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { fs, web, WebSearchResult, WebContent, StockQuote, MarketMovers } from '../services/tauri';
+import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MCPServerConfig, MCPTool, MCPToolResult } from '../services/tauri';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
 export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
@@ -65,6 +65,15 @@ export interface AIProviderConfig {
   systemPrompt: string;
   thinkAloud: boolean;
   claudeExtendedThinking: boolean;
+  mcpServers: MCPServerConfig[];
+}
+
+export interface MCPServerState {
+  id: string;
+  name: string;
+  status: 'stopped' | 'starting' | 'running' | 'error';
+  tools: MCPTool[];
+  error?: string;
 }
 
 interface AIState {
@@ -82,6 +91,7 @@ interface AIState {
   agentTaskIndex: number;
   webAccessStatus: WebAccessStatus;
   webAccessTraces: WebAccessTrace[];
+  mcpServerStates: MCPServerState[];
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
   setWebAccessStatus: (status: WebAccessStatus) => void;
@@ -109,6 +119,12 @@ interface AIState {
   exportConversation: (conversationId: string) => Promise<string | null>;
   markFileOperationsAsKept: (operationIds: string[]) => void;
   isFileOperationKept: (operationId: string) => boolean;
+  addMCPServer: (config: MCPServerConfig) => void;
+  removeMCPServer: (serverId: string) => void;
+  updateMCPServer: (serverId: string, config: Partial<MCPServerConfig>) => void;
+  startMCPServer: (serverId: string) => Promise<void>;
+  stopMCPServer: (serverId: string) => Promise<void>;
+  callMCPTool: (serverId: string, toolName: string, args: Record<string, unknown>) => Promise<MCPToolResult>;
 }
 
 const AI_HISTORY_FILE = 'ai-history.json';
@@ -692,6 +708,92 @@ function createWebAccessTraces(operations: WebOperation[]): WebAccessTrace[] {
   });
 }
 
+async function getStockQuoteWithFallback(symbol: string): Promise<StockQuote> {
+  const store = useAIStore.getState();
+  const runningServers = (store.mcpServerStates || []).filter(s => s.status === 'running');
+  
+  for (const server of runningServers) {
+    const quoteTool = server.tools.find(t => 
+      t.name === 'get_quote' || 
+      t.name === 'get_stock_quote' || 
+      t.name === 'getStockQuote'
+    );
+    
+    if (quoteTool) {
+      try {
+        console.log(`[aiStore] Trying MCP server ${server.id} for stock quote: ${symbol}`);
+        const result = await mcp.callTool(server.id, quoteTool.name, { symbol });
+        
+        if (!result.is_error && result.content.length > 0) {
+          const text = result.content.find(c => c.type === 'text')?.text;
+          if (text) {
+            try {
+              const data = JSON.parse(text);
+              console.log(`[aiStore] MCP returned quote data for ${symbol}:`, data);
+              return {
+                symbol: data.symbol || symbol,
+                name: data.shortName || data.longName || data.name || symbol,
+                price: data.regularMarketPrice || data.price || 0,
+                change: data.regularMarketChange || data.change || 0,
+                change_percent: data.regularMarketChangePercent || data.change_percent || data.changePercent || 0,
+                volume: data.regularMarketVolume || data.volume || 0,
+                market_cap: data.marketCap || data.market_cap || null,
+              };
+            } catch {
+              console.log(`[aiStore] MCP response not JSON, falling back to web scraping`);
+            }
+          }
+        }
+      } catch (error) {
+        console.log(`[aiStore] MCP call failed, falling back to web scraping:`, error);
+      }
+    }
+  }
+  
+  return web.getStockQuote(symbol);
+}
+
+async function getMarketMoversWithFallback(): Promise<MarketMovers> {
+  const store = useAIStore.getState();
+  const runningServers = (store.mcpServerStates || []).filter(s => s.status === 'running');
+  
+  for (const server of runningServers) {
+    const moversTool = server.tools.find(t => 
+      t.name === 'get_market_movers' || 
+      t.name === 'getMarketMovers' ||
+      t.name === 'get_movers'
+    );
+    
+    if (moversTool) {
+      try {
+        console.log(`[aiStore] Trying MCP server ${server.id} for market movers`);
+        const result = await mcp.callTool(server.id, moversTool.name, {});
+        
+        if (!result.is_error && result.content.length > 0) {
+          const text = result.content.find(c => c.type === 'text')?.text;
+          if (text) {
+            try {
+              const data = JSON.parse(text);
+              return {
+                gainers: data.gainers || [],
+                losers: data.losers || [],
+                most_active: data.most_active || data.mostActive || [],
+              };
+            } catch {
+              console.log(`[aiStore] MCP response not JSON, falling back to web scraping`);
+            }
+          }
+        }
+      } catch (error) {
+        console.log(`[aiStore] MCP call failed, falling back to web scraping:`, error);
+      }
+    }
+  }
+  
+  // MCP server doesn't have market movers - use web scraping
+  return web.getMarketMovers();
+}
+
 async function executeWebOperationsWithTraces(
   operations: WebOperation[],
   traces: WebAccessTrace[],
@@ -736,7 +838,7 @@ async function executeWebOperationsWithTraces(
       } else if (op.type === 'get_stock_quote' && op.symbol) {
         setStatus('fetching');
         console.log(`[aiStore] Getting stock quote: ${op.symbol}`);
-        const quote = await web.getStockQuote(op.symbol);
+        const quote = await getStockQuoteWithFallback(op.symbol);
         const formatted = formatStockQuote(quote);
         results.push(formatted);
         updatedTraces[i] = { 
@@ -748,7 +850,7 @@ async function executeWebOperationsWithTraces(
       } else if (op.type === 'get_market_movers') {
         setStatus('fetching');
         console.log(`[aiStore] Getting market movers`);
-        const movers = await web.getMarketMovers();
+        const movers = await getMarketMoversWithFallback();
         const formatted = formatMarketMovers(movers);
         results.push(formatted);
         const totalStocks = movers.gainers.length + movers.losers.length + movers.most_active.length;
@@ -797,6 +899,16 @@ When explaining code:
 Always be concise but thorough. Format code examples with proper syntax highlighting using markdown code blocks.`,
   thinkAloud: false,
   claudeExtendedThinking: false,
+  mcpServers: [
+    {
+      id: 'yahoo-finance',
+      name: 'Yahoo Finance MCP',
+      command: 'npx',
+      args: ['-y', 'yfinance-mcp'],
+      env: {},
+      enabled: false,
+    },
+  ],
 };
 
 export const useAIStore = create<AIState>()(
@@ -814,6 +926,7 @@ export const useAIStore = create<AIState>()(
       agentTaskIndex: -1,
       webAccessStatus: null,
       webAccessTraces: [],
+      mcpServerStates: [],
       availableModels: {
         ollama: [],
         claude: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
@@ -1704,6 +1817,88 @@ export const useAIStore = create<AIState>()(
         if (!conv || !conv.appliedFileOps) return false;
         return conv.appliedFileOps.includes(operationId);
       },
+
+      addMCPServer: (config: MCPServerConfig) => {
+        set((state) => ({
+          config: {
+            ...state.config,
+            mcpServers: [...(state.config.mcpServers || []), config],
+          },
+        }));
+      },
+
+      removeMCPServer: (serverId: string) => {
+        set((state) => ({
+          config: {
+            ...state.config,
+            mcpServers: (state.config.mcpServers || []).filter((s) => s.id !== serverId),
+          },
+          mcpServerStates: (state.mcpServerStates || []).filter((s) => s.id !== serverId),
+        }));
+      },
+
+      updateMCPServer: (serverId: string, updates: Partial<MCPServerConfig>) => {
+        set((state) => ({
+          config: {
+            ...state.config,
+            mcpServers: (state.config.mcpServers || []).map((s) =>
+              s.id === serverId ? { ...s, ...updates } : s
+            ),
+          },
+        }));
+      },
+
+      startMCPServer: async (serverId: string) => {
+        const config = (get().config.mcpServers || []).find((s) => s.id === serverId);
+        if (!config) {
+          throw new Error(`MCP server ${serverId} not found`);
+        }
+
+        set((state) => ({
+          mcpServerStates: [
+            ...(state.mcpServerStates || []).filter((s) => s.id !== serverId),
+            { id: serverId, name: config.name, status: 'starting', tools: [] },
+          ],
+        }));
+
+        try {
+          const tools = await mcp.startServer(config);
+          set((state) => ({
+            mcpServerStates: (state.mcpServerStates || []).map((s) =>
+              s.id === serverId ? { ...s, status: 'running', tools } : s
+            ),
+          }));
+          console.log(`[aiStore] MCP server ${serverId} started with ${tools.length} tools`);
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          set((state) => ({
+            mcpServerStates: (state.mcpServerStates || []).map((s) =>
+              s.id === serverId ? { ...s, status: 'error', error: errorMsg } : s
+            ),
+          }));
+          throw error;
+        }
+      },
+
+      stopMCPServer: async (serverId: string) => {
+        try {
+          await mcp.stopServer(serverId);
+          set((state) => ({
+            mcpServerStates: (state.mcpServerStates || []).map((s) =>
+              s.id === serverId ? { ...s, status: 'stopped', tools: [] } : s
+            ),
+          }));
+          console.log(`[aiStore] MCP server ${serverId} stopped`);
+        } catch (error) {
+          console.error(`[aiStore] Failed to stop MCP server ${serverId}:`, error);
+          throw error;
+        }
+      },
+
+      callMCPTool: async (serverId: string, toolName: string, args: Record<string, unknown>) => {
+        console.log(`[aiStore] Calling MCP tool ${toolName} on ${serverId}`);
+        return mcp.callTool(serverId, toolName, args);
+      },
     }),
     {
       name: 'opencodebrew-ai',
@@ -1711,6 +1906,19 @@ export const useAIStore = create<AIState>()(
         config: state.config,
         // Conversations are stored per-workspace in the app data dir
       }),
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<AIState>;
+        return {
+          ...currentState,
+          ...persisted,
+          mcpServerStates: currentState.mcpServerStates || [],
+          config: {
+            ...currentState.config,
+            ...persisted.config,
+            mcpServers: persisted.config?.mcpServers || currentState.config.mcpServers,
+          },
+        };
+      },
     }
   )
 );

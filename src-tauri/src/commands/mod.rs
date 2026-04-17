@@ -6,3 +6,4 @@ pub mod terminal;
 pub mod project;
 pub mod window;
 pub mod web;
+pub mod mcp;

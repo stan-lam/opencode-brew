@@ -4478,7 +4478,185 @@ function AISettings({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         )}
+
+        <div className={styles.settingsDivider}>
+          <span>MCP Servers (Financial Data)</span>
+        </div>
+
+        <MCPServersSection />
       </div>
+    </div>
+  );
+}
+
+function MCPServersSection() {
+  const { config, mcpServerStates, updateMCPServer, startMCPServer, stopMCPServer, addMCPServer, removeMCPServer } = useAIStore();
+  const [expandedServer, setExpandedServer] = useState<string | null>(null);
+  const [showAddServer, setShowAddServer] = useState(false);
+  const [newServerName, setNewServerName] = useState('');
+  const [newServerCommand, setNewServerCommand] = useState('npx');
+  const [newServerArgs, setNewServerArgs] = useState('-y yfinance-mcp');
+
+  const servers = config?.mcpServers || [];
+  const serverStates = mcpServerStates || [];
+
+  const handleToggleServer = async (serverId: string, enabled: boolean) => {
+    if (enabled) {
+      try {
+        await startMCPServer(serverId);
+      } catch (error) {
+        console.error('Failed to start MCP server:', error);
+      }
+    } else {
+      try {
+        await stopMCPServer(serverId);
+      } catch (error) {
+        console.error('Failed to stop MCP server:', error);
+      }
+    }
+    updateMCPServer(serverId, { enabled });
+  };
+
+  const handleAddServer = () => {
+    if (!newServerName.trim()) return;
+    
+    const id = newServerName.toLowerCase().replace(/\s+/g, '-');
+    addMCPServer({
+      id,
+      name: newServerName,
+      command: newServerCommand,
+      args: newServerArgs.split(' ').filter(Boolean),
+      env: {},
+      enabled: false,
+    });
+    
+    setNewServerName('');
+    setNewServerCommand('npx');
+    setNewServerArgs('-y yfnhanced-mcp');
+    setShowAddServer(false);
+  };
+
+  const getServerState = (serverId: string) => {
+    return serverStates.find(s => s.id === serverId);
+  };
+
+  return (
+    <div className={styles.mcpServersSection}>
+      <p className={styles.settingHint}>
+        MCP servers provide reliable stock market data as an alternative to web scraping.
+      </p>
+
+      {servers.map((server) => {
+        const state = getServerState(server.id);
+        const isExpanded = expandedServer === server.id;
+        
+        return (
+          <div key={server.id} className={styles.mcpServerItem}>
+            <div className={styles.mcpServerHeader}>
+              <div className={styles.mcpServerInfo}>
+                <span className={styles.mcpServerName}>{server.name}</span>
+                <span className={`${styles.mcpServerStatus} ${styles[state?.status || 'stopped']}`}>
+                  {state?.status || 'stopped'}
+                </span>
+              </div>
+              <div className={styles.mcpServerControls}>
+                <button
+                  className={styles.mcpExpandBtn}
+                  onClick={() => setExpandedServer(isExpanded ? null : server.id)}
+                  title="Show details"
+                >
+                  {isExpanded ? '▼' : '▶'}
+                </button>
+                <button
+                  className={`${styles.toggleSwitch} ${styles.small} ${server.enabled ? styles.on : ''}`}
+                  onClick={() => handleToggleServer(server.id, !server.enabled)}
+                  disabled={state?.status === 'starting'}
+                  title={server.enabled ? 'Stop server' : 'Start server'}
+                >
+                  <span className={styles.toggleKnob} />
+                </button>
+              </div>
+            </div>
+            
+            {isExpanded && (
+              <div className={styles.mcpServerDetails}>
+                <div className={styles.mcpServerDetail}>
+                  <span className={styles.mcpDetailLabel}>Command:</span>
+                  <code>{server.command} {server.args.join(' ')}</code>
+                </div>
+                {state?.tools && state.tools.length > 0 && (
+                  <div className={styles.mcpServerDetail}>
+                    <span className={styles.mcpDetailLabel}>Available Tools ({state.tools.length}):</span>
+                    <ul className={styles.mcpToolsList}>
+                      {state.tools.slice(0, 5).map((tool) => (
+                        <li key={tool.name} title={tool.description}>
+                          {tool.name}
+                        </li>
+                      ))}
+                      {state.tools.length > 5 && (
+                        <li className={styles.mcpMoreTools}>+{state.tools.length - 5} more</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+                {state?.error && (
+                  <div className={styles.mcpServerError}>
+                    Error: {state.error}
+                  </div>
+                )}
+                <button
+                  className={styles.mcpRemoveBtn}
+                  onClick={() => removeMCPServer(server.id)}
+                  title="Remove server"
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {showAddServer ? (
+        <div className={styles.mcpAddServerForm}>
+          <input
+            type="text"
+            placeholder="Server name (e.g., Alpha Vantage)"
+            value={newServerName}
+            onChange={(e) => setNewServerName(e.target.value)}
+            className={styles.mcpInput}
+          />
+          <input
+            type="text"
+            placeholder="Command (e.g., npx)"
+            value={newServerCommand}
+            onChange={(e) => setNewServerCommand(e.target.value)}
+            className={styles.mcpInput}
+          />
+          <input
+            type="text"
+            placeholder="Arguments (e.g., -y package-name)"
+            value={newServerArgs}
+            onChange={(e) => setNewServerArgs(e.target.value)}
+            className={styles.mcpInput}
+          />
+          <div className={styles.mcpAddServerButtons}>
+            <button onClick={handleAddServer} className={styles.mcpAddBtn}>
+              Add
+            </button>
+            <button onClick={() => setShowAddServer(false)} className={styles.mcpCancelBtn}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className={styles.mcpAddServerBtn}
+          onClick={() => setShowAddServer(true)}
+        >
+          + Add MCP Server
+        </button>
+      )}
     </div>
   );
 }
