@@ -21,11 +21,14 @@ import {
   ListChecks,
   Circle,
   Loader,
+  Loader2,
   ChevronDown,
   ChevronRight,
+  Globe,
+  Clock,
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell } from '../../services/tauri';
-import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask } from '../../store/aiStore';
+import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
@@ -2523,6 +2526,9 @@ export function AIPanel() {
     promptQueue,
     agentMode,
     agentTasks,
+    webAccessStatus,
+    webAccessTraces,
+    toggleWebAccessTraceExpanded,
     createConversation,
     setActiveConversation,
     setAgentMode,
@@ -3546,6 +3552,90 @@ export function AIPanel() {
                 </div>
                 <div className={styles.thinkingContent}>
                   <span className={styles.thinkingText}>{thinkingStatus}</span>
+                </div>
+              </div>
+            )}
+            {webAccessTraces.length > 0 && (
+              <div className={styles.aiTraceContainer}>
+                <div className={styles.aiTraceHeader}>
+                  {webAccessTraces.some(t => t.status === 'running') ? (
+                    <Loader2 size={14} className={styles.spinning} />
+                  ) : (
+                    <Globe size={14} />
+                  )}
+                  <span className={styles.aiTraceTitle}>
+                    {webAccessTraces.some(t => t.status === 'running') 
+                      ? 'Searching the web...' 
+                      : 'Web Access'}
+                  </span>
+                </div>
+                <div className={styles.aiTraceContent}>
+                  <ul className={styles.aiTraceList}>
+                    {webAccessTraces.map((trace) => (
+                      <li key={trace.id} className={`${styles.aiTraceItem} ${styles[`trace${trace.status.charAt(0).toUpperCase() + trace.status.slice(1)}`]}`}>
+                        <div 
+                          className={styles.aiTraceItemHeader}
+                          onClick={() => trace.status === 'completed' && (trace.searchResults || trace.fetchContent) && toggleWebAccessTraceExpanded(trace.id)}
+                          style={{ cursor: trace.status === 'completed' && (trace.searchResults || trace.fetchContent) ? 'pointer' : 'default' }}
+                        >
+                          <span className={styles.aiTraceText}>
+                            {trace.status === 'running' 
+                              ? (trace.type === 'search' 
+                                  ? `Searching for "${trace.query}"...` 
+                                  : (trace.query ? `Exploring ${trace.query}...` : `Fetching ${trace.url}...`))
+                              : (trace.type === 'search' 
+                                  ? `Searched "${trace.query}"` 
+                                  : (trace.query ? `Explored ${trace.query}` : `Fetched ${trace.url}`))}
+                          </span>
+                          {trace.status === 'completed' && trace.result && (
+                            <span className={styles.aiTraceResult}> - {trace.result}</span>
+                          )}
+                          {trace.status === 'error' && trace.error && (
+                            <span className={styles.aiTraceError}> - Error: {trace.error}</span>
+                          )}
+                          {trace.status === 'completed' && (trace.searchResults || trace.fetchContent) && (
+                            <ChevronDown size={12} className={`${styles.aiTraceChevron} ${trace.expanded ? styles.expanded : ''}`} />
+                          )}
+                        </div>
+                        
+                        {trace.expanded && trace.searchResults && (
+                          <ul className={styles.aiTraceResults}>
+                            {trace.searchResults.map((result, i) => (
+                              <li key={i} className={styles.aiTraceResultItem}>
+                                <a 
+                                  href={result.url} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className={styles.aiTraceResultLink}
+                                >
+                                  {result.title}
+                                </a>
+                                <p className={styles.aiTraceResultSnippet}>{result.snippet}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        
+                        {trace.expanded && trace.fetchContent && (
+                          <div className={styles.aiTraceFetchContent}>
+                            <div className={styles.aiTraceFetchTitle}>
+                              <a 
+                                href={trace.fetchContent.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                              >
+                                {trace.fetchContent.title || trace.fetchContent.url}
+                              </a>
+                            </div>
+                            <p className={styles.aiTraceFetchSnippet}>
+                              {trace.fetchContent.content.slice(0, 500)}
+                              {trace.fetchContent.content.length > 500 && '...'}
+                            </p>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               </div>
             )}
