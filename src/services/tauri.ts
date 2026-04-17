@@ -718,3 +718,56 @@ export const web = {
     return invoke('get_market_movers');
   },
 };
+
+// MCP (Model Context Protocol) types and operations
+export interface MCPServerConfig {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface MCPTool {
+  name: string;
+  description?: string;
+  input_schema?: Record<string, unknown>;
+}
+
+export interface MCPContent {
+  type: string;
+  text?: string;
+}
+
+export interface MCPToolResult {
+  content: MCPContent[];
+  is_error: boolean;
+}
+
+export const mcp = {
+  startServer: async (config: MCPServerConfig): Promise<MCPTool[]> => {
+    const invoke = await getInvoke();
+    return invoke('mcp_start_server', { config });
+  },
+
+  stopServer: async (serverId: string): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('mcp_stop_server', { serverId });
+  },
+
+  listTools: async (serverId: string): Promise<MCPTool[]> => {
+    const invoke = await getInvoke();
+    return invoke('mcp_list_tools', { serverId });
+  },
+
+  callTool: async (serverId: string, toolName: string, args: Record<string, unknown>): Promise<MCPToolResult> => {
+    const invoke = await getInvoke();
+    return invoke('mcp_call_tool', { serverId, toolName, arguments: args });
+  },
+
+  getRunningServers: async (): Promise<string[]> => {
+    const invoke = await getInvoke();
+    return invoke('mcp_get_running_servers');
+  },
+};

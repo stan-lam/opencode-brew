@@ -343,6 +343,11 @@ pub fn run() {
             commands::web::fetch_url,
             commands::web::get_stock_quote,
             commands::web::get_market_movers,
+            commands::mcp::mcp_start_server,
+            commands::mcp::mcp_stop_server,
+            commands::mcp::mcp_list_tools,
+            commands::mcp::mcp_call_tool,
+            commands::mcp::mcp_get_running_servers,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {
