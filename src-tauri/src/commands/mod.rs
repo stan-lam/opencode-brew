@@ -5,3 +5,4 @@ pub mod history;
 pub mod terminal;
 pub mod project;
 pub mod window;
+pub mod web;

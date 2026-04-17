@@ -1,10 +1,24 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { fs } from '../services/tauri';
+import { fs, web, WebSearchResult, WebContent, StockQuote, MarketMovers } from '../services/tauri';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
 export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
 export type AgentTaskStatus = 'pending' | 'in-progress' | 'completed' | 'skipped';
+export type WebAccessStatus = 'idle' | 'searching' | 'fetching' | null;
+
+export interface WebAccessTrace {
+  id: string;
+  type: 'search' | 'fetch';
+  query?: string;
+  url?: string;
+  status: 'pending' | 'running' | 'completed' | 'error';
+  result?: string;
+  error?: string;
+  searchResults?: WebSearchResult[];
+  fetchContent?: WebContent;
+  expanded?: boolean;
+}
 
 export interface AgentTask {
   id: string;
@@ -66,8 +80,14 @@ interface AIState {
   agentMode: AgentMode;
   agentTasks: AgentTask[];
   agentTaskIndex: number;
+  webAccessStatus: WebAccessStatus;
+  webAccessTraces: WebAccessTrace[];
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
+  setWebAccessStatus: (status: WebAccessStatus) => void;
+  setWebAccessTraces: (traces: WebAccessTrace[]) => void;
+  clearWebAccessTraces: () => void;
+  toggleWebAccessTraceExpanded: (traceId: string) => void;
   setAgentMode: (mode: AgentMode) => void;
   setAgentTasks: (tasks: string[]) => void;
   advanceAgentTask: () => void;
@@ -467,6 +487,293 @@ IMPORTANT: Think through your response step by step. Before giving your final an
 
 Format your thinking in a "Thinking:" section before your response.`;
 
+function getCurrentDatePrompt(): string {
+  const now = new Date();
+  const options: Intl.DateTimeFormatOptions = { 
+    weekday: 'long', 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  };
+  const dateStr = now.toLocaleDateString('en-US', options);
+  const year = now.getFullYear();
+  return `
+
+## CURRENT DATE
+Today is ${dateStr}. The current year is ${year}. When searching for recent news or current events, always include the current year (${year}) in your search queries to get the most recent information.`;
+}
+
+function getWebAccessPrompt(): string {
+  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  return `
+
+## WEB ACCESS
+
+You have tools to search the web and fetch actual data. You MUST use these for ANY question about:
+- **Stock prices, market data, cryptocurrency prices** - These change constantly
+- **Current events, recent news, or anything time-sensitive**
+- **Weather, sports scores, or live data**
+
+### Available Tools:
+
+**Search the web:**
+<search_web query="your search query" />
+
+**Fetch content from a URL:**
+<fetch_url url="https://example.com/page" />
+
+**Get market movers (gainers/losers/active):**
+<get_market_movers />
+
+**Get quote for a specific stock:**
+<get_stock_quote symbol="AAPL" />
+
+### STOCK QUERIES - USE THESE PATTERNS:
+
+| User asks about | You MUST do |
+|-----------------|-------------|
+| Top gainers/losers/active | <get_market_movers /> |
+| Specific stock price | <get_stock_quote symbol="TICKER" /> |
+| After-hours movers | <fetch_url url="https://www.marketwatch.com/tools/screener/after-hours" /> |
+| Pre-market movers | <fetch_url url="https://www.marketwatch.com/tools/screener/premarket" /> |
+| Stock news | <search_web query="TICKER news ${today}" /> |
+
+### CRITICAL: NEVER JUST PROVIDE LINKS
+
+**WRONG approach:**
+"Here are some resources where you can find after-hours data: [list of links]"
+
+**CORRECT approach:**
+1. Use <fetch_url> to get the actual page content
+2. Extract the stock data from the response
+3. Present the actual prices and changes in a table
+
+You MUST ALWAYS:
+1. FETCH the actual data using your tools
+2. EXTRACT specific prices, percentages, and stock symbols
+3. PRESENT the data in a table format
+4. NEVER tell users to "check these links" or "visit these sites"
+
+**DATA QUALITY - AUTOMATIC CORRECTION:**
+If you receive stock data with $0.00 prices or 0.00% changes:
+1. Use <get_stock_quote symbol="TICKER" /> for EACH stock with bad data
+2. Present ONLY corrected, accurate prices
+3. NEVER show broken data or say "data may be incomplete"
+
+**WORKFLOW EXAMPLE for "after hours movers":**
+1. Fetch: <fetch_url url="https://www.marketwatch.com/tools/screener/after-hours" />
+2. Extract stock symbols, prices, and % changes from the response
+3. Present in a table:
+   | Ticker | Price | Change |
+   |--------|-------|--------|
+   | NVDA   | $145  | +5.2%  |
+
+DO NOT give generic advice, provide resource links, or suggest checking elsewhere. YOU have the tools - USE THEM and present actual data.`;
+}
+
+interface WebOperation {
+  type: 'search_web' | 'fetch_url' | 'get_stock_quote' | 'get_market_movers';
+  query?: string;
+  url?: string;
+  symbol?: string;
+}
+
+function parseWebOperations(content: string): WebOperation[] {
+  const operations: WebOperation[] = [];
+  
+  const searchRegex = /<search_web\s+query="([^"]+)"\s*\/?>/gi;
+  let match;
+  while ((match = searchRegex.exec(content)) !== null) {
+    operations.push({ type: 'search_web', query: match[1] });
+  }
+  
+  const fetchRegex = /<fetch_url\s+url="([^"]+)"\s*\/?>/gi;
+  while ((match = fetchRegex.exec(content)) !== null) {
+    operations.push({ type: 'fetch_url', url: match[1] });
+  }
+  
+  const stockQuoteRegex = /<get_stock_quote\s+symbol="([^"]+)"\s*\/?>/gi;
+  while ((match = stockQuoteRegex.exec(content)) !== null) {
+    operations.push({ type: 'get_stock_quote', symbol: match[1] });
+  }
+  
+  const marketMoversRegex = /<get_market_movers\s*\/?>/gi;
+  while ((match = marketMoversRegex.exec(content)) !== null) {
+    operations.push({ type: 'get_market_movers' });
+  }
+  
+  return operations.slice(0, 10);
+}
+
+function cleanWebOperationTags(content: string): string {
+  return content
+    .replace(/<search_web\s+query="[^"]+"\s*\/?>/gi, '')
+    .replace(/<fetch_url\s+url="[^"]+"\s*\/?>/gi, '')
+    .replace(/<get_stock_quote\s+symbol="[^"]+"\s*\/?>/gi, '')
+    .replace(/<get_market_movers\s*\/?>/gi, '')
+    .trim();
+}
+
+function formatSearchResults(results: WebSearchResult[]): string {
+  if (results.length === 0) {
+    return 'No search results found.';
+  }
+  
+  let formatted = '**Web Search Results:**\n\n';
+  results.forEach((result, i) => {
+    formatted += `${i + 1}. **[${result.title}](${result.url})**\n`;
+    formatted += `   ${result.snippet}\n\n`;
+  });
+  return formatted;
+}
+
+function formatFetchContent(content: WebContent): string {
+  return `**Content from [${content.title || content.url}](${content.url}):**\n\n${content.content}`;
+}
+
+function formatStockQuote(quote: StockQuote): string {
+  const changeSign = quote.change >= 0 ? '+' : '';
+  const changeColor = quote.change >= 0 ? '🟢' : '🔴';
+  return `**${quote.symbol}** (${quote.name})
+- Price: $${quote.price.toFixed(2)}
+- Change: ${changeColor} ${changeSign}$${quote.change.toFixed(2)} (${changeSign}${quote.change_percent.toFixed(2)}%)
+- Volume: ${quote.volume.toLocaleString()}
+${quote.market_cap ? `- Market Cap: $${quote.market_cap}` : ''}`;
+}
+
+function formatMarketMovers(movers: MarketMovers): string {
+  let result = '**📈 Top Gainers:**\n';
+  movers.gainers.forEach((stock, i) => {
+    result += `${i + 1}. **${stock.symbol}** - $${stock.price.toFixed(2)} (+${stock.change_percent.toFixed(2)}%)\n`;
+  });
+  
+  result += '\n**📉 Top Losers:**\n';
+  movers.losers.forEach((stock, i) => {
+    result += `${i + 1}. **${stock.symbol}** - $${stock.price.toFixed(2)} (${stock.change_percent.toFixed(2)}%)\n`;
+  });
+  
+  result += '\n**🔥 Most Active:**\n';
+  movers.most_active.forEach((stock, i) => {
+    const sign = stock.change >= 0 ? '+' : '';
+    result += `${i + 1}. **${stock.symbol}** - $${stock.price.toFixed(2)} (${sign}${stock.change_percent.toFixed(2)}%) Vol: ${stock.volume.toLocaleString()}\n`;
+  });
+  
+  result += '\n*Source: MarketWatch/Google Finance*';
+  return result;
+}
+
+function createWebAccessTraces(operations: WebOperation[]): WebAccessTrace[] {
+  return operations.map((op, i) => {
+    let type: 'search' | 'fetch' = 'search';
+    let query = op.query;
+    let url = op.url;
+    
+    if (op.type === 'search_web') {
+      type = 'search';
+      query = op.query;
+    } else if (op.type === 'fetch_url') {
+      type = 'fetch';
+      url = op.url;
+    } else if (op.type === 'get_stock_quote') {
+      type = 'fetch';
+      query = `Stock quote: ${op.symbol}`;
+    } else if (op.type === 'get_market_movers') {
+      type = 'fetch';
+      query = 'Market movers (gainers, losers, most active)';
+    }
+    
+    return {
+      id: `web-${Date.now()}-${i}`,
+      type,
+      query,
+      url,
+      status: 'pending' as const,
+    };
+  });
+}
+
+async function executeWebOperationsWithTraces(
+  operations: WebOperation[],
+  traces: WebAccessTrace[],
+  updateTraces: (traces: WebAccessTrace[]) => void,
+  setStatus: (status: WebAccessStatus) => void
+): Promise<string> {
+  const results: string[] = [];
+  const updatedTraces = [...traces];
+  
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    updatedTraces[i] = { ...updatedTraces[i], status: 'running' };
+    updateTraces([...updatedTraces]);
+    
+    try {
+      if (op.type === 'search_web' && op.query) {
+        setStatus('searching');
+        console.log(`[aiStore] Executing web search: ${op.query}`);
+        const searchResults = await web.search(op.query, 5);
+        const formatted = formatSearchResults(searchResults);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `Found ${searchResults.length} results`,
+          searchResults: searchResults,
+          expanded: false
+        };
+      } else if (op.type === 'fetch_url' && op.url) {
+        setStatus('fetching');
+        console.log(`[aiStore] Fetching URL: ${op.url}`);
+        const content = await web.fetchUrl(op.url);
+        const formatted = formatFetchContent(content);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `Fetched: ${content.title || op.url}`,
+          fetchContent: content,
+          expanded: false
+        };
+      } else if (op.type === 'get_stock_quote' && op.symbol) {
+        setStatus('fetching');
+        console.log(`[aiStore] Getting stock quote: ${op.symbol}`);
+        const quote = await web.getStockQuote(op.symbol);
+        const formatted = formatStockQuote(quote);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `${quote.symbol}: $${quote.price.toFixed(2)} (${quote.change >= 0 ? '+' : ''}${quote.change_percent.toFixed(2)}%)`,
+          expanded: false
+        };
+      } else if (op.type === 'get_market_movers') {
+        setStatus('fetching');
+        console.log(`[aiStore] Getting market movers`);
+        const movers = await web.getMarketMovers();
+        const formatted = formatMarketMovers(movers);
+        results.push(formatted);
+        const totalStocks = movers.gainers.length + movers.losers.length + movers.most_active.length;
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `Retrieved ${totalStocks} stocks (gainers, losers, most active)`,
+          expanded: false
+        };
+      }
+    } catch (error) {
+      console.error(`[aiStore] Web operation failed:`, error);
+      const opName = op.type === 'search_web' ? 'search' : 
+                     op.type === 'get_stock_quote' ? `get quote for ${op.symbol}` :
+                     op.type === 'get_market_movers' ? 'get market data' : 'fetch';
+      results.push(`**Error:** Failed to ${opName}: ${error}`);
+      updatedTraces[i] = { ...updatedTraces[i], status: 'error', error: String(error) };
+    }
+    updateTraces([...updatedTraces]);
+  }
+  
+  setStatus(null);
+  return results.join('\n\n---\n\n');
+}
+
 const defaultConfig: AIProviderConfig = {
   provider: 'ollama',
   model: 'llama3',
@@ -505,6 +812,8 @@ export const useAIStore = create<AIState>()(
       agentMode: 'chat',
       agentTasks: [],
       agentTaskIndex: -1,
+      webAccessStatus: null,
+      webAccessTraces: [],
       availableModels: {
         ollama: [],
         claude: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
@@ -517,6 +826,26 @@ export const useAIStore = create<AIState>()(
       setConfig: (newConfig) => {
         set((state) => ({
           config: { ...state.config, ...newConfig },
+        }));
+      },
+
+      setWebAccessStatus: (status: WebAccessStatus) => {
+        set({ webAccessStatus: status });
+      },
+
+      setWebAccessTraces: (traces: WebAccessTrace[]) => {
+        set({ webAccessTraces: traces });
+      },
+
+      clearWebAccessTraces: () => {
+        set({ webAccessTraces: [] });
+      },
+
+      toggleWebAccessTraceExpanded: (traceId: string) => {
+        set((state) => ({
+          webAccessTraces: state.webAccessTraces.map((trace) =>
+            trace.id === traceId ? { ...trace, expanded: !trace.expanded } : trace
+          ),
         }));
       },
 
@@ -698,6 +1027,9 @@ export const useAIStore = create<AIState>()(
             systemPrompt += PLAN_MODE_PROMPT;
           }
           
+          // Add web access capability for all modes (with current date)
+          systemPrompt += getCurrentDatePrompt() + getWebAccessPrompt();
+          
           // Add think aloud prompt if enabled
           if (config.thinkAloud) {
             systemPrompt += THINK_ALOUD_PROMPT;
@@ -739,12 +1071,15 @@ export const useAIStore = create<AIState>()(
                 const existingMessages = conv.messages;
                 const lastMessage = existingMessages[existingMessages.length - 1];
                 
+                // Clean web operation tags from displayed content during streaming
+                const displayContent = cleanWebOperationTags(responseContent);
+                
                 let updatedMessages;
                 if (lastMessage?.role === 'assistant') {
                   // Update existing assistant message
                   updatedMessages = existingMessages.map((m, i) =>
                     i === existingMessages.length - 1
-                      ? { ...m, content: responseContent }
+                      ? { ...m, content: displayContent }
                       : m
                   );
                 } else {
@@ -754,7 +1089,7 @@ export const useAIStore = create<AIState>()(
                     {
                       id: crypto.randomUUID(),
                       role: 'assistant' as const,
-                      content: responseContent,
+                      content: displayContent,
                       timestamp: new Date().toISOString(),
                     },
                   ];
@@ -777,22 +1112,254 @@ export const useAIStore = create<AIState>()(
             }
             
             if (chunk.done) {
-              set({ isStreaming: false, thinkingStatus: null });
-              // Auto-save when streaming completes
-              get().saveWorkspaceHistory();
+              // Check for web operations in the response (all modes)
+              const { agentMode: currentMode } = get();
+              const webOps = parseWebOperations(responseContent);
+              
+              if (webOps.length > 0) {
+                // Clean web operation tags from the displayed content
+                const cleanedContent = cleanWebOperationTags(responseContent);
+                
+                // Update assistant message to show cleaned content
+                set((state) => {
+                  const conv = state.activeConversation;
+                  if (!conv) return state;
+                  
+                  const existingMessages = conv.messages;
+                  const lastMessage = existingMessages[existingMessages.length - 1];
+                  
+                  if (lastMessage?.role === 'assistant') {
+                    const updatedMessages = existingMessages.map((m, i) =>
+                      i === existingMessages.length - 1
+                        ? { ...m, content: cleanedContent }
+                        : m
+                    );
+                    
+                    return {
+                      activeConversation: { ...conv, messages: updatedMessages },
+                      conversations: state.conversations.map((c) =>
+                        c.id === conv.id ? { ...conv, messages: updatedMessages } : c
+                      ),
+                    };
+                  }
+                  return state;
+                });
+                
+                // Create and set traces for web operations
+                const traces = createWebAccessTraces(webOps);
+                get().setWebAccessTraces(traces);
+                set({ thinkingStatus: 'Accessing the web...' });
+                
+                // Execute web operations with trace updates
+                executeWebOperationsWithTraces(
+                  webOps, 
+                  traces, 
+                  get().setWebAccessTraces,
+                  get().setWebAccessStatus
+                ).then(async (webResults) => {
+                  // Helper to append web results directly to the message
+                  const appendWebResultsToMessage = (results: string) => {
+                    const finalContent = cleanedContent.trim() 
+                      ? `${cleanedContent.trim()}\n\n${results}`
+                      : results;
+                    
+                    set((state) => {
+                      const currentConv = state.activeConversation;
+                      if (!currentConv) return state;
+                      
+                      const existingMessages = currentConv.messages;
+                      const lastMessage = existingMessages[existingMessages.length - 1];
+                      
+                      if (lastMessage?.role === 'assistant') {
+                        const updatedMessages = existingMessages.map((m, i) =>
+                          i === existingMessages.length - 1
+                            ? { ...m, content: finalContent }
+                            : m
+                        );
+                        
+                        return {
+                          activeConversation: { ...currentConv, messages: updatedMessages },
+                          conversations: state.conversations.map((c) =>
+                            c.id === currentConv.id ? { ...currentConv, messages: updatedMessages } : c
+                          ),
+                        };
+                      }
+                      return state;
+                    });
+                  };
+                  
+                  // Continue the conversation internally with web results
+                  set({ thinkingStatus: 'Processing web results...' });
+                  
+                  try {
+                    const { ai } = await import('../services/tauri');
+                    const conv = get().activeConversation;
+                    if (!conv) {
+                      // Fallback: append results directly
+                      appendWebResultsToMessage(webResults);
+                      set({ isStreaming: false, thinkingStatus: null });
+                      get().clearWebAccessTraces();
+                      get().saveWorkspaceHistory();
+                      return;
+                    }
+                    
+                    // Build continuation messages with web results as context
+                    const continuationMessages = [
+                      { role: 'system', content: systemPrompt, attachments: undefined },
+                      ...conv.messages.slice(0, -1).map(m => ({
+                        role: m.role,
+                        content: m.content,
+                        attachments: m.attachments,
+                      })),
+                      // Include the cleaned assistant response so far
+                      { role: 'assistant', content: cleanedContent, attachments: undefined },
+                      // Add web results as context for continuation
+                      { role: 'user', content: `Here are the web results you requested:\n\n${webResults}\n\nNow please provide your complete response based on this information. Format the data nicely in a table or list. Do not repeat the web access tags.`, attachments: undefined },
+                    ];
+                    
+                    // Track content for the continuation
+                    let continuationContent = cleanedContent ? cleanedContent.trim() + '\n\n' : '';
+                    let hasReceivedContent = false;
+                    
+                    // Set up listener for continuation with timeout
+                    const timeoutMs = 15000;
+                    let timeoutId: ReturnType<typeof setTimeout>;
+                    
+                    const contUnlisten = await ai.onStreamChunk(conversationId, (contChunk) => {
+                      if (contChunk.content) {
+                        hasReceivedContent = true;
+                        clearTimeout(timeoutId);
+                        continuationContent += contChunk.content;
+                        
+                        // Clean any web operation tags from continuation content
+                        const displayContinuationContent = cleanWebOperationTags(continuationContent);
+                        
+                        // Update the assistant message with continued content
+                        set((state) => {
+                          const currentConv = state.activeConversation;
+                          if (!currentConv) return state;
+                          
+                          const existingMessages = currentConv.messages;
+                          const lastMessage = existingMessages[existingMessages.length - 1];
+                          
+                          if (lastMessage?.role === 'assistant') {
+                            const updatedMessages = existingMessages.map((m, i) =>
+                              i === existingMessages.length - 1
+                                ? { ...m, content: displayContinuationContent }
+                                : m
+                            );
+                            
+                            return {
+                              activeConversation: { ...currentConv, messages: updatedMessages },
+                              conversations: state.conversations.map((c) =>
+                                c.id === currentConv.id ? { ...currentConv, messages: updatedMessages } : c
+                              ),
+                            };
+                          }
+                          return state;
+                        });
+                      }
+                      
+                      if (contChunk.done) {
+                        clearTimeout(timeoutId);
+                        // If no content was received, append web results directly
+                        if (!hasReceivedContent) {
+                          appendWebResultsToMessage(webResults);
+                        }
+                        set({ isStreaming: false, thinkingStatus: null });
+                        get().clearWebAccessTraces();
+                        get().saveWorkspaceHistory();
+                        
+                        // Advance agent task if needed
+                        const { agentTasks, agentTaskIndex } = get();
+                        if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
+                          get().advanceAgentTask();
+                        }
+                      }
+                    });
+                    
+                    // Set timeout to fallback to direct append if continuation takes too long
+                    timeoutId = setTimeout(() => {
+                      if (!hasReceivedContent) {
+                        console.log('[aiStore] Continuation timeout, appending results directly');
+                        appendWebResultsToMessage(webResults);
+                        set({ isStreaming: false, thinkingStatus: null });
+                        get().clearWebAccessTraces();
+                        get().saveWorkspaceHistory();
+                        contUnlisten();
+                      }
+                    }, timeoutMs);
+                    
+                    // Make continuation API call
+                    if (config.provider === 'ollama') {
+                      await ai.chatOllama(
+                        config.baseUrl || 'http://localhost:11434',
+                        config.model,
+                        continuationMessages,
+                        config.temperature,
+                        config.maxTokens,
+                        conversationId
+                      );
+                    } else if (config.provider === 'copilot') {
+                      await ai.chatCopilot(
+                        config.model,
+                        continuationMessages,
+                        config.temperature,
+                        config.maxTokens,
+                        conversationId
+                      );
+                    } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
+                      const baseUrl = config.provider === 'openai' 
+                        ? 'https://api.openai.com/v1'
+                        : config.provider === 'claude'
+                        ? 'https://api.anthropic.com/v1'
+                        : config.baseUrl || '';
+                      
+                      await ai.chatOpenAI(
+                        baseUrl,
+                        config.apiKey || '',
+                        config.model,
+                        continuationMessages,
+                        config.temperature,
+                        config.maxTokens,
+                        conversationId
+                      );
+                    }
+                    
+                    clearTimeout(timeoutId);
+                    contUnlisten();
+                  } catch (error) {
+                    console.error('[aiStore] Web continuation failed:', error);
+                    // Fallback: append web results directly to message
+                    appendWebResultsToMessage(webResults);
+                    set({ isStreaming: false, thinkingStatus: null });
+                    get().clearWebAccessTraces();
+                    get().saveWorkspaceHistory();
+                  }
+                }).catch((error) => {
+                  console.error('[aiStore] Web operations failed:', error);
+                  set({ isStreaming: false, thinkingStatus: null });
+                  get().clearWebAccessTraces();
+                  get().saveWorkspaceHistory();
+                });
+              } else {
+                set({ isStreaming: false, thinkingStatus: null });
+                // Auto-save when streaming completes
+                get().saveWorkspaceHistory();
 
-              // Advance agent task progress when a response completes in agent mode
-              const { agentMode: currentMode, agentTasks, agentTaskIndex } = get();
-              if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
-                get().advanceAgentTask();
-              }
+                // Advance agent task progress when a response completes in agent mode
+                const { agentTasks, agentTaskIndex } = get();
+                if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
+                  get().advanceAgentTask();
+                }
 
-              // Process next queued prompt if any
-              const { promptQueue } = get();
-              if (promptQueue.length > 0) {
-                const [nextPrompt, ...remaining] = promptQueue;
-                set({ promptQueue: remaining });
-                setTimeout(() => get().sendMessage(nextPrompt), 100);
+                // Process next queued prompt if any
+                const { promptQueue } = get();
+                if (promptQueue.length > 0) {
+                  const [nextPrompt, ...remaining] = promptQueue;
+                  set({ promptQueue: remaining });
+                  setTimeout(() => get().sendMessage(nextPrompt), 100);
+                }
               }
             }
           });

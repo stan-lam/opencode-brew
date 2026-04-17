@@ -666,3 +666,55 @@ export const appWindow = {
     }
   },
 };
+
+// Web operations (search and fetch)
+export interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface WebContent {
+  url: string;
+  title: string;
+  content: string;
+  content_type: string;
+}
+
+export interface StockQuote {
+  symbol: string;
+  name: string;
+  price: number;
+  change: number;
+  change_percent: number;
+  volume: number;
+  market_cap?: string;
+}
+
+export interface MarketMovers {
+  gainers: StockQuote[];
+  losers: StockQuote[];
+  most_active: StockQuote[];
+}
+
+export const web = {
+  search: async (query: string, maxResults?: number): Promise<WebSearchResult[]> => {
+    const invoke = await getInvoke();
+    return invoke('search_web', { query, maxResults });
+  },
+
+  fetchUrl: async (url: string): Promise<WebContent> => {
+    const invoke = await getInvoke();
+    return invoke('fetch_url', { url });
+  },
+
+  getStockQuote: async (symbol: string): Promise<StockQuote> => {
+    const invoke = await getInvoke();
+    return invoke('get_stock_quote', { symbol });
+  },
+
+  getMarketMovers: async (): Promise<MarketMovers> => {
+    const invoke = await getInvoke();
+    return invoke('get_market_movers');
+  },
+};

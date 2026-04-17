@@ -339,6 +339,10 @@ pub fn run() {
             commands::project::get_npm_scripts,
             commands::window::set_window_title,
             commands::window::set_all_windows_title,
+            commands::web::search_web,
+            commands::web::fetch_url,
+            commands::web::get_stock_quote,
+            commands::web::get_market_movers,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {
