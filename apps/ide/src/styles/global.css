@@ -1,0 +1,224 @@
+:root {
+  /* Font settings - will be overridden by settings */
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-family-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  --font-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  --font-size-base: 14px;
+  --font-size-xs: calc(var(--font-size-base) - 3px);
+  --font-size-sm: calc(var(--font-size-base) - 2px);
+  --font-size-md: var(--font-size-base);
+  --font-size-lg: calc(var(--font-size-base) + 1px);
+  
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  
+  --transition-fast: 0.1s ease;
+  --transition-normal: 0.2s ease;
+}
+
+/* Dark theme (default) */
+:root, [data-theme="dark"] {
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-tertiary: #2d2d30;
+  --bg-hover: #37373d;
+  --bg-active: #094771;
+  --bg-selection: #264f78;
+  
+  --border-color: #3c3c3c;
+  --border-subtle: #2d2d30;
+  
+  --text-primary: #cccccc;
+  --text-secondary: #9d9d9d;
+  --text-muted: #6d6d6d;
+  --text-accent: #569cd6;
+  
+  --accent-blue: #007acc;
+  --accent-green: #4ec9b0;
+  --accent-yellow: #dcdcaa;
+  --accent-orange: #ce9178;
+  --accent-red: #f14c4c;
+  --accent-purple: #c586c0;
+  
+  --success-color: #3fb950;
+  --warning-color: #d29922;
+  --error-color: #f85149;
+  --accent-color: #007acc;
+  --accent-color-hover: #005a9e;
+  
+  --panel-header-bg: #2d2d30;
+  --scrollbar-bg: #1e1e1e;
+  --scrollbar-thumb: #424242;
+  --scrollbar-thumb-hover: #4f4f4f;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f3f3;
+  --bg-tertiary: #e8e8e8;
+  --bg-hover: #e0e0e0;
+  --bg-active: #cce5ff;
+  --bg-selection: #add6ff;
+  
+  --border-color: #d4d4d4;
+  --border-subtle: #e8e8e8;
+  
+  --text-primary: #1e1e1e;
+  --text-secondary: #616161;
+  --text-muted: #8e8e8e;
+  --text-accent: #0066bf;
+  
+  --accent-blue: #0066bf;
+  --accent-green: #107c41;
+  --accent-yellow: #795e26;
+  --accent-orange: #a31515;
+  --accent-red: #cd3131;
+  --accent-purple: #af00db;
+  
+  --success-color: #1a7f37;
+  --warning-color: #9a6700;
+  --error-color: #cf222e;
+  --accent-color: #0066bf;
+  --accent-color-hover: #004c8c;
+  
+  --panel-header-bg: #f3f3f3;
+  --scrollbar-bg: #f3f3f3;
+  --scrollbar-thumb: #c1c1c1;
+  --scrollbar-thumb-hover: #a8a8a8;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 5px;
+  border: 2px solid var(--scrollbar-bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--scrollbar-bg);
+}
+
+/* Selection */
+::selection {
+  background-color: var(--bg-selection);
+}
+
+/* Focus outline */
+:focus-visible {
+  outline: 1px solid var(--accent-blue);
+  outline-offset: -1px;
+}
+
+/* Button reset */
+button {
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Input reset */
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+
+input:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+/* Link reset */
+a {
+  color: var(--accent-blue);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Code */
+code, pre {
+  font-family: var(--font-family-mono);
+}
+
+/* Drag region for title bar */
+.titlebar-drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Utility classes */
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-1 { flex: 1; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.p-1 { padding: 4px; }
+.p-2 { padding: 8px; }
+.p-3 { padding: 12px; }
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

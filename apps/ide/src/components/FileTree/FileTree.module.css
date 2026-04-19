@@ -1,0 +1,177 @@
+.fileTree {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.toolbarButton {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.toolbarButton:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.treeContent {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.treeItem {
+  user-select: none;
+}
+
+.itemRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.itemRow:hover {
+  background-color: var(--bg-hover);
+}
+
+.itemRow.selected {
+  background-color: var(--bg-active);
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.fileIcon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.name {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.children {
+  display: flex;
+  flex-direction: column;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 20px;
+  text-align: center;
+}
+
+.openButton {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background-color: var(--accent-blue);
+  color: white;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.openButton:hover {
+  background-color: #005a9e;
+}
+
+.loading {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.newItemInput {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-tertiary);
+}
+
+.newItemInput input {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: var(--font-size-sm);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.newItemInput input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.createBtn,
+.cancelBtn {
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-sm);
+}
+
+.createBtn {
+  background-color: var(--accent-blue);
+  color: white;
+}
+
+.createBtn:hover {
+  background-color: var(--accent-color-hover);
+}
+
+.cancelBtn {
+  background-color: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.cancelBtn:hover {
+  background-color: var(--bg-active);
+}

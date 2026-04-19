@@ -4,14 +4,15 @@
   "version": "0.1.0",
   "identifier": "com.opencodebrew.app",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../apps/launcher/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "npm run dev:all",
+    "beforeBuildCommand": "npm run build:launcher"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "OpenCodeBrew",
         "width": 1400,
         "height": 900,
