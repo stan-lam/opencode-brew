@@ -242,40 +242,292 @@ pub struct MarketMovers {
     pub most_active: Vec<StockQuote>,
 }
 
-// Try Google Finance first, then MarketWatch as fallback
+// Try multiple sources for stock quotes
 #[command]
 pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
     let client = create_client()?;
-    let symbol_upper = symbol.to_uppercase();
+    let symbol_upper = symbol.to_uppercase().trim().to_string();
     
-    println!("[web::get_stock_quote] Fetching quote for: {}", symbol_upper);
+    println!("[web::get_stock_quote] ==============================================");
+    println!("[web::get_stock_quote] Fetching quote for: '{}'", symbol_upper);
+    println!("[web::get_stock_quote] ==============================================");
     
-    // Try Google Finance first
-    if let Ok(quote) = fetch_google_finance_quote(&client, &symbol_upper).await {
-        if quote.price > 0.0 {
-            return Ok(quote);
+    // Try Google Finance FIRST (most reliable for exact symbol matching)
+    println!("[web::get_stock_quote] Trying Google Finance...");
+    match fetch_google_finance_quote(&client, &symbol_upper).await {
+        Ok(quote) if quote.price > 0.0 => {
+            // Final verification: returned symbol must match requested
+            if quote.symbol.to_uppercase() == symbol_upper {
+                println!("[web::get_stock_quote] SUCCESS from Google Finance: {} @ ${:.2}", quote.symbol, quote.price);
+                return Ok(quote);
+            } else {
+                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
+            }
         }
+        Ok(_) => println!("[web::get_stock_quote] Google Finance returned zero price"),
+        Err(e) => println!("[web::get_stock_quote] Google Finance failed: {}", e),
+    }
+    
+    // Try Stocktwits as secondary
+    println!("[web::get_stock_quote] Trying Stocktwits...");
+    match fetch_stocktwits_quote(&client, &symbol_upper).await {
+        Ok(quote) if quote.price > 0.0 => {
+            if quote.symbol.to_uppercase() == symbol_upper {
+                println!("[web::get_stock_quote] SUCCESS from Stocktwits: {} @ ${:.2}", quote.symbol, quote.price);
+                return Ok(quote);
+            } else {
+                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
+            }
+        }
+        Ok(_) => println!("[web::get_stock_quote] Stocktwits returned zero price"),
+        Err(e) => println!("[web::get_stock_quote] Stocktwits failed: {}", e),
     }
     
     // Fallback to MarketWatch
-    println!("[web::get_stock_quote] Google Finance failed, trying MarketWatch...");
-    fetch_marketwatch_quote(&client, &symbol_upper).await
+    println!("[web::get_stock_quote] Trying MarketWatch...");
+    match fetch_marketwatch_quote(&client, &symbol_upper).await {
+        Ok(quote) if quote.price > 0.0 => {
+            if quote.symbol.to_uppercase() == symbol_upper {
+                println!("[web::get_stock_quote] SUCCESS from MarketWatch: {} @ ${:.2}", quote.symbol, quote.price);
+                return Ok(quote);
+            } else {
+                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
+            }
+        }
+        Ok(_) => println!("[web::get_stock_quote] MarketWatch returned zero price"),
+        Err(e) => println!("[web::get_stock_quote] MarketWatch failed: {}", e),
+    }
+    
+    println!("[web::get_stock_quote] FAILED: Could not get quote for '{}'", symbol_upper);
+    Err(format!("Could not find stock quote for '{}'. Please verify the ticker symbol is correct.", symbol_upper))
+}
+
+async fn fetch_stocktwits_quote(client: &Client, symbol: &str) -> Result<StockQuote, String> {
+    let symbol_upper = symbol.to_uppercase();
+    let url = format!("https://stocktwits.com/symbol/{}", symbol_upper);
+    println!("[web::stocktwits] Fetching quote from: {}", url);
+    
+    let response = client.get(&url).send().await
+        .map_err(|e| format!("Stocktwits request failed: {}", e))?;
+    
+    // Check if we got redirected to a different symbol page
+    let final_url = response.url().to_string().to_uppercase();
+    if !final_url.ends_with(&format!("/{}", symbol_upper)) && 
+       !final_url.ends_with(&format!("/{}#", symbol_upper)) &&
+       !final_url.contains(&format!("/SYMBOL/{}", symbol_upper)) {
+        println!("[web::stocktwits] URL redirected to different symbol: {} (expected {})", final_url, symbol_upper);
+        return Err(format!("Symbol {} redirected to different page", symbol_upper));
+    }
+    
+    if !response.status().is_success() {
+        return Err(format!("Stocktwits returned status: {}", response.status()));
+    }
+    
+    let html = response.text().await
+        .map_err(|e| format!("Failed to read Stocktwits response: {}", e))?;
+    
+    // Strict verification: symbol must appear in exact format in the HTML
+    // Check for exact symbol in various HTML patterns
+    let html_upper = html.to_uppercase();
+    let exact_symbol_patterns = [
+        format!(">{}<", symbol_upper),
+        format!("\"{}\"", symbol_upper),
+        format!("/{}\">", symbol_upper),
+        format!("/SYMBOL/{}", symbol_upper),
+        format!("DATA-SYMBOL=\"{}\"", symbol_upper),
+    ];
+    
+    let found_exact = exact_symbol_patterns.iter().any(|p| html_upper.contains(p));
+    if !found_exact {
+        println!("[web::stocktwits] Symbol {} not found in page content", symbol_upper);
+        return Err(format!("Symbol {} not found on Stocktwits", symbol_upper));
+    }
+    
+    // Also verify we don't have a different symbol that looks similar (e.g., HIMS vs HIMX)
+    // Check if page title or header contains the exact symbol
+    if let Ok(re) = regex::Regex::new(&format!(r#"(?i)<title>[^<]*\b{}\b"#, symbol_upper)) {
+        if !re.is_match(&html) {
+            // Title doesn't contain our symbol - might be wrong page
+            // Try to extract what symbol the page is actually for
+            if let Ok(title_re) = regex::Regex::new(r#"<title>\s*([A-Z]{1,5})\s*-"#) {
+                if let Some(caps) = title_re.captures(&html.to_uppercase()) {
+                    if let Some(m) = caps.get(1) {
+                        let page_symbol = m.as_str();
+                        if page_symbol != symbol_upper {
+                            println!("[web::stocktwits] Page is for {} not {}", page_symbol, symbol_upper);
+                            return Err(format!("Page is for {} not {}", page_symbol, symbol_upper));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    parse_stocktwits_html(&html, &symbol_upper)
+}
+
+fn parse_stocktwits_html(html: &str, symbol: &str) -> Result<StockQuote, String> {
+    let mut price = 0.0;
+    let mut prev_close = 0.0;
+    let mut volume = 0u64;
+    let mut name = symbol.to_string();
+    
+    // Parse price - look for "Price" label followed by value like "$11.02"
+    if let Ok(re) = regex::Regex::new(r#"Price[^$]*\$(\d+\.?\d*)"#) {
+        if let Some(caps) = re.captures(html) {
+            if let Some(m) = caps.get(1) {
+                if let Ok(p) = m.as_str().parse::<f64>() {
+                    price = p;
+                    println!("[web::stocktwits] Parsed price: ${:.2}", price);
+                }
+            }
+        }
+    }
+    
+    // Also try to find price in structured data format
+    if price == 0.0 {
+        if let Ok(re) = regex::Regex::new(r#"\$(\d+\.\d{2})"#) {
+            for caps in re.captures_iter(html) {
+                if let Some(m) = caps.get(1) {
+                    if let Ok(p) = m.as_str().parse::<f64>() {
+                        if p > 0.0 && p < 100000.0 {
+                            price = p;
+                            println!("[web::stocktwits] Parsed price (alt): ${:.2}", price);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Parse previous close - look for "Prev Close" followed by value
+    if let Ok(re) = regex::Regex::new(r#"Prev\s*Close[^$]*\$(\d+\.?\d*)"#) {
+        if let Some(caps) = re.captures(html) {
+            if let Some(m) = caps.get(1) {
+                if let Ok(p) = m.as_str().parse::<f64>() {
+                    prev_close = p;
+                    println!("[web::stocktwits] Parsed prev close: ${:.2}", prev_close);
+                }
+            }
+        }
+    }
+    
+    // Parse volume - look for "Volume" followed by value like "2.29M"
+    if let Ok(re) = regex::Regex::new(r#"(?i)Volume[^\d]*(\d+\.?\d*)\s*([KMB])?"#) {
+        if let Some(caps) = re.captures(html) {
+            if let Some(m) = caps.get(1) {
+                if let Ok(v) = m.as_str().parse::<f64>() {
+                    let multiplier = match caps.get(2).map(|m| m.as_str().to_uppercase()).as_deref() {
+                        Some("K") => 1_000.0,
+                        Some("M") => 1_000_000.0,
+                        Some("B") => 1_000_000_000.0,
+                        _ => 1.0,
+                    };
+                    volume = (v * multiplier) as u64;
+                    println!("[web::stocktwits] Parsed volume: {}", volume);
+                }
+            }
+        }
+    }
+    
+    // Try to get company name from page
+    if let Ok(re) = regex::Regex::new(&format!(r#"{}[^<]*([A-Za-z][A-Za-z\s,\.]+(?:Inc|Corp|Ltd|Co|LLC|LP)\.?)"#, symbol)) {
+        if let Some(caps) = re.captures(html) {
+            if let Some(m) = caps.get(1) {
+                name = m.as_str().trim().to_string();
+                println!("[web::stocktwits] Parsed name: {}", name);
+            }
+        }
+    }
+    
+    // Also try title tag for name
+    if name == symbol {
+        if let Ok(re) = regex::Regex::new(r#"<title>([^:]+):"#) {
+            if let Some(caps) = re.captures(html) {
+                if let Some(m) = caps.get(1) {
+                    let title_name = m.as_str().trim();
+                    if !title_name.is_empty() && title_name != symbol {
+                        name = title_name.to_string();
+                    }
+                }
+            }
+        }
+    }
+    
+    // Calculate change from price and prev_close
+    let change = if prev_close > 0.0 { price - prev_close } else { 0.0 };
+    let change_percent = if prev_close > 0.0 { (change / prev_close) * 100.0 } else { 0.0 };
+    
+    println!("[web::stocktwits] Calculated change: ${:.2} ({:.2}%)", change, change_percent);
+    
+    if price > 0.0 {
+        Ok(StockQuote {
+            symbol: symbol.to_string(),
+            name,
+            price,
+            change,
+            change_percent,
+            volume,
+            market_cap: None,
+        })
+    } else {
+        Err("Could not parse Stocktwits data".to_string())
+    }
 }
 
 async fn fetch_google_finance_quote(client: &Client, symbol: &str) -> Result<StockQuote, String> {
     // Try different exchanges
     let exchanges = ["NASDAQ", "NYSE", "NYSEARCA", "AMEX"];
+    let symbol_upper = symbol.to_uppercase();
     
-    for exchange in exchanges {
-        let url = format!("https://www.google.com/finance/quote/{}:{}", symbol, exchange);
+    for exchange in &exchanges {
+        let url = format!("https://www.google.com/finance/quote/{}:{}", symbol_upper, exchange);
+        println!("[web::google] Trying URL: {}", url);
         
         if let Ok(response) = client.get(&url).send().await {
+            // Check final URL to see if we got redirected to a different symbol
+            let final_url = response.url().to_string().to_uppercase();
+            
             if response.status().is_success() {
+                // STRICT verification: final URL must contain our exact symbol followed by : or /
+                // This prevents HIMX being confused with HIMS
+                let expected_pattern = format!("/{}:", symbol_upper);
+                let alt_pattern = format!("/{}/", symbol_upper);
+                
+                if !final_url.contains(&expected_pattern) && !final_url.contains(&alt_pattern) {
+                    println!("[web::google] URL doesn't contain exact symbol pattern: {} (looking for '{}' or '{}')", 
+                        final_url, expected_pattern, alt_pattern);
+                    continue;
+                }
+                
                 if let Ok(html) = response.text().await {
-                    if let Ok(quote) = parse_google_finance_html(&html, symbol) {
+                    let html_upper = html.to_uppercase();
+                    
+                    // STRICT verification: HTML must contain the exact symbol:exchange combo
+                    let exact_match = format!("{}:{}", symbol_upper, exchange.to_uppercase());
+                    if !html_upper.contains(&exact_match) {
+                        println!("[web::google] HTML doesn't contain exact match '{}'", exact_match);
+                        
+                        // Try to find what symbol the page is actually showing
+                        if let Ok(re) = regex::Regex::new(r#"(?i)/FINANCE/QUOTE/([A-Z0-9]+):"#) {
+                            if let Some(caps) = re.captures(&html) {
+                                if let Some(m) = caps.get(1) {
+                                    let actual_symbol = m.as_str().to_uppercase();
+                                    if actual_symbol != symbol_upper {
+                                        println!("[web::google] Page is actually for symbol '{}', not '{}'", actual_symbol, symbol_upper);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    
+                    if let Ok(quote) = parse_google_finance_html(&html, &symbol_upper) {
                         if quote.price > 0.0 {
                             println!("[web::google] Got quote for {} from {}: ${:.2} ({:+.2}%)", 
-                                symbol, exchange, quote.price, quote.change_percent);
+                                symbol_upper, exchange, quote.price, quote.change_percent);
                             return Ok(quote);
                         }
                     }
@@ -285,14 +537,16 @@ async fn fetch_google_finance_quote(client: &Client, symbol: &str) -> Result<Sto
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     
-    println!("[web::google] Failed to get quote for {} from any exchange", symbol);
-    Err(format!("Could not find {} on Google Finance", symbol))
+    println!("[web::google] Symbol {} not found on any exchange", symbol_upper);
+    Err(format!("Symbol '{}' not found. Please verify the ticker symbol is correct.", symbol_upper))
 }
 
 fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, String> {
     let document = Html::parse_document(html);
     
-    // Method 1: Try data attributes
+    println!("[web::google] Parsing HTML for symbol: {}", symbol);
+    
+    // Method 1: Try data attributes first (most reliable)
     let price_selector = Selector::parse("[data-last-price]").unwrap();
     let mut price = document.select(&price_selector)
         .next()
@@ -314,22 +568,27 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
         .and_then(|c| c.parse::<f64>().ok())
         .unwrap_or(0.0);
     
-    // Method 2: Try regex patterns if data attributes didn't work
+    println!("[web::google] Data attributes - price: {}, change: {}, change_pct: {}", price, change, change_percent);
+    
+    // Method 2: Parse from page content using regex
     if price == 0.0 {
-        // Look for price in JSON-LD or script tags
+        // Look for the main price which appears prominently
         let price_patterns = [
-            r#""price"\s*:\s*"?(\d+\.?\d*)""#,
-            r#"regularMarketPrice.*?(\d+\.?\d+)"#,
-            r#"\$(\d{1,4}\.\d{2})"#,
+            r#">\$(\d{1,6}(?:,\d{3})*\.\d{2})<"#,
+            r#"\$(\d{1,6}(?:,\d{3})*\.\d{2})"#,
+            r#""regularMarketPrice":\{"raw":(\d+\.?\d*)"#,
+            r#""price":\s*"?(\d+\.?\d*)"#,
         ];
         
         for pattern in price_patterns {
             if let Ok(re) = regex::Regex::new(pattern) {
                 if let Some(caps) = re.captures(html) {
                     if let Some(m) = caps.get(1) {
-                        if let Ok(p) = m.as_str().parse::<f64>() {
-                            if p > 0.0 && p < 100000.0 {
+                        let price_str = m.as_str().replace(",", "");
+                        if let Ok(p) = price_str.parse::<f64>() {
+                            if p > 0.0 && p < 1000000.0 {
                                 price = p;
+                                println!("[web::google] Parsed price via regex: ${:.2}", price);
                                 break;
                             }
                         }
@@ -339,31 +598,50 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
         }
     }
     
-    // Try to find change percent via regex
-    if change_percent == 0.0 && price > 0.0 {
+    // Method 3: Extract change info from patterns in the HTML
+    // Google Finance shows: $29.37 [arrow] +2.45% (+$0.70) Today
+    if price > 0.0 && (change_percent == 0.0 || change == 0.0) {
+        // Look for patterns with sign, percentage, and dollar change
         let change_patterns = [
-            r#"([+-]?\d+\.?\d*)\s*%"#,
-            r#""percentChange"\s*:\s*"?([+-]?\d+\.?\d*)"#,
+            // Format: +2.45% or -1.26% (change percent with sign)
+            r#"([+-])(\d{1,2}\.\d{1,2})%"#,
+            // Format: regularMarketChangePercent in JSON
+            r#""regularMarketChangePercent":\{"raw":([+-]?\d+\.?\d*)"#,
+            // Format from data in script tags
+            r#"changePercent["\s:]+([+-]?\d+\.?\d*)"#,
         ];
         
         for pattern in change_patterns {
             if let Ok(re) = regex::Regex::new(pattern) {
-                if let Some(caps) = re.captures(html) {
-                    if let Some(m) = caps.get(1) {
-                        if let Ok(pct) = m.as_str().parse::<f64>() {
-                            if pct.abs() < 100.0 {
-                                change_percent = pct;
-                                change = price * change_percent / 100.0;
-                                break;
-                            }
-                        }
+                for caps in re.captures_iter(html) {
+                    let pct = if caps.len() == 3 {
+                        // Pattern with separate sign
+                        let sign = caps.get(1).map(|m| m.as_str()).unwrap_or("+");
+                        let value = caps.get(2).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0);
+                        if sign == "-" { -value } else { value }
+                    } else if caps.len() == 2 {
+                        // Pattern with embedded sign
+                        caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    
+                    // Valid change percent should be reasonable (< 50%)
+                    if pct.abs() > 0.001 && pct.abs() < 50.0 {
+                        change_percent = pct;
+                        change = price * change_percent / 100.0;
+                        println!("[web::google] Parsed change: {:+.2}% (${:+.2})", change_percent, change);
+                        break;
                     }
+                }
+                if change_percent != 0.0 {
+                    break;
                 }
             }
         }
     }
     
-    // Get company name from title
+    // Get company name from title or page content
     let title_selector = Selector::parse("title").unwrap();
     let name = document.select(&title_selector)
         .next()
@@ -372,6 +650,7 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
             t.split(" Stock Price")
                 .next()
                 .or_else(|| t.split(" - Google").next())
+                .or_else(|| t.split('(').next())
                 .unwrap_or(symbol)
                 .trim()
                 .to_string()
@@ -394,12 +673,21 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
 }
 
 async fn fetch_marketwatch_quote(client: &Client, symbol: &str) -> Result<StockQuote, String> {
-    let url = format!("https://www.marketwatch.com/investing/stock/{}", symbol.to_lowercase());
+    let symbol_upper = symbol.to_uppercase();
+    let symbol_lower = symbol.to_lowercase();
+    let url = format!("https://www.marketwatch.com/investing/stock/{}", symbol_lower);
     
-    println!("[web::marketwatch] Fetching quote for {} from {}", symbol, url);
+    println!("[web::marketwatch] Fetching quote for {} from {}", symbol_upper, url);
     
     let response = client.get(&url).send().await
         .map_err(|e| format!("MarketWatch request failed: {}", e))?;
+    
+    // Check if we got redirected to a different symbol
+    let final_url = response.url().to_string().to_lowercase();
+    if !final_url.contains(&format!("/stock/{}", symbol_lower)) {
+        println!("[web::marketwatch] URL redirected to different stock: {}", final_url);
+        return Err(format!("MarketWatch redirected {} to different symbol", symbol_upper));
+    }
     
     if !response.status().is_success() {
         return Err(format!("MarketWatch returned status: {}", response.status()));
@@ -407,6 +695,15 @@ async fn fetch_marketwatch_quote(client: &Client, symbol: &str) -> Result<StockQ
     
     let html = response.text().await
         .map_err(|e| format!("Failed to read MarketWatch response: {}", e))?;
+    
+    // Verify the page is for our exact symbol
+    let html_upper = html.to_uppercase();
+    if !html_upper.contains(&format!(">{}<", symbol_upper)) &&
+       !html_upper.contains(&format!("\"SYMBOL\":\"{}\"", symbol_upper)) &&
+       !html_upper.contains(&format!("/STOCK/{}", symbol_upper)) {
+        println!("[web::marketwatch] Page doesn't contain exact symbol {}", symbol_upper);
+        return Err(format!("MarketWatch page is not for symbol {}", symbol_upper));
+    }
     
     let document = Html::parse_document(&html);
     

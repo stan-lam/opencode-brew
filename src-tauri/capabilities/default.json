@@ -3,11 +3,18 @@
   "identifier": "default",
   "description": "Capability for all windows",
   "windows": ["*"],
+  "remote": {
+    "urls": ["http://localhost:*"]
+  },
   "permissions": [
     "core:default",
     "core:event:default",
     "core:event:allow-emit",
     "core:event:allow-listen",
+    "core:window:default",
+    "core:window:allow-create",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",

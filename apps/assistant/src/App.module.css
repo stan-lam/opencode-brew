@@ -1,0 +1,108 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  padding: 12px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  gap: 24px;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent-purple);
+}
+
+.title h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.nav {
+  display: flex;
+  gap: 4px;
+}
+
+.navBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+
+.navBtn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.navBtn.active {
+  background: var(--bg-tertiary);
+  color: var(--accent-purple);
+}
+
+.actions {
+  margin-left: auto;
+}
+
+.newAgentBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--accent-purple);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.newAgentBtn:hover {
+  background: #b585f8;
+}
+
+.main {
+  flex: 1;
+  overflow: hidden;
+}
+
+.agentsLayout {
+  display: flex;
+  height: 100%;
+}
+
+.detailPanel {
+  flex: 1;
+  overflow: hidden;
+  border-left: 1px solid var(--border-color);
+}
+
+.emptyDetail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+.emptyIcon {
+  opacity: 0.3;
+}

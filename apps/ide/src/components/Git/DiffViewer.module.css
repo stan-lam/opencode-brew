@@ -1,0 +1,181 @@
+.diffViewer {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  gap: 12px;
+}
+
+.fileInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.status {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.filePath {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats {
+  display: flex;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+}
+
+.additions {
+  color: var(--accent-green);
+}
+
+.deletions {
+  color: var(--accent-red);
+}
+
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  background: none;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.closeBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.diffContent {
+  flex: 1;
+  overflow: auto;
+}
+
+.hunk {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.hunkHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+  user-select: none;
+}
+
+.hunkHeader:hover {
+  background: var(--bg-hover);
+}
+
+.hunkInfo {
+  color: var(--accent-blue);
+}
+
+.hunkLines {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.line {
+  display: flex;
+  min-height: 20px;
+}
+
+.line.context {
+  background: var(--bg-primary);
+}
+
+.line.addition {
+  background: rgba(46, 160, 67, 0.15);
+}
+
+.line.deletion {
+  background: rgba(248, 81, 73, 0.15);
+}
+
+.lineNumber {
+  width: 45px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.line.addition .lineNumber:last-of-type {
+  background: rgba(46, 160, 67, 0.2);
+}
+
+.line.deletion .lineNumber:first-of-type {
+  background: rgba(248, 81, 73, 0.2);
+}
+
+.lineSign {
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.line.addition .lineSign {
+  color: var(--accent-green);
+}
+
+.line.deletion .lineSign {
+  color: var(--accent-red);
+}
+
+.lineContent {
+  flex: 1;
+  padding: 0 8px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.loading,
+.error,
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.error {
+  color: var(--accent-red);
+}

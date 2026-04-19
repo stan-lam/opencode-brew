@@ -1,0 +1,199 @@
+.tabs {
+  display: flex;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.tabs::-webkit-scrollbar {
+  height: 3px;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background-color: var(--bg-tertiary);
+  border-right: 1px solid var(--border-color);
+  cursor: pointer;
+  min-width: 0;
+  max-width: 200px;
+  transition: background-color var(--transition-fast);
+}
+
+.tab:hover {
+  background-color: var(--bg-hover);
+}
+
+.tab.active {
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--bg-primary);
+  margin-bottom: -1px;
+}
+
+.tabName {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab.active .tabName {
+  color: var(--text-primary);
+}
+
+.dirty {
+  color: var(--accent-orange);
+  margin-right: 4px;
+}
+
+.closeBtn {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+
+.tab:hover .closeBtn {
+  opacity: 1;
+}
+
+.closeBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tabIcon {
+  color: var(--accent-blue);
+  flex-shrink: 0;
+}
+
+.diffTab {
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.diffTab.active {
+  background-color: var(--bg-primary);
+}
+
+.diffTab .tabName {
+  color: var(--accent-blue);
+}
+
+.diffTab.active .tabName {
+  color: var(--text-primary);
+}
+
+.historyTab {
+  background-color: rgba(139, 92, 246, 0.1);
+}
+
+.historyTab.active {
+  background-color: var(--bg-primary);
+}
+
+.historyTab .tabIcon {
+  color: var(--accent-purple);
+}
+
+.historyTab .tabName {
+  color: var(--accent-purple);
+}
+
+.historyTab.active .tabName {
+  color: var(--text-primary);
+}
+
+.dialogOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.dialogTitle {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+}
+
+.dialogMessage {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  margin: 0 0 8px 0;
+}
+
+.dialogSubtext {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin: 0 0 20px 0;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.saveBtn,
+.cancelBtn,
+.discardBtn {
+  padding: 8px 16px;
+  font-size: var(--font-size-sm);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.saveBtn {
+  background-color: var(--accent-blue);
+  color: white;
+}
+
+.saveBtn:hover {
+  background-color: var(--accent-color-hover);
+}
+
+.cancelBtn {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+
+.cancelBtn:hover {
+  background-color: var(--bg-hover);
+}
+
+.discardBtn {
+  background-color: transparent;
+  color: var(--text-secondary);
+}
+
+.discardBtn:hover {
+  color: var(--accent-red);
+}

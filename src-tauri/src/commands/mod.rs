@@ -7,3 +7,6 @@ pub mod project;
 pub mod window;
 pub mod web;
 pub mod mcp;
+pub mod notes;
+pub mod scheduler;
+pub mod settings;
