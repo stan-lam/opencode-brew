@@ -21,6 +21,7 @@ export interface ActionType {
   arguments?: Record<string, any>;
   prompt?: string;
   model?: string;
+  system_prompt?: string;
   // save_file specific
   path?: string;
   content?: string;

@@ -204,6 +204,8 @@ struct OllamaChatResponse {
 struct OllamaMessage {
     role: String,
     content: String,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -595,7 +597,7 @@ pub async fn copilot_billing_info(org: String) -> Result<CopilotBillingInfo, Str
     Ok(data.seat_breakdown)
 }
 
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn chat_ollama(
     app: AppHandle,
     base_url: Option<String>,
@@ -605,8 +607,18 @@ pub async fn chat_ollama(
     max_tokens: Option<i32>,
     conversation_id: String,
 ) -> Result<String, String> {
-    let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-    let client = Client::new();
+    use std::time::Duration;
+    
+    println!("[ai.rs] chat_ollama called with conversation_id: {}", conversation_id);
+    let raw_url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
+    // Replace localhost with 127.0.0.1 to avoid DNS resolution issues
+    let url = raw_url.replace("localhost", "127.0.0.1");
+    println!("[ai.rs] Using Ollama URL: {}", url);
+    
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
     // Create cancellation channel for this conversation
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
@@ -660,12 +672,25 @@ pub async fn chat_ollama(
         }),
     };
     
+    println!("[ai.rs] Sending request to Ollama: model={}, messages={}", request.model, request.messages.len());
+    println!("[ai.rs] Request URL: {}/api/chat", url);
+    
+    // Debug: serialize the request to see what we're sending
+    if let Ok(json) = serde_json::to_string(&request) {
+        println!("[ai.rs] Request body length: {} bytes", json.len());
+    }
+    
     let response = client
         .post(format!("{}/api/chat", url))
         .json(&request)
         .send()
         .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
+        .map_err(|e| {
+            println!("[ai.rs] Request failed with error: {:?}", e);
+            format!("Failed to send request: {}", e)
+        })?;
+    
+    println!("[ai.rs] Got response status: {}", response.status());
     
     if !response.status().is_success() {
         return Err(format!("Ollama error: {}", response.status()));
@@ -673,6 +698,7 @@ pub async fn chat_ollama(
     
     let mut stream = response.bytes_stream();
     let mut full_content = String::new();
+    println!("[ai.rs] Starting to process stream...");
     
     loop {
         tokio::select! {
@@ -697,12 +723,40 @@ pub async fn chat_ollama(
                             
                             if let Ok(response) = serde_json::from_str::<OllamaChatResponse>(line) {
                                 if let Some(message) = response.message {
-                                    full_content.push_str(&message.content);
+                                    // Handle both content and thinking (for models like gemma4)
+                                    let event_name = format!("ai-stream-{}", conversation_id);
                                     
-                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
-                                        content: message.content,
-                                        done: response.done,
-                                    });
+                                    // If there's thinking content, emit it with a thinking indicator
+                                    if let Some(thinking) = &message.thinking {
+                                        if !thinking.is_empty() {
+                                            if full_content.is_empty() {
+                                                println!("[ai.rs] Emitting thinking to '{}'", event_name);
+                                            }
+                                            // Emit thinking content (frontend can style it differently)
+                                            let _ = app.emit(&event_name, StreamChunk {
+                                                content: thinking.clone(),
+                                                done: false,
+                                            });
+                                        }
+                                    }
+                                    
+                                    // Emit regular content
+                                    if !message.content.is_empty() {
+                                        full_content.push_str(&message.content);
+                                        if full_content.len() < 50 {
+                                            println!("[ai.rs] Emitting content to '{}': len={}", event_name, message.content.len());
+                                        }
+                                        let _ = app.emit(&event_name, StreamChunk {
+                                            content: message.content,
+                                            done: response.done,
+                                        });
+                                    } else if response.done {
+                                        // Emit done signal even if content is empty
+                                        let _ = app.emit(&event_name, StreamChunk {
+                                            content: String::new(),
+                                            done: true,
+                                        });
+                                    }
                                 }
                                 
                                 if response.done {
@@ -733,8 +787,8 @@ pub async fn chat_ollama(
     Ok(full_content)
 }
 
-#[command]
-pub async fn chat_openai_compatible(
+#[command(rename_all = "camelCase")]
+pub async fn chat_openai(
     app: AppHandle,
     base_url: String,
     api_key: String,
@@ -806,7 +860,7 @@ pub async fn chat_openai_compatible(
         model,
         messages: openai_messages,
         temperature,
-        max_tokens,
+        max_tokens: max_tokens,
         stream: true,
     };
     
@@ -891,7 +945,7 @@ pub async fn chat_openai_compatible(
     Ok(full_content)
 }
 
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn chat_copilot(
     app: AppHandle,
     model: String,
@@ -973,7 +1027,7 @@ pub async fn chat_copilot(
         model,
         messages: openai_messages,
         temperature,
-        max_tokens,
+        max_tokens: max_tokens,
         stream: true,
     };
 

@@ -59,6 +59,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_http::init())
         .setup(|app| {
             // App menu (OpenCodeBrew) - macOS style app menu
             let about = PredefinedMenuItem::about(app, Some("About OpenCodeBrew"), None)?;
@@ -314,7 +315,7 @@ pub fn run() {
             commands::git::git_create_branch,
             commands::git::git_remotes,
             commands::ai::chat_ollama,
-            commands::ai::chat_openai_compatible,
+            commands::ai::chat_openai,
             commands::ai::chat_copilot,
             commands::ai::list_ollama_models,
             commands::ai::list_copilot_models,

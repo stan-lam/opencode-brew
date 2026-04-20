@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Plus, Trash2 } from 'lucide-react';
+import { X, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 import { useAssistantStore, Agent, Action, TriggerType, ActionType } from '../store/assistantStore';
 import styles from './AgentBuilder.module.css';
 
@@ -232,6 +232,8 @@ interface ActionEditorProps {
 }
 
 function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) {
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  
   const handleTypeChange = (type: string) => {
     let newActionType: ActionType;
     switch (type) {
@@ -245,7 +247,7 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
         newActionType = { type: 'mcp', server_id: '', tool_name: '', arguments: {} };
         break;
       case 'ai_prompt':
-        newActionType = { type: 'ai_prompt', prompt: '' };
+        newActionType = { type: 'ai_prompt', prompt: '', system_prompt: '' };
         break;
       case 'save_file':
         newActionType = { type: 'save_file', path: '', content: '{{previous_output}}', append: false };
@@ -254,6 +256,7 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
         return;
     }
     onUpdate({ action_type: newActionType });
+    setShowAdvanced(false);
   };
 
   return (
@@ -336,6 +339,34 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
               rows={2}
             />
             <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}, {'{{time}}'}</p>
+            
+            <button 
+              className={styles.advancedToggle}
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              type="button"
+            >
+              {showAdvanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              Advanced Settings
+            </button>
+            
+            {showAdvanced && (
+              <div className={styles.advancedSection}>
+                <label className={styles.advancedLabel}>System Prompt (Optional)</label>
+                <textarea
+                  value={action.action_type.system_prompt || ''}
+                  onChange={(e) => onUpdate({
+                    action_type: { ...action.action_type, system_prompt: e.target.value }
+                  })}
+                  placeholder="Custom system prompt to guide the AI's behavior and response format..."
+                  className={styles.textarea}
+                  rows={3}
+                />
+                <p className={styles.hint}>
+                  The system prompt sets the AI's role and instructions. Example: "You are a financial analyst. 
+                  Always respond with bullet points and include sources."
+                </p>
+              </div>
+            )}
           </>
         )}
 

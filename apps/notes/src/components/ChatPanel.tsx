@@ -105,7 +105,7 @@ function migrateMCPSettings(settings: AISettings): AISettings {
 function getAISettings(): AISettings {
   const defaults: AISettings = {
     aiProvider: 'ollama',
-    model: 'llama3',
+    model: 'gemma4:latest',
     ollamaUrl: 'http://localhost:11434',
     openaiKey: '',
     anthropicKey: '',
@@ -591,7 +591,7 @@ async function summarizeWithAI(
     if (settings.aiProvider === 'ollama') {
       await invoke('chat_ollama', {
         baseUrl: settings.ollamaUrl || 'http://localhost:11434',
-        model: settings.model || 'llama3',
+        model: settings.model || 'gemma4:latest',
         messages: summaryMessages,
         temperature: 0.5,
         maxTokens: settings.maxTokens,
@@ -805,18 +805,24 @@ export function ChatPanel() {
         : userMessage;
       
       // Build messages with system prompt for web access
+      // Limit conversation history to last 20 messages for faster responses
+      const MAX_HISTORY_MESSAGES = 20;
+      const recentMessages = messages.slice(-MAX_HISTORY_MESSAGES);
+      
       const systemMessage = { role: 'system', content: getWebAccessSystemPrompt() };
       const messagesForAI = [
         systemMessage,
-        ...messages.map(m => ({ role: m.role, content: m.content })),
+        ...recentMessages.map(m => ({ role: m.role, content: m.content })),
         { role: 'user', content: userContent },
       ];
+      
+      console.log(`[Notes] Sending ${messagesForAI.length} messages (limited from ${messages.length + 1})`);
 
       try {
         if (settings.aiProvider === 'ollama') {
           await invoke('chat_ollama', {
             baseUrl: settings.ollamaUrl || 'http://localhost:11434',
-            model: settings.model || 'llama3',
+            model: settings.model || 'gemma4:latest',
             messages: messagesForAI,
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,

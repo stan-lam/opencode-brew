@@ -928,7 +928,7 @@ Always be concise but thorough. Format code examples with proper syntax highligh
       id: 'filesystem',
       name: 'Filesystem MCP',
       command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+      args: ['-y', '@modelcontextprotocol/server-filesystem', '/openCodeBrew'],
       env: {},
       enabled: false,
     },

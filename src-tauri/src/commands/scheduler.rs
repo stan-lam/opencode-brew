@@ -33,7 +33,7 @@ pub enum ActionType {
     #[serde(rename = "mcp")]
     McpTool { server_id: String, tool_name: String, arguments: HashMap<String, serde_json::Value> },
     #[serde(rename = "ai_prompt")]
-    AiPrompt { prompt: String, model: Option<String> },
+    AiPrompt { prompt: String, model: Option<String>, system_prompt: Option<String> },
     #[serde(rename = "save_file")]
     SaveFile { path: String, content: String, append: Option<bool> },
 }
@@ -446,9 +446,10 @@ fn substitute_variables(
             tool_name: tool_name.clone(),
             arguments: arguments.clone(), // TODO: substitute in JSON values
         },
-        ActionType::AiPrompt { prompt, model } => ActionType::AiPrompt {
+        ActionType::AiPrompt { prompt, model, system_prompt } => ActionType::AiPrompt {
             prompt: substitute(prompt),
             model: model.clone(),
+            system_prompt: system_prompt.as_ref().map(|s| substitute(s)),
         },
         ActionType::SaveFile { path, content, append } => ActionType::SaveFile {
             path: substitute(path),
@@ -469,8 +470,8 @@ async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<Str
         ActionType::McpTool { server_id, tool_name, arguments } => {
             execute_mcp_tool(app, server_id, tool_name, arguments).await
         }
-        ActionType::AiPrompt { prompt, model } => {
-            execute_ai_prompt_with_settings(app, prompt, model.as_deref()).await
+        ActionType::AiPrompt { prompt, model, system_prompt } => {
+            execute_ai_prompt_with_settings(app, prompt, model.as_deref(), system_prompt.as_deref()).await
         }
         ActionType::SaveFile { path, content, append } => {
             execute_save_file(path, content, append.unwrap_or(false)).await
@@ -601,42 +602,80 @@ async fn execute_ai_prompt_with_settings(
     app: &AppHandle,
     prompt: &str,
     model_override: Option<&str>,
+    system_prompt: Option<&str>,
 ) -> Result<String, String> {
     use crate::commands::settings::get_ai_settings_sync;
     
     let settings = get_ai_settings_sync(app);
-    let client = reqwest::Client::new();
+    // Use a long timeout for AI generation - large models can take several minutes
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600)) // 10 minutes
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
     let model = model_override.unwrap_or(&settings.model);
     let provider = &settings.ai_provider;
     
-    println!("[scheduler] Executing AI prompt with provider '{}', model '{}': {}", provider, model, prompt);
+    println!("[scheduler] Executing AI prompt with provider '{}', model '{}'", provider, model);
+    println!("[scheduler] Settings ollama_url: '{}'", settings.ollama_url);
+    if let Some(sys) = system_prompt {
+        if !sys.trim().is_empty() {
+            println!("[scheduler] System prompt ({}chars): {}...", sys.len(), &sys[..std::cmp::min(50, sys.len())]);
+        }
+    }
+    println!("[scheduler] User prompt ({}chars): {}...", prompt.len(), &prompt[..std::cmp::min(50, prompt.len())]);
     
     match provider.as_str() {
         "ollama" => {
             let base_url = if settings.ollama_url.is_empty() {
-                "http://localhost:11434".to_string()
+                "http://127.0.0.1:11434".to_string()
             } else {
-                settings.ollama_url.clone()
+                // Replace localhost with 127.0.0.1 to avoid DNS resolution issues in sandbox
+                settings.ollama_url.replace("localhost", "127.0.0.1")
             };
+            println!("[scheduler] Using Ollama base URL: {}", base_url);
+            
+            // Combine system prompt with user prompt for generate API
+            // This is more reliable than the chat API across different Ollama versions
+            let full_prompt = if let Some(sys) = system_prompt {
+                if !sys.trim().is_empty() {
+                    format!("{}\n\n---\n\n{}", sys, prompt)
+                } else {
+                    prompt.to_string()
+                }
+            } else {
+                prompt.to_string()
+            };
+            
             let url = format!("{}/api/generate", base_url);
+            println!("[scheduler] Full prompt length: {} chars", full_prompt.len());
             
             let payload = serde_json::json!({
                 "model": model,
-                "prompt": prompt,
+                "prompt": full_prompt,
                 "stream": false,
                 "options": {
                     "temperature": settings.temperature
                 }
             });
             
+            println!("[scheduler] Sending request to: {}", url);
+            println!("[scheduler] Payload size: {} bytes", serde_json::to_string(&payload).unwrap_or_default().len());
+            
             let response = client
                 .post(&url)
                 .json(&payload)
-                .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
-                .map_err(|e| format!("Failed to connect to Ollama at {}. Make sure Ollama is running. Error: {}", base_url, e))?;
+                .map_err(|e| {
+                    println!("[scheduler] Request error details: {:?}", e);
+                    if e.is_timeout() {
+                        format!("Ollama request timed out. The model may need more time for complex prompts. Try a smaller model or shorter prompt.")
+                    } else {
+                        format!("Failed to connect to Ollama at {}. Make sure Ollama is running. Error: {}", base_url, e)
+                    }
+                })?;
             
             if !response.status().is_success() {
                 let status = response.status();
@@ -658,9 +697,15 @@ async fn execute_ai_prompt_with_settings(
                 return Err("OpenAI API key not configured. Please set it in Settings.".to_string());
             }
             
+            let mut messages = Vec::new();
+            if let Some(sys) = system_prompt {
+                messages.push(serde_json::json!({"role": "system", "content": sys}));
+            }
+            messages.push(serde_json::json!({"role": "user", "content": prompt}));
+            
             let payload = serde_json::json!({
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "temperature": settings.temperature,
                 "max_tokens": settings.max_tokens
             });
@@ -697,11 +742,16 @@ async fn execute_ai_prompt_with_settings(
                 return Err("Anthropic API key not configured. Please set it in Settings.".to_string());
             }
             
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "model": model,
                 "max_tokens": settings.max_tokens,
                 "messages": [{"role": "user", "content": prompt}]
             });
+            
+            // Anthropic uses a separate "system" field (not in messages array)
+            if let Some(sys) = system_prompt {
+                payload["system"] = serde_json::json!(sys);
+            }
             
             let response = client
                 .post("https://api.anthropic.com/v1/messages")
@@ -737,9 +787,15 @@ async fn execute_ai_prompt_with_settings(
             
             let url = format!("{}/chat/completions", settings.custom_base_url.trim_end_matches('/'));
             
+            let mut messages = Vec::new();
+            if let Some(sys) = system_prompt {
+                messages.push(serde_json::json!({"role": "system", "content": sys}));
+            }
+            messages.push(serde_json::json!({"role": "user", "content": prompt}));
+            
             let payload = serde_json::json!({
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "temperature": settings.temperature,
                 "max_tokens": settings.max_tokens
             });
