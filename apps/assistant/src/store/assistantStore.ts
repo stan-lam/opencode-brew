@@ -8,14 +8,13 @@ export interface TriggerType {
 }
 
 export interface ActionType {
-  type: 'cli' | 'api' | 'mcp' | 'ai_prompt' | 'save_file';
+  type: 'cli' | 'api' | 'mcp' | 'ai_prompt' | 'save_file' | 'send_email' | 'send_slack' | 'send_discord';
   command?: string;
   args?: string[];
   cwd?: string;
   method?: string;
   url?: string;
   headers?: Record<string, string>;
-  body?: string;
   server_id?: string;
   tool_name?: string;
   arguments?: Record<string, any>;
@@ -26,6 +25,23 @@ export interface ActionType {
   path?: string;
   content?: string;
   append?: boolean;
+  // send_email specific
+  body?: string;
+  from?: string;
+  to?: string;
+  subject?: string;
+  smtp_host?: string;
+  smtp_port?: number;
+  use_tls?: boolean;
+  password?: string;
+  // send_slack specific
+  webhook_url?: string;
+  channel?: string;
+  message?: string;
+  username?: string;
+  // send_discord specific
+  content?: string;
+  avatar_url?: string;
 }
 
 export interface Action {

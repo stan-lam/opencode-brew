@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Edit, Trash2, Clock, FileText, Globe, Terminal, Loader2, CheckCircle, XCircle, History } from 'lucide-react';
+import { Play, Edit, Trash2, Clock, FileText, Globe, Terminal, Loader2, CheckCircle, XCircle, History, Mail, MessageSquare } from 'lucide-react';
 import { useAssistantStore, ExecutionLog } from '../store/assistantStore';
 import styles from './AgentDetail.module.css';
 
@@ -87,6 +87,12 @@ export function AgentDetail() {
         return <Terminal size={16} />;
       case 'api':
         return <Globe size={16} />;
+      case 'send_email':
+        return <Mail size={16} />;
+      case 'send_slack':
+        return <MessageSquare size={16} />;
+      case 'send_discord':
+        return <MessageSquare size={16} />;
       default:
         return <FileText size={16} />;
     }

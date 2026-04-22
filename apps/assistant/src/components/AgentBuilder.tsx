@@ -252,6 +252,15 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
       case 'save_file':
         newActionType = { type: 'save_file', path: '', content: '{{previous_output}}', append: false };
         break;
+      case 'send_email':
+        newActionType = { type: 'send_email', from: '', to: '', subject: '', body: '', smtp_host: 'smtp.gmail.com', smtp_port: 587, use_tls: true, password: '' };
+        break;
+      case 'send_slack':
+        newActionType = { type: 'send_slack', webhook_url: '', channel: '', message: '', username: '' };
+        break;
+      case 'send_discord':
+        newActionType = { type: 'send_discord', webhook_url: '', content: '', username: '', avatar_url: '' };
+        break;
       default:
         return;
     }
@@ -286,6 +295,9 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
           <option value="mcp">MCP Tool</option>
           <option value="ai_prompt">AI Prompt</option>
           <option value="save_file">Save to File</option>
+          <option value="send_email">Send Email</option>
+          <option value="send_slack">Send Slack Message</option>
+          <option value="send_discord">Send Discord Message</option>
         </select>
 
         {action.action_type.type === 'cli' && (
@@ -401,6 +413,170 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
               Append to file (instead of overwrite)
             </label>
             <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}, {'{{datetime}}'}</p>
+          </>
+        )}
+
+        {action.action_type.type === 'send_email' && (
+          <>
+            <input
+              type="email"
+              value={(action.action_type as any).from || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, from: e.target.value }
+              })}
+              placeholder="From email (e.g., you@gmail.com)"
+              className={styles.input}
+            />
+            <input
+              type="email"
+              value={(action.action_type as any).to || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, to: e.target.value }
+              })}
+              placeholder="To email"
+              className={styles.input}
+            />
+            <input
+              type="text"
+              value={(action.action_type as any).subject || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, subject: e.target.value }
+              })}
+              placeholder="Subject"
+              className={styles.input}
+            />
+            <textarea
+              value={(action.action_type as any).body || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, body: e.target.value }
+              })}
+              placeholder="Email body (use {{previous_output}} to include previous action's result)"
+              className={styles.textarea}
+              rows={3}
+            />
+            <input
+              type="text"
+              value={(action.action_type as any).smtp_host || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, smtp_host: e.target.value }
+              })}
+              placeholder="SMTP host (e.g., smtp.gmail.com)"
+              className={styles.input}
+            />
+            <input
+              type="number"
+              value={(action.action_type as any).smtp_port || 587}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, smtp_port: parseInt(e.target.value) || 587 }
+              })}
+              placeholder="Port"
+              className={styles.input}
+              style={{ width: '80px' }}
+            />
+            <label className={styles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={(action.action_type as any).use_tls || false}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, use_tls: e.target.checked }
+                })}
+              />
+              Use TLS
+            </label>
+            <input
+              type="password"
+              value={(action.action_type as any).password || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, password: e.target.value }
+              })}
+              placeholder="SMTP password / app key"
+              className={styles.input}
+            />
+            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
+          </>
+        )}
+
+        {action.action_type.type === 'send_slack' && (
+          <>
+            <input
+              type="url"
+              value={(action.action_type as any).webhook_url || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, webhook_url: e.target.value }
+              })}
+              placeholder="Slack Webhook URL (https://hooks.slack.com/...)"
+              className={styles.input}
+            />
+            <input
+              type="text"
+              value={(action.action_type as any).channel || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, channel: e.target.value }
+              })}
+              placeholder="Channel (e.g., #general or @user)"
+              className={styles.input}
+            />
+            <textarea
+              value={(action.action_type as any).message || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, message: e.target.value }
+              })}
+              placeholder="Message (use {{previous_output}} to include previous action's result)"
+              className={styles.textarea}
+              rows={3}
+            />
+            <input
+              type="text"
+              value={(action.action_type as any).username || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, username: e.target.value }
+              })}
+              placeholder="Bot username (optional)"
+              className={styles.input}
+            />
+            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
+          </>
+        )}
+
+        {action.action_type.type === 'send_discord' && (
+          <>
+            <input
+              type="url"
+              value={(action.action_type as any).webhook_url || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, webhook_url: e.target.value }
+              })}
+              placeholder="Discord Webhook URL (https://discord.com/api/webhooks/...)"
+              className={styles.input}
+            />
+            <textarea
+              value={(action.action_type as any).content || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, content: e.target.value }
+              })}
+              placeholder="Message content (use {{previous_output}} to include previous action's result)"
+              className={styles.textarea}
+              rows={3}
+            />
+            <input
+              type="text"
+              value={(action.action_type as any).username || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, username: e.target.value }
+              })}
+              placeholder="Bot username (optional)"
+              className={styles.input}
+            />
+            <input
+              type="url"
+              value={(action.action_type as any).avatar_url || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, avatar_url: e.target.value }
+              })}
+              placeholder="Avatar URL (optional)"
+              className={styles.input}
+            />
+            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
           </>
         )}
 

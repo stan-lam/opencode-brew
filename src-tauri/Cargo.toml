@@ -48,6 +48,7 @@ scraper = "0.18"
 url = "2"
 urlencoding = "2"
 tauri-plugin-http = "2.5.8"
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "builder", "smtp-transport"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"

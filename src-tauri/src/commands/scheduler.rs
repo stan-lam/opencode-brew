@@ -36,6 +36,12 @@ pub enum ActionType {
     AiPrompt { prompt: String, model: Option<String>, system_prompt: Option<String> },
     #[serde(rename = "save_file")]
     SaveFile { path: String, content: String, append: Option<bool> },
+    #[serde(rename = "send_email")]
+    SendEmail { from: String, to: String, subject: String, body: String, smtp_host: String, smtp_port: u16, use_tls: bool, password: String },
+    #[serde(rename = "send_slack")]
+    SendSlack { webhook_url: String, channel: String, message: String, username: Option<String> },
+    #[serde(rename = "send_discord")]
+    SendDiscord { webhook_url: String, content: String, username: Option<String>, avatar_url: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +462,28 @@ fn substitute_variables(
             content: substitute(content),
             append: *append,
         },
+        ActionType::SendEmail { from, to, subject, body, smtp_host, smtp_port, use_tls, password } => ActionType::SendEmail {
+            from: substitute(from),
+            to: substitute(to),
+            subject: substitute(subject),
+            body: substitute(body),
+            smtp_host: substitute(smtp_host),
+            smtp_port: *smtp_port,
+            use_tls: *use_tls,
+            password: substitute(password),
+        },
+        ActionType::SendSlack { webhook_url, channel, message, username } => ActionType::SendSlack {
+            webhook_url: substitute(webhook_url),
+            channel: substitute(channel),
+            message: substitute(message),
+            username: username.clone(),
+        },
+        ActionType::SendDiscord { webhook_url, content, username, avatar_url } => ActionType::SendDiscord {
+            webhook_url: substitute(webhook_url),
+            content: substitute(content),
+            username: username.clone(),
+            avatar_url: avatar_url.clone(),
+        },
     }
 }
 
@@ -475,6 +503,15 @@ async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<Str
         }
         ActionType::SaveFile { path, content, append } => {
             execute_save_file(path, content, append.unwrap_or(false)).await
+        }
+        ActionType::SendEmail { from, to, subject, body, smtp_host, smtp_port, use_tls, password } => {
+            execute_send_email(from, to, subject, body, smtp_host, *smtp_port, *use_tls, password).await
+        }
+        ActionType::SendSlack { webhook_url, channel, message, username } => {
+            execute_send_slack(webhook_url, channel, message, username.as_deref()).await
+        }
+        ActionType::SendDiscord { webhook_url, content, username, avatar_url } => {
+            execute_send_discord(webhook_url, content, username.as_deref(), avatar_url.as_deref()).await
         }
     }
 }
@@ -832,6 +869,127 @@ async fn execute_ai_prompt_with_settings(
         
         _ => Err(format!("Unknown AI provider: {}. Please configure AI settings.", provider))
     }
+}
+
+// ============= Notification Executors =============
+
+async fn execute_send_email(
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    smtp_host: &str,
+    smtp_port: u16,
+    use_tls: bool,
+    password: &str,
+) -> Result<String, String> {
+    use lettre::message::Message;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{SmtpTransport, Transport};
+
+    if smtp_host.is_empty() || password.is_empty() {
+        return Err("SMTP host and password are required".to_string());
+    }
+
+    let email = Message::builder()
+        .from(from.parse().map_err(|e| format!("Invalid 'from' address: {}", e))?)
+        .to(to.parse().map_err(|e| format!("Invalid 'to' address: {}", e))?)
+        .subject(subject)
+        .body(body.to_string())
+        .map_err(|e| format!("Failed to build email: {}", e))?;
+
+    let credentials = Credentials::new(from.to_string(), password.to_string());
+
+    let transport = if use_tls {
+        SmtpTransport::starttls_relay(smtp_host)
+            .map_err(|e| format!("Failed to configure SMTP relay: {}", e))?
+            .port(smtp_port)
+            .credentials(credentials)
+            .build()
+    } else {
+        SmtpTransport::relay(smtp_host)
+            .map_err(|e| format!("Failed to configure SMTP relay: {}", e))?
+            .credentials(credentials)
+            .build()
+    };
+
+    transport.send(&email).map_err(|e| format!("Failed to send email: {}", e))?;
+
+    Ok(format!("Email sent to {} via {}", to, smtp_host))
+}
+
+async fn execute_send_slack(
+    webhook_url: &str,
+    channel: &str,
+    message: &str,
+    username: Option<&str>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let payload = if let Some(user) = username {
+        serde_json::json!({
+            "channel": channel,
+            "username": user,
+            "text": message
+        })
+    } else {
+        serde_json::json!({
+            "channel": channel,
+            "text": message
+        })
+    };
+
+    let response = client
+        .post(webhook_url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Slack webhook request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Slack webhook error {}: {}", status, text));
+    }
+
+    Ok(format!("Slack message sent to channel: {}", channel))
+}
+
+async fn execute_send_discord(
+    webhook_url: &str,
+    content: &str,
+    username: Option<&str>,
+    avatar_url: Option<&str>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let mut payload = serde_json::json!({
+        "content": content
+    });
+
+    if let Some(user) = username {
+        payload["username"] = serde_json::json!(user);
+    }
+    if let Some(avatar) = avatar_url {
+        payload["avatar_url"] = serde_json::json!(avatar);
+    }
+
+    let response = client
+        .post(webhook_url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Discord webhook request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Discord webhook error {}: {}", status, text));
+    }
+
+    Ok("Discord message sent via webhook".to_string())
 }
 
 // ============= Execution History =============
