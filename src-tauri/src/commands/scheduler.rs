@@ -24,16 +24,75 @@ pub enum TriggerType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSettings {
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(rename = "model")]
+    pub model: String,
+    #[serde(rename = "temperature")]
+    pub temperature: f32,
+    #[serde(rename = "maxTokens")]
+    pub max_tokens: i32,
+    #[serde(rename = "ollamaUrl")]
+    pub ollama_url: Option<String>,
+    #[serde(rename = "openaiKey")]
+    pub openai_key: Option<String>,
+    #[serde(rename = "anthropicKey")]
+    pub anthropic_key: Option<String>,
+    #[serde(rename = "customBaseUrl")]
+    pub custom_base_url: Option<String>,
+    #[serde(rename = "customApiKey")]
+    pub custom_api_key: Option<String>,
+}
+
+impl Default for ModelSettings {
+    fn default() -> Self {
+        Self {
+            provider: "ollama".to_string(),
+            model: String::new(),
+            temperature: 0.7,
+            max_tokens: 4096,
+            ollama_url: None,
+            openai_key: None,
+            anthropic_key: None,
+            custom_base_url: None,
+            custom_api_key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ActionType {
     #[serde(rename = "cli")]
     CliCommand { command: String, args: Vec<String>, cwd: Option<String> },
     #[serde(rename = "api")]
-    ApiCall { method: String, url: String, headers: HashMap<String, String>, body: Option<String> },
+    ApiCall {
+        method: String,
+        url: String,
+        headers: HashMap<String, String>,
+        body: Option<String>,
+        // auth
+        auth_type: String, // "none" | "basic" | "bearer" | "api_key"
+        auth_username: Option<String>,
+        auth_password: Option<String>,
+        auth_bearer_token: Option<String>,
+        auth_api_key_name: Option<String>,
+        auth_api_key_value: Option<String>,
+        // content type
+        content_type: Option<String>,
+        // request body type
+        body_type: Option<String>, // "raw" | "json" | "form_data"
+        // query params
+        query_params: Option<HashMap<String, String>>,
+        // network
+        follow_redirects: Option<bool>,
+        timeout_seconds: Option<f64>,
+    },
     #[serde(rename = "mcp")]
     McpTool { server_id: String, tool_name: String, arguments: HashMap<String, serde_json::Value> },
     #[serde(rename = "ai_prompt")]
-    AiPrompt { prompt: String, model: Option<String>, system_prompt: Option<String> },
+    AiPrompt { prompt: String, system_prompt: Option<String>, model_settings: Option<ModelSettings> },
     #[serde(rename = "save_file")]
     SaveFile { path: String, content: String, append: Option<bool> },
     #[serde(rename = "send_email")]
@@ -441,21 +500,49 @@ fn substitute_variables(
             args: args.iter().map(|a| substitute(a)).collect(),
             cwd: cwd.as_ref().map(|c| substitute(c)),
         },
-        ActionType::ApiCall { method, url, headers, body } => ActionType::ApiCall {
+        ActionType::ApiCall {
+            method, url, headers, body,
+            auth_type, auth_username, auth_password, auth_bearer_token,
+            auth_api_key_name, auth_api_key_value, content_type, body_type,
+            query_params, follow_redirects, timeout_seconds,
+        } => ActionType::ApiCall {
             method: method.clone(),
             url: substitute(url),
             headers: headers.iter().map(|(k, v)| (k.clone(), substitute(v))).collect(),
             body: body.as_ref().map(|b| substitute(b)),
+            auth_type: substitute(auth_type),
+            auth_username: auth_username.as_ref().map(|v| substitute(v)),
+            auth_password: auth_password.as_ref().map(|v| substitute(v)),
+            auth_bearer_token: auth_bearer_token.as_ref().map(|v| substitute(v)),
+            auth_api_key_name: auth_api_key_name.as_ref().map(|v| substitute(v)),
+            auth_api_key_value: auth_api_key_value.as_ref().map(|v| substitute(v)),
+            content_type: content_type.as_ref().map(|v| substitute(v)),
+            body_type: body_type.as_ref().map(|v| substitute(v)),
+            query_params: query_params.as_ref().map(|m| {
+                m.iter().map(|(k, v)| (k.clone(), substitute(v))).collect()
+            }),
+            follow_redirects: *follow_redirects,
+            timeout_seconds: *timeout_seconds,
         },
         ActionType::McpTool { server_id, tool_name, arguments } => ActionType::McpTool {
             server_id: server_id.clone(),
             tool_name: tool_name.clone(),
             arguments: arguments.clone(), // TODO: substitute in JSON values
         },
-        ActionType::AiPrompt { prompt, model, system_prompt } => ActionType::AiPrompt {
+        ActionType::AiPrompt { prompt, system_prompt, model_settings } => ActionType::AiPrompt {
             prompt: substitute(prompt),
-            model: model.clone(),
             system_prompt: system_prompt.as_ref().map(|s| substitute(s)),
+            model_settings: model_settings.as_ref().map(|ms| ModelSettings {
+                provider: substitute(&ms.provider),
+                model: substitute(&ms.model),
+                temperature: ms.temperature,
+                max_tokens: ms.max_tokens,
+                ollama_url: ms.ollama_url.clone(),
+                openai_key: ms.openai_key.clone(),
+                anthropic_key: ms.anthropic_key.clone(),
+                custom_base_url: ms.custom_base_url.clone(),
+                custom_api_key: ms.custom_api_key.clone(),
+            }),
         },
         ActionType::SaveFile { path, content, append } => ActionType::SaveFile {
             path: substitute(path),
@@ -492,14 +579,31 @@ async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<Str
         ActionType::CliCommand { command, args, cwd } => {
             execute_cli_command(command, args, cwd.as_deref()).await
         }
-        ActionType::ApiCall { method, url, headers, body } => {
-            execute_api_call(method, url, headers, body.as_deref()).await
+        ActionType::ApiCall {
+            method, url, headers, body,
+            auth_type, auth_username, auth_password, auth_bearer_token,
+            auth_api_key_name, auth_api_key_value, content_type, body_type,
+            query_params, follow_redirects, timeout_seconds,
+        } => {
+            execute_api_call(
+                &method,
+                &url,
+                headers,
+                body.as_deref(),
+                &auth_type,
+                auth_username.as_deref(), auth_password.as_deref(),
+                auth_bearer_token.as_deref(),
+                auth_api_key_name.as_deref(), auth_api_key_value.as_deref(),
+                content_type.as_deref(), body_type.as_deref(),
+                query_params.as_ref(),
+                follow_redirects.unwrap_or(true), timeout_seconds.clone(),
+            ).await
         }
         ActionType::McpTool { server_id, tool_name, arguments } => {
             execute_mcp_tool(app, server_id, tool_name, arguments).await
         }
-        ActionType::AiPrompt { prompt, model, system_prompt } => {
-            execute_ai_prompt_with_settings(app, prompt, model.as_deref(), system_prompt.as_deref()).await
+        ActionType::AiPrompt { prompt, system_prompt, model_settings } => {
+            execute_ai_prompt(app, prompt, system_prompt.as_deref(), model_settings.as_ref()).await
         }
         ActionType::SaveFile { path, content, append } => {
             execute_save_file(path, content, append.unwrap_or(false)).await
@@ -578,35 +682,147 @@ async fn execute_api_call(
     url: &str,
     headers: &HashMap<String, String>,
     body: Option<&str>,
+    auth_type: &str,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+    auth_bearer_token: Option<&str>,
+    auth_api_key_name: Option<&str>,
+    auth_api_key_value: Option<&str>,
+    content_type: Option<&str>,
+    body_type: Option<&str>,
+    query_params: Option<&HashMap<String, String>>,
+    follow_redirects: bool,
+    timeout_seconds: Option<f64>,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    
+    // Build the URL with query params
+    let url = if let Some(params) = query_params {
+        if params.is_empty() {
+            url.to_string()
+        } else {
+            let mut url_parts = url.splitn(2, '?');
+            let base = url_parts.next().unwrap_or(url);
+            let existing_query = url_parts.next().unwrap_or("");
+            let mut all_params: Vec<(String, String)> = Vec::new();
+
+            // Parse existing query params
+            if !existing_query.is_empty() {
+                for pair in existing_query.split('&') {
+                    if let Some((k, v)) = pair.split_once('=') {
+                        all_params.push((
+                            urlencoding::decode(k).unwrap_or_default().to_string(),
+                            urlencoding::decode(v).unwrap_or_default().to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // Append action params
+            all_params.extend(params.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+            let query_str: Vec<String> = all_params.iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(&k), urlencoding::encode(&v)))
+                .collect();
+
+            if query_str.is_empty() {
+                url.to_string()
+            } else {
+                format!("{}?{}", base, query_str.join("&"))
+            }
+        }
+    } else {
+        url.to_string()
+    };
+
+    let client_builder = reqwest::Client::builder()
+        .redirect(if follow_redirects {
+            reqwest::redirect::Policy::limited(10)
+        } else {
+            reqwest::redirect::Policy::none()
+        });
+
+    let client_builder = if let Some(seconds) = timeout_seconds {
+        client_builder.timeout(std::time::Duration::from_secs_f64(seconds))
+    } else {
+        client_builder
+    };
+
+    let client = client_builder.build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
     let mut request = match method.to_uppercase().as_str() {
-        "GET" => client.get(url),
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        "PATCH" => client.patch(url),
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        "PATCH" => client.patch(&url),
         _ => return Err(format!("Unsupported HTTP method: {}", method)),
     };
-    
+
+    // Apply auth
+    match auth_type {
+        "basic" => {
+            let username = auth_username.unwrap_or("");
+            let password = auth_password.unwrap_or("");
+            request = request.basic_auth(username, Some(password));
+        }
+        "bearer" => {
+            let token = auth_bearer_token.ok_or("Bearer token is required")?;
+            request = request.bearer_auth(token);
+        }
+        "api_key" => {
+            let key_name = auth_api_key_name.ok_or("API key name is required")?.to_string();
+            let key_value = auth_api_key_value.ok_or("API key value is required")?.to_string();
+            request = request.header(key_name, key_value);
+        }
+        _ => {} // no auth
+    }
+
+    // Apply content type
+    let ct = content_type.unwrap_or("application/json");
+    request = request.header("Content-Type", ct);
+
+    // Apply custom headers (auth-type headers above may override api_key auth)
     for (key, value) in headers {
         request = request.header(key, value);
     }
-    
+
+    // Apply body based on body_type
     if let Some(body) = body {
-        request = request.body(body.to_string());
+        let body = match body_type.unwrap_or("raw") {
+            "json" => {
+                // Validate and format as JSON
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                    serde_json::to_string_pretty(&val).unwrap_or(body.to_string())
+                } else {
+                    body.to_string()
+                }
+            }
+            "form_data" => {
+                // Convert JSON or key=value to form urlencoded
+                if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(body) {
+                    let form: Vec<(String, String)> = map.iter()
+                        .map(|(k, v)| (urlencoding::encode(k).to_string(), urlencoding::encode(v).to_string()))
+                        .collect();
+                    form.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("&")
+                } else {
+                    body.to_string()
+                }
+            }
+            _ => body.to_string(),
+        };
+        request = request.body(body);
     }
-    
+
     let response = request.send().await.map_err(|e| e.to_string())?;
     let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
-    
-    if status.is_success() {
-        Ok(text)
-    } else {
-        Err(format!("HTTP {} - {}", status, text))
+
+    if !status.is_success() {
+        let text = response.text().await.map_err(|e| e.to_string())?;
+        return Err(format!("HTTP {} - {}", status, text));
     }
+
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    Ok(text)
 }
 
 async fn execute_mcp_tool(
@@ -635,41 +851,51 @@ async fn execute_mcp_tool(
     Ok(output.join("\n"))
 }
 
-async fn execute_ai_prompt_with_settings(
+async fn execute_ai_prompt(
     app: &AppHandle,
     prompt: &str,
-    model_override: Option<&str>,
     system_prompt: Option<&str>,
+    model_settings: Option<&ModelSettings>,
 ) -> Result<String, String> {
     use crate::commands::settings::get_ai_settings_sync;
-    
-    let settings = get_ai_settings_sync(app);
+
+    let global = get_ai_settings_sync(app);
+
+    // Merge action-level settings over global settings (action takes precedence)
+    let model_settings = model_settings.cloned().unwrap_or_default();
+    let provider = if !model_settings.provider.is_empty() { &model_settings.provider } else { &global.ai_provider };
+    let model = if !model_settings.model.is_empty() { &model_settings.model } else { &global.model };
+    let temperature = if model_settings.temperature != 0.0 { model_settings.temperature } else { global.temperature };
+    let max_tokens = if model_settings.max_tokens != 0 { model_settings.max_tokens } else { global.max_tokens };
+    let ollama_url = if let Some(ref url) = model_settings.ollama_url { url } else { &global.ollama_url };
+    let openai_key = if let Some(ref key) = model_settings.openai_key { key } else { &global.openai_key };
+    let anthropic_key = if let Some(ref key) = model_settings.anthropic_key { key } else { &global.anthropic_key };
+    let custom_base_url = if let Some(ref url) = model_settings.custom_base_url { url } else { &global.custom_base_url };
+    let custom_api_key = if let Some(ref key) = model_settings.custom_api_key { key } else { &global.custom_api_key };
+
     // Use a long timeout for AI generation - large models can take several minutes
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 minutes
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-    
-    let model = model_override.unwrap_or(&settings.model);
-    let provider = &settings.ai_provider;
-    
+
     println!("[scheduler] Executing AI prompt with provider '{}', model '{}'", provider, model);
-    println!("[scheduler] Settings ollama_url: '{}'", settings.ollama_url);
+    println!("[scheduler] Settings ollama_url: '{}'", ollama_url);
     if let Some(sys) = system_prompt {
         if !sys.trim().is_empty() {
             println!("[scheduler] System prompt ({}chars): {}...", sys.len(), &sys[..std::cmp::min(50, sys.len())]);
         }
     }
     println!("[scheduler] User prompt ({}chars): {}...", prompt.len(), &prompt[..std::cmp::min(50, prompt.len())]);
-    
+
     match provider.as_str() {
         "ollama" => {
-            let base_url = if settings.ollama_url.is_empty() {
+            let base_url = if ollama_url.is_empty() {
                 "http://127.0.0.1:11434".to_string()
             } else {
                 // Replace localhost with 127.0.0.1 to avoid DNS resolution issues in sandbox
-                settings.ollama_url.replace("localhost", "127.0.0.1")
+                ollama_url.replace("localhost", "127.0.0.1")
             };
             println!("[scheduler] Using Ollama base URL: {}", base_url);
             
@@ -693,7 +919,7 @@ async fn execute_ai_prompt_with_settings(
                 "prompt": full_prompt,
                 "stream": false,
                 "options": {
-                    "temperature": settings.temperature
+                    "temperature": temperature
                 }
             });
             
@@ -730,7 +956,7 @@ async fn execute_ai_prompt_with_settings(
         }
         
         "openai" => {
-            if settings.openai_key.is_empty() {
+            if openai_key.is_empty() {
                 return Err("OpenAI API key not configured. Please set it in Settings.".to_string());
             }
             
@@ -743,13 +969,13 @@ async fn execute_ai_prompt_with_settings(
             let payload = serde_json::json!({
                 "model": model,
                 "messages": messages,
-                "temperature": settings.temperature,
-                "max_tokens": settings.max_tokens
+                "temperature": temperature,
+                "max_tokens": max_tokens
             });
             
             let response = client
                 .post("https://api.openai.com/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", settings.openai_key))
+                .header("Authorization", format!("Bearer {}", openai_key))
                 .header("Content-Type", "application/json")
                 .json(&payload)
                 .timeout(std::time::Duration::from_secs(120))
@@ -775,13 +1001,13 @@ async fn execute_ai_prompt_with_settings(
         }
         
         "anthropic" => {
-            if settings.anthropic_key.is_empty() {
+            if anthropic_key.is_empty() {
                 return Err("Anthropic API key not configured. Please set it in Settings.".to_string());
             }
             
             let mut payload = serde_json::json!({
                 "model": model,
-                "max_tokens": settings.max_tokens,
+                "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}]
             });
             
@@ -792,7 +1018,7 @@ async fn execute_ai_prompt_with_settings(
             
             let response = client
                 .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &settings.anthropic_key)
+                .header("x-api-key", anthropic_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", "application/json")
                 .json(&payload)
@@ -818,11 +1044,11 @@ async fn execute_ai_prompt_with_settings(
         }
         
         "custom" => {
-            if settings.custom_base_url.is_empty() {
+            if custom_base_url.is_empty() {
                 return Err("Custom API base URL not configured. Please set it in Settings.".to_string());
             }
             
-            let url = format!("{}/chat/completions", settings.custom_base_url.trim_end_matches('/'));
+            let url = format!("{}/chat/completions", custom_base_url.trim_end_matches('/'));
             
             let mut messages = Vec::new();
             if let Some(sys) = system_prompt {
@@ -833,8 +1059,8 @@ async fn execute_ai_prompt_with_settings(
             let payload = serde_json::json!({
                 "model": model,
                 "messages": messages,
-                "temperature": settings.temperature,
-                "max_tokens": settings.max_tokens
+                "temperature": temperature,
+                "max_tokens": max_tokens
             });
             
             let mut request = client
@@ -843,8 +1069,8 @@ async fn execute_ai_prompt_with_settings(
                 .json(&payload)
                 .timeout(std::time::Duration::from_secs(120));
             
-            if !settings.custom_api_key.is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", settings.custom_api_key));
+            if !custom_api_key.is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", custom_api_key));
             }
             
             let response = request.send().await

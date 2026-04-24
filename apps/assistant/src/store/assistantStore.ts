@@ -7,25 +7,79 @@ export interface TriggerType {
   events?: string[];
 }
 
+export interface ModelSettings {
+  provider: 'ollama' | 'openai' | 'anthropic' | 'copilot' | 'custom';
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  ollamaUrl?: string;
+  openaiKey?: string;
+  anthropicKey?: string;
+  customBaseUrl?: string;
+  customApiKey?: string;
+}
+
+export interface ApiCallConfig {
+  type: 'api';
+  // basic info
+  method: string;
+  url: string;
+  // auth
+  auth_type: 'none' | 'basic' | 'bearer' | 'api_key';
+  auth_username?: string;
+  auth_password?: string;
+  auth_bearer_token?: string;
+  auth_api_key_name?: string;
+  auth_api_key_value?: string;
+  // content type
+  content_type?: string;
+  // body type
+  body_type?: 'raw' | 'json' | 'form_data';
+  // query params
+  query_params?: Record<string, string>;
+  // network
+  follow_redirects?: boolean;
+  timeout_seconds?: number;
+}
+
 export interface ActionType {
   type: 'cli' | 'api' | 'mcp' | 'ai_prompt' | 'save_file' | 'send_email' | 'send_slack' | 'send_discord';
+  // cli
   command?: string;
   args?: string[];
   cwd?: string;
+  // api
   method?: string;
   url?: string;
   headers?: Record<string, string>;
+  body?: string;
+  auth_type?: 'none' | 'basic' | 'bearer' | 'api_key';
+  auth_username?: string;
+  auth_password?: string;
+  auth_bearer_token?: string;
+  auth_api_key_name?: string;
+  auth_api_key_value?: string;
+  content_type?: string;
+  body_type?: 'raw' | 'json' | 'form_data';
+  query_params?: Record<string, string>;
+  follow_redirects?: boolean;
+  timeout_seconds?: number;
+  // mcp
   server_id?: string;
   tool_name?: string;
   arguments?: Record<string, any>;
+  // ai_prompt
   prompt?: string;
-  model?: string;
   system_prompt?: string;
-  // save_file specific
+  model_settings?: ModelSettings;
+  // save_file
   path?: string;
   content?: string;
   append?: boolean;
-  // send_email specific
+  // send_email
   body?: string;
   from?: string;
   to?: string;
@@ -34,12 +88,13 @@ export interface ActionType {
   smtp_port?: number;
   use_tls?: boolean;
   password?: string;
-  // send_slack specific
+  // send_slack
   webhook_url?: string;
   channel?: string;
   message?: string;
   username?: string;
-  // send_discord specific
+  // send_discord
+  username?: string;
   content?: string;
   avatar_url?: string;
 }

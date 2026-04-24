@@ -8,6 +8,8 @@ async function getInvoke() {
   return invoke;
 }
 
+const REFRESH_INTERVAL = 3000; // auto-refresh every 3 seconds
+
 export function ExecutionHistory() {
   const { executions, agents, setExecutions } = useAssistantStore();
   const [selectedExecution, setSelectedExecution] = useState<string | null>(null);
@@ -36,12 +38,22 @@ export function ExecutionHistory() {
     }
   };
 
+  // Auto-refresh execution list periodically
   useEffect(() => {
-    if (selectedExecution) {
-      loadExecutionDetails(selectedExecution);
-    } else {
+    loadExecutions();
+    const interval = setInterval(loadExecutions, REFRESH_INTERVAL);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Auto-refresh selected execution details (catches status changes like running -> success/failed)
+  useEffect(() => {
+    if (!selectedExecution) {
       setExecutionDetails(null);
+      return;
     }
+    loadExecutionDetails(selectedExecution);
+    const interval = setInterval(() => loadExecutionDetails(selectedExecution), REFRESH_INTERVAL);
+    return () => clearInterval(interval);
   }, [selectedExecution]);
 
   const getAgentName = (agentId: string) => {
@@ -84,30 +96,33 @@ export function ExecutionHistory() {
           </button>
         </div>
         <div className={styles.listContent}>
-          {executions.length === 0 ? (
-            <div className={styles.empty}>
-              <Clock size={32} />
-              <p>No executions yet</p>
-            </div>
-          ) : (
-            executions.map((exec) => (
-              <button
-                key={exec.id}
-                className={`${styles.item} ${selectedExecution === exec.id ? styles.selected : ''}`}
-                onClick={() => setSelectedExecution(exec.id)}
-              >
-                <div className={styles.itemHeader}>
-                  {getStatusIcon(exec.status)}
-                  <span className={styles.agentName}>{getAgentName(exec.agent_id)}</span>
-                  <ChevronRight size={16} className={styles.chevron} />
-                </div>
-                <div className={styles.itemMeta}>
-                  <span>{formatTime(exec.started_at)}</span>
-                  <span>{formatDuration(exec.started_at, exec.finished_at)}</span>
-                </div>
-              </button>
-            ))
-          )}
+          {(() => {
+            const uniqueExecutions = [...new Map(executions.map(e => [e.id, e])).values()];
+            return uniqueExecutions.length === 0 ? (
+              <div className={styles.empty}>
+                <Clock size={32} />
+                <p>No executions yet</p>
+              </div>
+            ) : (
+              uniqueExecutions.map((exec) => (
+                <button
+                  key={`exec-${exec.id}`}
+                  className={`${styles.item} ${selectedExecution === exec.id ? styles.selected : ''}`}
+                  onClick={() => setSelectedExecution(exec.id)}
+                >
+                  <div className={styles.itemHeader}>
+                    {getStatusIcon(exec.status)}
+                    <span className={styles.agentName}>{getAgentName(exec.agent_id)}</span>
+                    <ChevronRight size={16} className={styles.chevron} />
+                  </div>
+                  <div className={styles.itemMeta}>
+                    <span>{formatTime(exec.started_at)}</span>
+                    <span>{formatDuration(exec.started_at, exec.finished_at)}</span>
+                  </div>
+                </button>
+              ))
+            );
+          })()}
         </div>
       </div>
 
@@ -131,7 +146,7 @@ export function ExecutionHistory() {
             <div className={styles.actionLogs}>
               <h4>Actions</h4>
               {executionDetails.actions.map((action) => (
-                <div key={action.id} className={`${styles.actionLog} ${styles[action.status]}`}>
+                <div key={`act-${action.id}`} className={`${styles.actionLog} ${styles[action.status]}`}>
                   <div className={styles.actionLogHeader}>
                     {getStatusIcon(action.status)}
                     <span className={styles.actionName}>{action.action_name}</span>

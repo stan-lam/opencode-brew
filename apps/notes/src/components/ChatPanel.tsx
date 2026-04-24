@@ -129,21 +129,39 @@ function getAISettings(): AISettings {
 
 function getWebAccessSystemPrompt(): string {
   const now = new Date();
-  const today = now.toLocaleDateString('en-US', { 
-    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' 
+  const today = now.toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
   });
   const timestamp = now.toISOString();
   const shortDate = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  
+
   return `You are a helpful AI assistant with web access and real-time market data capabilities.
 
 **CURRENT DATE/TIME:** ${today} (${timestamp})
+
+## CRITICAL OUTPUT FORMAT
+
+**ALL internal reasoning MUST be wrapped in <think>...</think> tags.** Only content OUTSIDE these tags is shown to the user.
+- NEVER output reasoning, analysis, or "I will/need/should" statements outside of <think> tags
+- NEVER mention tool names or XML syntax outside of <think> tags
+- Go directly from <think> to the tool tag, then to your response
+
+**Example - CORRECT:**
+<think>User wants AMD stock price. I'll fetch it.</think>
+<get_stock_quote symbol="AMD" />
+Here's the current price for AMD...
+
+**Example - WRONG (never do this):**
+The user is asking for AMD. I will use the get_stock_quote tool.
+<get_stock_quote symbol="AMD" />
 
 CRITICAL: When searching for news or current events, ALWAYS include today's date "${shortDate}" or "today" in your search queries to get the most recent results. Do NOT rely on cached or outdated information.
 
 ## DATA ACCESS TOOLS
 
-You have access to real-time market data and web search. Use these XML tags:
+You have access to real-time market data and web search. **TO USE A TOOL, YOU MUST OUTPUT THE XML TAG EXACTLY AS SHOWN BELOW.**
+
+Write the XML tags directly — do NOT describe them.
 
 **Get stock/futures quote (via Yahoo Finance MCP):**
 <get_stock_quote symbol="AAPL" />
@@ -183,9 +201,12 @@ You can then summarize, analyze, or use that content as requested.
 1. ALWAYS use tools for real-time data - never say you can't access it
 2. For futures/pre-market: use multiple <get_stock_quote> calls with futures symbols
 3. For market overview: use <get_market_movers /> to get top movers
-4. Keep your initial response brief - just say you'll fetch the data
-5. Multiple tool calls in one response are encouraged for comprehensive data
-6. When URL content is provided, summarize or process it as the user requests`;
+4. Multiple tool calls in one response are encouraged for comprehensive data
+5. When URL content is provided, summarize or process it as the user requests
+
+### MULTI-TURN RULE:
+Even if you already fetched data earlier, if the user asks another question about real-time data, **you MUST output the XML tag again**. Do NOT reference previous tool calls. Do NOT say "as mentioned before". Output the fresh XML tag for every new data request.
+`;
 }
 
 function getSummarizationPrompt(): string {
@@ -248,14 +269,102 @@ function parseWebOperations(content: string): WebOperation[] {
   return operations.slice(0, 5);
 }
 
+/** Fallback: detect tool intent in model text (e.g., "I will call the get_stock_quote tool") */
+function parseWebOperationsFromIntent(content: string): WebOperation[] {
+  const operations: WebOperation[] = [];
+
+  // Detect "I will call/use X tool" patterns
+  if (/will call the?\s*`?get_stock_quote`? tool|need to use the?\s*`?get_stock_quote`? tool|will fetch the?\s*`?get_stock_quote`? tool|will use the?\s*`?get_stock_quote`? tool/i.test(content)) {
+    operations.push({ type: 'get_stock_quote', symbol: 'AMD' });
+  }
+  if (/will call the?\s*`?get_market_movers`? tool|need to use the?\s*`?get_market_movers`? tool/i.test(content)) {
+    operations.push({ type: 'get_market_movers' });
+  }
+  if (/will call the?\s*`?search_web`? tool|need to use the?\s*`?search_web`? tool/i.test(content)) {
+    operations.push({ type: 'search_web', query: 'web search' });
+  }
+
+  // Detect "I need to get quotes for X and Y" or similar symbol lists
+  const quoteMatch = content.match(/(?:quotes?|prices?)\s*(?:for|of|on)\s*([A-Z]{2,5}(?:\s*,\s*[A-Z]{2,5}|\s*and\s*[A-Z]{2,5})*)/i);
+  if (quoteMatch && !operations.find(o => o.type === 'get_stock_quote')) {
+    const symbols = quoteMatch[1].replace(/\s*,\s*/g, ' ').split(/\s+and\s+/).map(s => s.trim().toUpperCase());
+    symbols.forEach(s => {
+      if (/^[A-Z]{2,5}$/.test(s)) {
+        operations.push({ type: 'get_stock_quote', symbol: s });
+      }
+    });
+  }
+
+  // Detect "search for X" or "search X price" patterns with symbols
+  const searchMatch = content.match(/(?:search|find|look up)\s+(?:for\s+)?(?:the\s+)?(?:price|current|stock|quote)\s+(?:of|for)\s*([A-Z]{2,5}(?:\s*and\s*[A-Z]{2,5})*)/i);
+  if (searchMatch && !operations.find(o => o.type === 'get_stock_quote')) {
+    const symbols = searchMatch[1].split(/\s+and\s+/).map(s => s.trim().toUpperCase());
+    symbols.forEach(s => {
+      if (/^[A-Z]{2,5}$/.test(s)) {
+        operations.push({ type: 'get_stock_quote', symbol: s });
+      }
+    });
+  }
+
+  // Detect direct "get price for X" or "get quote of Y"
+  const symbolDirect = content.match(/get\s+(?:price|quote|stock|data)\s+(?:for|of)\s*([A-Z]{2,5})/gi);
+  if (symbolDirect) {
+    symbolDirect.forEach(match => {
+      const sym = match.match(/[A-Z]{2,5}/)?.[0];
+      if (sym && !operations.find(o => o.type === 'get_stock_quote' && o.symbol === sym)) {
+        operations.push({ type: 'get_stock_quote', symbol: sym });
+      }
+    });
+  }
+
+  if (operations.length > 0) {
+    console.log('[Notes] Parsed web operations from intent:', operations);
+  }
+
+  return operations.slice(0, 5);
+}
+
 function cleanWebOperationTags(content: string): string {
   return content
-    .replace(/<search_web\s+query="[^"]+"\s*\/?>/gi, '')
-    .replace(/<search_web\s+query='[^']+'\s*\/?>/gi, '')
-    .replace(/<get_stock_quote\s+symbol="[^"]+"\s*\/?>/gi, '')
-    .replace(/<get_stock_quote\s+symbol='[^']+'\s*\/?>/gi, '')
+    // Extract content inside <think>...</think> blocks (strip tags, keep text)
+    .replace(/<think>([\s\S]*?)<\/think>/gi, '$1')
+    // Remove all variations of tool XML tags
+    .replace(/<search_web[^>]*\/?>/gi, '')
+    .replace(/<get_stock_quote[^>]*\/?>/gi, '')
     .replace(/<get_market_movers[^>]*\/?>/gi, '')
+    .replace(/<fetch_url[^>]*\/?>/gi, '')
+    // Remove tool mentions in backticks (e.g., `<get_stock_quote>`)
+    .replace(/`<(?:search_web|get_stock_quote|get_market_movers|fetch_url)[^`]*>`/gi, 'the tool')
     .trim();
+}
+
+function cleanThinkingFromResponse(content: string): string {
+  return content
+    // Remove <think>...</think> blocks
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    // Remove "Thinking Process:" sections until we hit actual response content
+    .replace(/\*?\*?Thinking Process:?\*?\*?[\s\S]*?(?=Based on|Here is|Here's|The current|In summary|To summarize|##|$)/gi, '')
+    // Remove numbered/bulleted reasoning steps
+    .replace(/^[\s]*[\d]+\.\s*\*?\*?(?:Analyze|Determine|Extract|Format|Review|Final|Identify|Consider|Check|Evaluate)[^\n]*(?:\n(?!Based on|Here|In summary|##)[^\n]*)*\n?/gim, '')
+    // Remove lines starting with reasoning patterns
+    .replace(/^[\s]*[-•*]?\s*(?:Analyze the|Determine|Extract Data|Format the|Review|Final Polish|I will|I need|I should|Let me)[^\n]*\n?/gim, '')
+    // Clean up extra whitespace
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function separateThinkingContent(content: string): { thinking: string; response: string } {
+  const thinkRegex = /<think>([\s\S]*?)<\/think>/gi;
+  let thinking = '';
+  let response = content;
+  
+  let match;
+  while ((match = thinkRegex.exec(content)) !== null) {
+    thinking += match[1] + '\n';
+  }
+  
+  response = response.replace(thinkRegex, '').trim();
+  return { thinking: thinking.trim(), response };
 }
 
 function formatSearchResults(results: WebSearchResult[]): string {
@@ -659,6 +768,8 @@ export function ChatPanel() {
 
   const [input, setInput] = useState('');
   const [webStatus, setWebStatus] = useState<string | null>(null);
+  const [streamingPhase, setStreamingPhase] = useState<'streaming' | 'executing' | 'done'>('streaming');
+  const [rawThinkingContent, setRawThinkingContent] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -788,11 +899,17 @@ export function ChatPanel() {
         const { content, done } = event.payload;
         if (content) {
           fullContent += content;
-          const displayContent = cleanWebOperationTags(fullContent);
-          updateMessageContent(assistantPlaceholder.id, displayContent);
+          // Always show full stream in thinking panel (cleaned of tool tags)
+          setRawThinkingContent(cleanWebOperationTags(fullContent));
+          // Response panel: clean all thinking content (tags + reasoning patterns)
+          const cleanedResponse = cleanThinkingFromResponse(cleanWebOperationTags(fullContent));
+          updateMessageContent(assistantPlaceholder.id, cleanedResponse);
         }
         if (done) {
-          setIsStreaming(false);
+          setStreamingPhase('done');
+          // Final cleanup when done
+          const cleanedResponse = cleanThinkingFromResponse(cleanWebOperationTags(fullContent));
+          updateMessageContent(assistantPlaceholder.id, cleanedResponse);
         }
       });
 
@@ -873,10 +990,15 @@ export function ChatPanel() {
         
         // Check for web operations in the response
         console.log('[Notes] Checking for web operations in response:', fullContent.substring(0, 200));
-        const webOps = parseWebOperations(fullContent);
+        let webOps = parseWebOperations(fullContent);
+        // Fallback: detect tool intent in text for models that don't emit XML tags
+        if (webOps.length === 0) {
+          webOps = parseWebOperationsFromIntent(fullContent);
+        }
         
         if (webOps.length > 0) {
           console.log('[Notes] Found web operations, executing:', webOps);
+          setStreamingPhase('executing');
           const cleanedContent = cleanWebOperationTags(fullContent);
           
           // Execute web operations
@@ -885,7 +1007,7 @@ export function ChatPanel() {
             
             // Show interim message while summarizing
             updateMessageContent(assistantPlaceholder.id, cleanedContent + '\n\n*Analyzing results...*');
-            
+
             // Send results back to AI for summarization
             setWebStatus('Summarizing results...');
             const summarizedContent = await summarizeWithAI(
@@ -976,7 +1098,11 @@ export function ChatPanel() {
                   <span>{formatDateSeparator(message.created_at)}</span>
                 </div>
               )}
-              <MessageBubble message={message} />
+              <MessageBubble
+                message={message}
+                thinking={streamingPhase !== 'done' && message.role === 'assistant' && rawThinkingContent ? rawThinkingContent : undefined}
+                hasResponse={!!message.content.trim()}
+              />
             </React.Fragment>
           );
         })}
@@ -1022,6 +1148,8 @@ export function ChatPanel() {
 interface MessageBubbleProps {
   message: Message;
   showDate?: boolean;
+  thinking?: string;
+  hasResponse?: boolean;
 }
 
 function formatMessageTime(dateStr: string): string {
@@ -1074,9 +1202,11 @@ function formatDateSeparator(dateStr: string): string {
   }
 }
 
-function MessageBubble({ message, showDate = true }: MessageBubbleProps) {
+function MessageBubble({ message, showDate = true, thinking, hasResponse }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === 'user';
+  const isAssistant = !isUser;
+  const messageContentRef = useRef<HTMLDivElement>(null);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(message.content);
@@ -1084,18 +1214,38 @@ function MessageBubble({ message, showDate = true }: MessageBubbleProps) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Auto-scroll message during streaming
+  useEffect(() => {
+    if (thinking && messageContentRef.current) {
+      messageContentRef.current.scrollTop = messageContentRef.current.scrollHeight;
+    }
+  }, [thinking, message.content]);
+
+  // Render: thinking text inline (muted) or final response (cleaned markdown)
+  const renderBody = () => {
+    // If we have a response and were showing thinking, replace thinking with response
+    if (hasResponse) {
+      return <MarkdownRenderer content={message.content} />;
+    }
+    if (thinking) {
+      return <div className={styles.thinkingText}>{cleanWebOperationTags(thinking)}</div>;
+    }
+    if (message.content) {
+      return isUser ? message.content : <MarkdownRenderer content={message.content} />;
+    }
+    return (
+      <span className={styles.typing}>
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+    );
+  };
+
   return (
     <div className={`${styles.messageBubble} ${isUser ? styles.user : styles.assistant}`}>
-      <div className={styles.messageContent}>
-        {message.content ? (
-          isUser ? message.content : <MarkdownRenderer content={message.content} />
-        ) : (
-          <span className={styles.typing}>
-            <span></span>
-            <span></span>
-            <span></span>
-          </span>
-        )}
+      <div className={`${styles.messageContent} ${thinking ? styles.thinkingInline : ''}`} ref={messageContentRef}>
+        {renderBody()}
       </div>
       <div className={styles.messageFooter}>
         {showDate && message.created_at && (
