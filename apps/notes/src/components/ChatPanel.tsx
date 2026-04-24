@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, StopCircle, Copy, Check, Globe, TrendingUp } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Send, Loader2, StopCircle, Copy, Check, Globe, TrendingUp, Paperclip, X, Image, FileText, File as FileIcon, FileCode, ChevronDown, ChevronRight, Brain } from 'lucide-react';
 import { useNotesStore, Message } from '../store/notesStore';
 import styles from './ChatPanel.module.css';
 
@@ -64,6 +64,25 @@ interface MCPServerState {
   status: 'stopped' | 'starting' | 'running' | 'error';
   tools: MCPTool[];
   error?: string;
+}
+
+interface Attachment {
+  id: string;
+  file: File;
+  type: 'image' | 'pdf' | 'document' | 'text';
+  mimeType: string;
+  base64Data?: string;
+  preview?: string;
+  extractedText?: string;
+  isProcessing?: boolean;
+}
+
+interface MessageAttachment {
+  id: string;
+  type: string;
+  name: string;
+  mimeType: string;
+  data?: string;
 }
 
 // Global MCP server states for Notes app
@@ -770,8 +789,16 @@ export function ChatPanel() {
   const [webStatus, setWebStatus] = useState<string | null>(null);
   const [streamingPhase, setStreamingPhase] = useState<'streaming' | 'executing' | 'done'>('streaming');
   const [rawThinkingContent, setRawThinkingContent] = useState('');
+  const [thinkingCollapsed, setThinkingCollapsed] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDropUnlistenRef = useRef<(() => void) | null>(null);
+  const handleFileSelectRef = useRef<((files: FileList, source: string) => void) | null>(null);
+  const isProcessingFilesRef = useRef(false);
+  const lastDropTimeRef = useRef(0);
 
   const conversation = getActiveConversation();
 
@@ -794,6 +821,11 @@ export function ChatPanel() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Debug: log when attachments change
+  useEffect(() => {
+    console.log('[Notes] Attachments state changed:', attachments.length, attachments.map(a => ({ id: a.id, type: a.type, preview: a.preview?.substring(0, 50) })));
+  }, [attachments]);
 
   const executeWebOperations = async (operations: WebOperation[]): Promise<string> => {
     const results: string[] = [];
@@ -839,10 +871,12 @@ export function ChatPanel() {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !activeConversationId || isLoading) return;
+    if ((!input.trim() && attachments.length === 0) || !activeConversationId || isLoading) return;
 
     const userMessage = input.trim();
+    const currentAttachments = [...attachments];
     setInput('');
+    setAttachments([]);
     setIsLoading(true);
 
     try {
@@ -868,12 +902,21 @@ export function ChatPanel() {
         setWebStatus(null);
       }
       
-      // Add user message
+      // Convert attachments to MessageAttachment format for AI
+      const messageAttachments: MessageAttachment[] = currentAttachments.map(att => ({
+        id: att.id,
+        type: att.type,
+        name: att.file.name,
+        mimeType: att.mimeType,
+        data: att.base64Data,
+      }));
+      
+      // Add user message with attachments
       const savedUserMessage = await invoke('add_message', {
         conversationId: activeConversationId,
         role: 'user',
-        content: userMessage,
-        attachments: null,
+        content: userMessage || (currentAttachments.length > 0 ? '[Attached files]' : ''),
+        attachments: messageAttachments.length > 0 ? JSON.stringify(messageAttachments) : null,
       }) as Message;
       
       addMessage(savedUserMessage);
@@ -917,9 +960,19 @@ export function ChatPanel() {
       const settings = getAISettings();
       
       // Build user content - include fetched URL content if any
-      const userContent = fetchedContent 
+      let userContent = fetchedContent 
         ? `${userMessage}\n${fetchedContent}`
         : userMessage;
+      
+      // Add document text content for PDFs/docs
+      const documentTexts = currentAttachments
+        .filter(att => att.extractedText)
+        .map(att => `[Content from ${att.file.name}]:\n${att.extractedText}`)
+        .join('\n\n');
+      
+      if (documentTexts) {
+        userContent = userContent ? `${userContent}\n\n${documentTexts}` : documentTexts;
+      }
       
       // Build messages with system prompt for web access
       // Limit conversation history to last 20 messages for faster responses
@@ -927,13 +980,26 @@ export function ChatPanel() {
       const recentMessages = messages.slice(-MAX_HISTORY_MESSAGES);
       
       const systemMessage = { role: 'system', content: getWebAccessSystemPrompt() };
+      
+      // Build messages with attachments for the current user message
+      const currentUserMessage: { role: string; content: string; attachments?: MessageAttachment[] } = {
+        role: 'user',
+        content: userContent || '[Attached files]',
+      };
+      
+      // Only add image attachments to AI request (PDFs/docs are already in text content)
+      const imageAttachments = messageAttachments.filter(att => att.type === 'image');
+      if (imageAttachments.length > 0) {
+        currentUserMessage.attachments = imageAttachments;
+      }
+      
       const messagesForAI = [
         systemMessage,
         ...recentMessages.map(m => ({ role: m.role, content: m.content })),
-        { role: 'user', content: userContent },
+        currentUserMessage,
       ];
       
-      console.log(`[Notes] Sending ${messagesForAI.length} messages (limited from ${messages.length + 1})`);
+      console.log(`[Notes] Sending ${messagesForAI.length} messages (limited from ${messages.length + 1})${imageAttachments.length > 0 ? ` with ${imageAttachments.length} image(s)` : ''}`);
 
       try {
         if (settings.aiProvider === 'ollama') {
@@ -1060,6 +1126,304 @@ export function ChatPanel() {
     }
   };
 
+  const processFile = useCallback(async (file: File): Promise<Attachment | null> => {
+    const id = crypto.randomUUID();
+    const mimeType = file.type || '';
+    const fileName = file.name.toLowerCase();
+    
+    // Check by MIME type first, then fall back to extension
+    const isImage = mimeType.startsWith('image/') || 
+                    /\.(jpg|jpeg|png|gif|webp|bmp|svg|ico)$/.test(fileName);
+    const isPdf = mimeType === 'application/pdf' || fileName.endsWith('.pdf');
+    const isDocument = mimeType.includes('wordprocessingml') || 
+                       mimeType === 'application/msword' ||
+                       /\.(doc|docx)$/.test(fileName);
+    
+    // Text-based files: code, config, data files
+    const textExtensions = /\.(txt|md|markdown|json|xml|html|htm|css|scss|sass|less|js|jsx|ts|tsx|py|rb|java|c|cpp|h|hpp|cs|go|rs|swift|kt|php|sh|bash|zsh|yml|yaml|toml|ini|env|conf|config|cfg|log|csv|sql|graphql|vue|svelte)$/;
+    const textMimeTypes = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/typescript'];
+    const isText = textMimeTypes.some(t => mimeType.startsWith(t)) || textExtensions.test(fileName);
+    
+    console.log(`[Notes] Processing file: ${file.name}, type: ${mimeType}, isImage: ${isImage}, isPdf: ${isPdf}, isDoc: ${isDocument}, isText: ${isText}`);
+    
+    if (!isImage && !isPdf && !isDocument && !isText) {
+      console.warn('[Notes] Unsupported file type:', mimeType, fileName);
+      return null;
+    }
+    
+    const attachment: Attachment = {
+      id,
+      file,
+      type: isImage ? 'image' : isPdf ? 'pdf' : isDocument ? 'document' : 'text',
+      mimeType: mimeType || 'application/octet-stream',
+      isProcessing: false,
+    };
+    
+    try {
+      if (isImage) {
+        // Create preview URL immediately
+        attachment.preview = URL.createObjectURL(file);
+        console.log(`[Notes] Created preview URL for image: ${file.name}`);
+        
+        // Read base64 for sending to AI
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            const base64Data = result.split(',')[1];
+            resolve(base64Data);
+          };
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        });
+        
+        attachment.base64Data = base64;
+        console.log(`[Notes] Read base64 for image: ${file.name}, length: ${base64.length}`);
+      } else if (isText) {
+        // Read text content directly
+        const text = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(reader.error);
+          reader.readAsText(file);
+        });
+        
+        attachment.extractedText = text;
+        console.log(`[Notes] Read text file: ${file.name}, length: ${text.length}`);
+      } else {
+        // For PDFs and documents, just store the file reference for now
+        // Text extraction will be done when sending if needed
+        console.log(`[Notes] Added document attachment: ${file.name}`);
+      }
+    } catch (err) {
+      console.error('[Notes] Error processing file:', err);
+      // Still return the attachment even if processing failed
+    }
+    
+    return attachment;
+  }, []);
+
+  const handleFileSelect = useCallback(async (files: FileList | null, source: string = 'unknown') => {
+    if (!files || files.length === 0) {
+      console.log(`[Notes] No files to process (source: ${source})`);
+      return;
+    }
+    
+    // Debounce: prevent duplicate processing within 500ms
+    const now = Date.now();
+    if (now - lastDropTimeRef.current < 500) {
+      console.log(`[Notes] Skipping duplicate file processing (source: ${source}, time since last: ${now - lastDropTimeRef.current}ms)`);
+      return;
+    }
+    
+    // Prevent concurrent processing
+    if (isProcessingFilesRef.current) {
+      console.log(`[Notes] Already processing files, skipping (source: ${source})`);
+      return;
+    }
+    
+    lastDropTimeRef.current = now;
+    isProcessingFilesRef.current = true;
+    
+    console.log(`[Notes] Processing ${files.length} file(s) (source: ${source})`);
+    
+    try {
+      const newAttachments: Attachment[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        console.log(`[Notes] Processing file ${i + 1}/${files.length}: ${file.name}`);
+        const attachment = await processFile(file);
+        if (attachment) {
+          newAttachments.push(attachment);
+          console.log(`[Notes] Added attachment: ${attachment.id}`);
+        }
+      }
+      
+      if (newAttachments.length > 0) {
+        console.log(`[Notes] Setting ${newAttachments.length} new attachment(s)`);
+        setAttachments(prev => [...prev, ...newAttachments]);
+      }
+    } finally {
+      isProcessingFilesRef.current = false;
+    }
+  }, [processFile]);
+
+  // Keep ref updated for use in Tauri drag-drop listener
+  useEffect(() => {
+    handleFileSelectRef.current = handleFileSelect;
+  }, [handleFileSelect]);
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setAttachments(prev => {
+      const attachment = prev.find(a => a.id === id);
+      if (attachment?.preview) {
+        URL.revokeObjectURL(attachment.preview);
+      }
+      return prev.filter(a => a.id !== id);
+    });
+  }, []);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[Notes] Drag enter');
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Don't log here as it fires continuously
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[Notes] Drag leave');
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    console.log(`[Notes] Browser drop event: ${e.dataTransfer.files.length} files`);
+    if (e.dataTransfer.files.length > 0) {
+      handleFileSelect(e.dataTransfer.files, 'browser-drop');
+    }
+  }, [handleFileSelect]);
+
+  // Listen for Tauri file drop events (Tauri intercepts browser drag-drop when dragDropEnabled: true)
+  useEffect(() => {
+    let mounted = true;
+    
+    const setupDragDropListener = async () => {
+      // Clean up any existing listener first
+      if (dragDropUnlistenRef.current) {
+        dragDropUnlistenRef.current();
+        dragDropUnlistenRef.current = null;
+      }
+      
+      try {
+        const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+        const webview = getCurrentWebviewWindow();
+        
+        const unlisten = await webview.onDragDropEvent(async (event) => {
+          if (!mounted) return;
+          
+          console.log('[Notes] Tauri drag-drop event:', event.payload.type);
+          
+          if (event.payload.type === 'over') {
+            setIsDragOver(true);
+          } else if (event.payload.type === 'leave' || event.payload.type === 'cancel') {
+            setIsDragOver(false);
+          } else if (event.payload.type === 'drop') {
+            setIsDragOver(false);
+            const paths = event.payload.paths;
+            console.log('[Notes] Files dropped via Tauri:', paths);
+            
+            if (paths && paths.length > 0) {
+              // Convert file paths to File objects
+              const files: File[] = [];
+              const invoke = await getInvoke();
+              
+              for (const filePath of paths) {
+                try {
+                  // Get filename from path
+                  const fileName = filePath.split('/').pop() || filePath.split('\\').pop() || 'file';
+                  
+                  // Determine MIME type from extension
+                  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+                  const mimeTypes: Record<string, string> = {
+                    'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif',
+                    'webp': 'image/webp', 'svg': 'image/svg+xml', 'bmp': 'image/bmp', 'ico': 'image/x-icon',
+                    'pdf': 'application/pdf', 'doc': 'application/msword',
+                    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'txt': 'text/plain', 'md': 'text/markdown', 'json': 'application/json',
+                    'xml': 'application/xml', 'html': 'text/html', 'htm': 'text/html',
+                    'css': 'text/css', 'js': 'text/javascript', 'ts': 'text/typescript',
+                    'jsx': 'text/javascript', 'tsx': 'text/typescript',
+                    'py': 'text/x-python', 'java': 'text/x-java', 'c': 'text/x-c', 'cpp': 'text/x-c++',
+                    'go': 'text/x-go', 'rs': 'text/x-rust', 'yml': 'text/yaml', 'yaml': 'text/yaml',
+                    'toml': 'text/toml', 'csv': 'text/csv', 'sql': 'text/sql', 'sh': 'text/x-sh',
+                  };
+                  const mimeType = mimeTypes[ext] || 'application/octet-stream';
+                  const isTextFile = mimeType.startsWith('text/') || ['application/json', 'application/xml'].includes(mimeType);
+                  const isImage = mimeType.startsWith('image/');
+                  
+                  if (isTextFile) {
+                    // Read text files using existing read_file command
+                    const result = await invoke('read_file', { path: filePath }) as { content: string };
+                    const file = new File([result.content], fileName, { type: mimeType });
+                    files.push(file);
+                    console.log(`[Notes] Read text file: ${fileName}`);
+                  } else if (isImage) {
+                    // For images, read binary via Tauri command and convert to File
+                    try {
+                      const base64Data = await invoke<string>('read_file_base64', { path: filePath });
+                      console.log(`[Notes] Read image as base64: ${fileName}, length: ${base64Data.length}`);
+                      
+                      // Convert base64 to binary
+                      const binaryString = atob(base64Data);
+                      const bytes = new Uint8Array(binaryString.length);
+                      for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                      }
+                      
+                      const blob = new Blob([bytes], { type: mimeType });
+                      const file = new File([blob], fileName, { type: mimeType });
+                      files.push(file);
+                      console.log(`[Notes] Created File from image: ${fileName}, size: ${file.size}`);
+                    } catch (fetchErr) {
+                      console.error(`[Notes] Failed to read image ${filePath}:`, fetchErr);
+                      // Still add the file as a placeholder so user sees something
+                      const file = new File([], fileName, { type: mimeType });
+                      files.push(file);
+                    }
+                  } else {
+                    // For other files (PDF, etc), just create a placeholder
+                    const file = new File([], fileName, { type: mimeType });
+                    files.push(file);
+                    console.log(`[Notes] Created placeholder for: ${fileName}`);
+                  }
+                } catch (err) {
+                  console.error(`[Notes] Failed to read dropped file ${filePath}:`, err);
+                }
+              }
+              
+              if (files.length > 0 && handleFileSelectRef.current) {
+                // Create a FileList-like object
+                const dataTransfer = new DataTransfer();
+                files.forEach(f => dataTransfer.items.add(f));
+                handleFileSelectRef.current(dataTransfer.files, 'tauri-drop');
+              }
+            }
+          }
+        });
+        
+        if (mounted) {
+          dragDropUnlistenRef.current = unlisten;
+          console.log('[Notes] Tauri drag-drop listener set up');
+        } else {
+          unlisten();
+        }
+      } catch (err) {
+        console.log('[Notes] Tauri drag-drop not available, using browser events:', err);
+      }
+    };
+    
+    setupDragDropListener();
+    
+    return () => {
+      mounted = false;
+      if (dragDropUnlistenRef.current) {
+        dragDropUnlistenRef.current();
+        dragDropUnlistenRef.current = null;
+      }
+    };
+  }, []); // Empty deps - only run once on mount
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -1068,7 +1432,13 @@ export function ChatPanel() {
   };
 
   return (
-    <div className={styles.container}>
+    <div 
+      className={styles.container}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className={styles.header}>
         <h2 className={styles.title}>{conversation?.title || 'Chat'}</h2>
         <div className={styles.headerBadges}>
@@ -1116,14 +1486,101 @@ export function ChatPanel() {
         </div>
       )}
 
-      <div className={styles.inputArea}>
+      <div 
+        className={`${styles.inputArea} ${isDragOver ? styles.dragOver : ''}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {/* Debug indicator */}
+        {attachments.length > 0 && (
+          <div style={{ padding: '4px 12px', fontSize: '11px', color: '#4caf50', background: 'rgba(76, 175, 80, 0.1)' }}>
+            {attachments.length} file(s) attached
+          </div>
+        )}
+        {attachments.length > 0 && (
+          <div className={styles.attachmentPreviews}>
+            {attachments.map(attachment => (
+              <div key={attachment.id} className={styles.attachmentPreview}>
+                {attachment.type === 'image' ? (
+                  attachment.preview ? (
+                    <img 
+                      src={attachment.preview} 
+                      alt={attachment.file.name} 
+                      className={styles.attachmentThumb}
+                      onError={(e) => console.error('[Notes] Image load error:', e)}
+                      onLoad={() => console.log('[Notes] Image loaded:', attachment.file.name)}
+                    />
+                  ) : (
+                    <div className={styles.filePreview}>
+                      <Image size={24} />
+                      <span className={styles.fileName}>{attachment.file.name}</span>
+                    </div>
+                  )
+                ) : attachment.type === 'pdf' ? (
+                  <div className={styles.filePreview}>
+                    <FileText size={24} />
+                    <span className={styles.fileName}>{attachment.file.name}</span>
+                  </div>
+                ) : attachment.type === 'text' ? (
+                  <div className={styles.filePreview}>
+                    <FileCode size={24} />
+                    <span className={styles.fileName}>{attachment.file.name}</span>
+                  </div>
+                ) : (
+                  <div className={styles.filePreview}>
+                    <FileIcon size={24} />
+                    <span className={styles.fileName}>{attachment.file.name}</span>
+                  </div>
+                )}
+                <button 
+                  className={styles.removeAttachment}
+                  onClick={() => handleRemoveAttachment(attachment.id)}
+                  title="Remove attachment"
+                >
+                  <X size={14} />
+                </button>
+                {attachment.isProcessing && (
+                  <div className={styles.processingOverlay}>
+                    <Loader2 size={16} className={styles.spinner} />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <div className={styles.inputWrapper}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,.pdf,.doc,.docx,.txt,.md,.json,.xml,.html,.css,.js,.ts,.jsx,.tsx,.py,.java,.c,.cpp,.go,.rs,.yml,.yaml,.toml,.csv,.sql,.sh"
+            multiple
+            onChange={(e) => {
+              console.log('[Notes] File input changed, files:', e.target.files?.length);
+              handleFileSelect(e.target.files, 'file-input');
+              // Reset input so same file can be selected again
+              e.target.value = '';
+            }}
+            className={styles.hiddenFileInput}
+          />
+          <button
+            onClick={() => {
+              console.log('[Notes] Attach button clicked');
+              fileInputRef.current?.click();
+            }}
+            className={styles.attachBtn}
+            disabled={isLoading}
+            title="Attach files (images, PDF, documents)"
+          >
+            <Paperclip size={18} />
+          </button>
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask anything... (supports web search & stock data)"
+            placeholder={isDragOver ? "Drop files here..." : "Ask anything... (supports images, PDFs, web search & stocks)"}
             className={styles.input}
             rows={1}
             disabled={isLoading}
@@ -1131,7 +1588,7 @@ export function ChatPanel() {
           <button
             onClick={handleSend}
             className={styles.sendBtn}
-            disabled={!input.trim() || isLoading}
+            disabled={(!input.trim() && attachments.length === 0) || isLoading}
           >
             {isLoading ? (
               isStreaming ? <StopCircle size={20} /> : <Loader2 size={20} className={styles.spinner} />
@@ -1204,6 +1661,7 @@ function formatDateSeparator(dateStr: string): string {
 
 function MessageBubble({ message, showDate = true, thinking, hasResponse }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
+  const [expandedImage, setExpandedImage] = useState<string | null>(null);
   const isUser = message.role === 'user';
   const isAssistant = !isUser;
   const messageContentRef = useRef<HTMLDivElement>(null);
@@ -1213,6 +1671,16 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  // Parse attachments from JSON string
+  const parsedAttachments: MessageAttachment[] = React.useMemo(() => {
+    if (!message.attachments) return [];
+    try {
+      return JSON.parse(message.attachments);
+    } catch {
+      return [];
+    }
+  }, [message.attachments]);
 
   // Auto-scroll message during streaming
   useEffect(() => {
@@ -1242,8 +1710,42 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
     );
   };
 
+  const renderAttachments = () => {
+    if (parsedAttachments.length === 0) return null;
+    
+    return (
+      <div className={styles.messageAttachments}>
+        {parsedAttachments.map((att, idx) => {
+          if (att.type === 'image' && att.data) {
+            const imageUrl = `data:${att.mimeType};base64,${att.data}`;
+            return (
+              <div key={idx} className={styles.messageImageContainer}>
+                <img 
+                  src={imageUrl} 
+                  alt={att.name || 'Attached image'}
+                  className={styles.messageImage}
+                  onClick={() => setExpandedImage(imageUrl)}
+                />
+              </div>
+            );
+          }
+          if (att.type === 'pdf' || att.type === 'document') {
+            return (
+              <div key={idx} className={styles.messageFileAttachment}>
+                <FileText size={18} />
+                <span>{att.name || 'Document'}</span>
+              </div>
+            );
+          }
+          return null;
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className={`${styles.messageBubble} ${isUser ? styles.user : styles.assistant}`}>
+      {renderAttachments()}
       <div className={`${styles.messageContent} ${thinking ? styles.thinkingInline : ''}`} ref={messageContentRef}>
         {renderBody()}
       </div>
@@ -1259,6 +1761,38 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
           </div>
         )}
       </div>
+      {expandedImage && (
+        <div className={styles.imageLightbox} onClick={() => setExpandedImage(null)}>
+          <img src={expandedImage} alt="Expanded view" />
+          <button className={styles.closeLightbox} onClick={() => setExpandedImage(null)}>
+            <X size={24} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodeBlock({ code, language }: { code: string; language?: string }) {
+  const [copied, setCopied] = useState(false);
+  
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  
+  return (
+    <div className={styles.codeBlock}>
+      <div className={styles.codeHeader}>
+        <span className={styles.codeLang}>{language || 'text'}</span>
+        <button onClick={handleCopy} className={styles.codeCopyBtn} title="Copy code">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </button>
+      </div>
+      <pre className={styles.codeContent}>
+        <code>{code}</code>
+      </pre>
     </div>
   );
 }
@@ -1290,10 +1824,7 @@ function MarkdownRenderer({ content }: { content: string }) {
         }
         
         elements.push(
-          <pre key={key++} className={styles.codeBlock}>
-            {lang && <div className={styles.codeLang}>{lang}</div>}
-            <code>{codeLines.join('\n')}</code>
-          </pre>
+          <CodeBlock key={key++} code={codeLines.join('\n')} language={lang || undefined} />
         );
         continue;
       }

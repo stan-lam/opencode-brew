@@ -10,3 +10,4 @@ pub mod mcp;
 pub mod notes;
 pub mod scheduler;
 pub mod settings;
+pub mod files;

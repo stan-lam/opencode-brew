@@ -303,17 +303,23 @@ function FolderItem({ folder, expanded, onToggle, isActive, onSelect, onRename }
   
   return (
     <div className={styles.folderItem}>
-      <button 
+      <div 
         className={`${styles.folderRow} ${isActive ? styles.active : ''}`}
         onClick={onSelect}
         onDoubleClick={handleDoubleClick}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(); }}
       >
-        <button 
+        <span 
           className={styles.expandBtn}
           onClick={(e) => { e.stopPropagation(); onToggle(); }}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onToggle(); } }}
         >
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
+        </span>
         <Folder size={16} className={styles.folderIcon} />
         {isEditing ? (
           <input
@@ -329,7 +335,7 @@ function FolderItem({ folder, expanded, onToggle, isActive, onSelect, onRename }
         ) : (
           <span className={styles.folderName}>{folder.name}</span>
         )}
-      </button>
+      </div>
     </div>
   );
 }

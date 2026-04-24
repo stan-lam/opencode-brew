@@ -374,25 +374,64 @@
 
 .codeBlock {
   background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 1em;
   margin: 0.5em 0;
-  overflow-x: auto;
-  font-family: 'SF Mono', Monaco, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.5;
+  overflow: hidden;
 }
 
-.codeBlock code {
-  color: var(--text-primary);
+.codeHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.15);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .codeLang {
   font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
-  margin-bottom: 0.5em;
   letter-spacing: 0.5px;
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+}
+
+.codeCopyBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s ease;
+}
+
+.codeBlock:hover .codeCopyBtn {
+  opacity: 1;
+}
+
+.codeCopyBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+}
+
+.codeContent {
+  padding: 12px 16px;
+  margin: 0;
+  overflow-x: auto;
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.codeContent code {
+  color: var(--text-primary);
 }
 
 /* Table Styles */
@@ -450,4 +489,199 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Attachment Styles */
+.hiddenFileInput {
+  display: none;
+}
+
+.attachBtn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.attachBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+}
+
+.attachBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Drag and Drop */
+.inputArea.dragOver {
+  background: rgba(88, 166, 255, 0.1);
+  border-color: var(--accent-blue);
+}
+
+.inputArea.dragOver .inputWrapper {
+  border-color: var(--accent-blue);
+  border-style: dashed;
+}
+
+/* Attachment Previews */
+.attachmentPreviews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.attachmentPreview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.attachmentThumb {
+  width: 60px;
+  height: 60px;
+  object-fit: cover;
+}
+
+.filePreview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  color: var(--text-secondary);
+}
+
+.fileName {
+  font-size: 12px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removeAttachment {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  border-radius: 50%;
+  color: white;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.attachmentPreview:hover .removeAttachment {
+  opacity: 1;
+}
+
+.removeAttachment:hover {
+  background: rgba(255, 0, 0, 0.7);
+}
+
+.processingOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+/* Message Attachments */
+.messageAttachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.messageImageContainer {
+  max-width: 300px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.messageImageContainer:hover {
+  transform: scale(1.02);
+}
+
+.messageImage {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.messageFileAttachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+/* Image Lightbox */
+.imageLightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.9);
+  cursor: pointer;
+}
+
+.imageLightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+.closeLightbox {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 50%;
+  color: white;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.closeLightbox:hover {
+  background: rgba(255, 255, 255, 0.2);
 }

@@ -389,6 +389,10 @@ pub fn run() {
             // Settings
             commands::settings::save_ai_settings,
             commands::settings::load_ai_settings,
+            // File extraction
+            commands::files::read_file_base64,
+            commands::files::extract_pdf_text,
+            commands::files::extract_docx_text,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {

@@ -8,6 +8,40 @@ use tokio::sync::Mutex;
 use chrono::Utc;
 use uuid::Uuid;
 
+// ============= Default AI System Prompt (with web access capabilities) =============
+
+const DEFAULT_AI_SYSTEM_PROMPT: &str = r#"You are a helpful AI assistant with access to web tools. You MUST use these tools for ANY question about:
+- **Stock prices, market data, cryptocurrency prices** - These change constantly, NEVER guess or make up numbers
+- **Current events, recent news, or anything time-sensitive**
+- **Weather, sports scores, or live data**
+
+### Available Tools (use XML tags):
+
+**Search the web:**
+<search_web query="your search query" />
+
+**Fetch content from a URL:**
+<fetch_url url="https://example.com/page" />
+
+**Get a stock quote:**
+<get_stock_quote symbol="TICKER" />
+
+**Get market movers (gainers/losers/active):**
+<get_market_movers />
+
+### STOCK QUERIES - ALWAYS USE THE CORRECT TOOL:
+- For a specific stock price (AMD, AAPL, etc.): <get_stock_quote symbol="TICKER" />
+- For top gainers/losers: <get_market_movers />
+- For stock news: <search_web query="TICKER news" />
+
+### CRITICAL RULES:
+1. NEVER just tell the user to "check these links" - FETCH the data and present the actual numbers
+2. NEVER make up stock prices or financial data
+3. ALWAYS use the stock quote tool for specific tickers
+4. ALWAYS present data in a clear table format
+5. NEVER say you don't have access to live data - you DO have tools for it
+6. NEVER give generic advice about checking financial websites yourself"#;
+
 // ============= Data Types =============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -898,18 +932,21 @@ async fn execute_ai_prompt(
                 ollama_url.replace("localhost", "127.0.0.1")
             };
             println!("[scheduler] Using Ollama base URL: {}", base_url);
-            
-            // Combine system prompt with user prompt for generate API
-            // This is more reliable than the chat API across different Ollama versions
-            let full_prompt = if let Some(sys) = system_prompt {
+
+            // Build the effective system prompt (always include web access capabilities)
+            let effective_sys = if let Some(sys) = system_prompt {
                 if !sys.trim().is_empty() {
-                    format!("{}\n\n---\n\n{}", sys, prompt)
+                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
                 } else {
-                    prompt.to_string()
+                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
                 }
             } else {
-                prompt.to_string()
+                DEFAULT_AI_SYSTEM_PROMPT.to_string()
             };
+
+            // Combine system prompt with user prompt for generate API
+            // This is more reliable than the chat API across different Ollama versions
+            let full_prompt = format!("{}\n\n---\n\n{}", effective_sys, prompt);
             
             let url = format!("{}/api/generate", base_url);
             println!("[scheduler] Full prompt length: {} chars", full_prompt.len());
@@ -959,11 +996,19 @@ async fn execute_ai_prompt(
             if openai_key.is_empty() {
                 return Err("OpenAI API key not configured. Please set it in Settings.".to_string());
             }
-            
+
+            let effective_sys = if let Some(sys) = system_prompt {
+                if !sys.trim().is_empty() {
+                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                } else {
+                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                }
+            } else {
+                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+            };
+
             let mut messages = Vec::new();
-            if let Some(sys) = system_prompt {
-                messages.push(serde_json::json!({"role": "system", "content": sys}));
-            }
+            messages.push(serde_json::json!({"role": "system", "content": effective_sys}));
             messages.push(serde_json::json!({"role": "user", "content": prompt}));
             
             let payload = serde_json::json!({
@@ -1004,17 +1049,24 @@ async fn execute_ai_prompt(
             if anthropic_key.is_empty() {
                 return Err("Anthropic API key not configured. Please set it in Settings.".to_string());
             }
-            
+
+            let effective_sys = if let Some(sys) = system_prompt {
+                if !sys.trim().is_empty() {
+                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                } else {
+                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                }
+            } else {
+                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+            };
+
             let mut payload = serde_json::json!({
                 "model": model,
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}]
             });
-            
-            // Anthropic uses a separate "system" field (not in messages array)
-            if let Some(sys) = system_prompt {
-                payload["system"] = serde_json::json!(sys);
-            }
+
+            payload["system"] = serde_json::json!(effective_sys);
             
             let response = client
                 .post("https://api.anthropic.com/v1/messages")
@@ -1049,11 +1101,19 @@ async fn execute_ai_prompt(
             }
             
             let url = format!("{}/chat/completions", custom_base_url.trim_end_matches('/'));
-            
+
+            let effective_sys = if let Some(sys) = system_prompt {
+                if !sys.trim().is_empty() {
+                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                } else {
+                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                }
+            } else {
+                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+            };
+
             let mut messages = Vec::new();
-            if let Some(sys) = system_prompt {
-                messages.push(serde_json::json!({"role": "system", "content": sys}));
-            }
+            messages.push(serde_json::json!({"role": "system", "content": effective_sys}));
             messages.push(serde_json::json!({"role": "user", "content": prompt}));
             
             let payload = serde_json::json!({
