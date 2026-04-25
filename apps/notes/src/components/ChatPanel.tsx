@@ -75,6 +75,7 @@ interface Attachment {
   preview?: string;
   extractedText?: string;
   isProcessing?: boolean;
+  sourcePath?: string; // Original file path from Tauri drag-drop
 }
 
 interface MessageAttachment {
@@ -225,6 +226,35 @@ You can then summarize, analyze, or use that content as requested.
 
 ### MULTI-TURN RULE:
 Even if you already fetched data earlier, if the user asks another question about real-time data, **you MUST output the XML tag again**. Do NOT reference previous tool calls. Do NOT say "as mentioned before". Output the fresh XML tag for every new data request.
+
+### OUTPUT FORMATTING RULES:
+1. **NO LaTeX math notation** - Do NOT use $...$ or \\(...\\) syntax. This chat does not render LaTeX.
+2. **Use Unicode symbols** instead of LaTeX:
+   - Arrows: → ← ↔ ↑ ↓ (not $\\rightarrow$ etc.)
+   - Math: × ÷ ≠ ≤ ≥ ± ∞ (not $\\times$ etc.)
+3. **For sequence diagrams**: ALWAYS use Mermaid code blocks - they render as visual diagrams:
+   \`\`\`mermaid
+   sequenceDiagram
+       participant App as MobileApp
+       participant API as API Gateway
+       participant Order as Order Service
+       participant DB as Database
+       
+       App->>API: submitOrder(items)
+       API->>Order: validateAndReserve()
+       Order->>DB: checkInventory()
+       DB-->>Order: available
+       Order-->>API: confirmed
+       API-->>App: orderID
+   \`\`\`
+4. **For flowcharts**: Use Mermaid flowchart syntax:
+   \`\`\`mermaid
+   flowchart TD
+       A[Start] --> B{Decision}
+       B -->|Yes| C[Action 1]
+       B -->|No| D[Action 2]
+   \`\`\`
+5. **Use markdown** for formatting: headers (#), bold (**), lists (-), code blocks (\`\`\`)
 `;
 }
 
@@ -796,7 +826,7 @@ export function ChatPanel() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDropUnlistenRef = useRef<(() => void) | null>(null);
-  const handleFileSelectRef = useRef<((files: FileList, source: string) => void) | null>(null);
+  const handleFileSelectRef = useRef<((files: FileList, source: string, sourcePaths?: string[]) => void) | null>(null);
   const isProcessingFilesRef = useRef(false);
   const lastDropTimeRef = useRef(0);
 
@@ -912,10 +942,30 @@ export function ChatPanel() {
       }));
       
       // Add user message with attachments
+      // Generate descriptive message for file-only submissions
+      let displayContent = userMessage;
+      if (!displayContent && currentAttachments.length > 0) {
+        const fileNames = currentAttachments.map(a => a.file.name);
+        const fileTypes = currentAttachments.map(a => a.type);
+        const hasImages = fileTypes.includes('image');
+        const hasPdfs = fileTypes.includes('pdf');
+        const hasDocs = fileTypes.includes('document');
+        
+        if (currentAttachments.length === 1) {
+          displayContent = `Analyze: ${fileNames[0]}`;
+        } else if (hasImages && !hasPdfs && !hasDocs) {
+          displayContent = `Analyze ${currentAttachments.length} images`;
+        } else if (hasPdfs || hasDocs) {
+          displayContent = `Analyze ${currentAttachments.length} document(s)`;
+        } else {
+          displayContent = `Analyze ${currentAttachments.length} file(s)`;
+        }
+      }
+      
       const savedUserMessage = await invoke('add_message', {
         conversationId: activeConversationId,
         role: 'user',
-        content: userMessage || (currentAttachments.length > 0 ? '[Attached files]' : ''),
+        content: displayContent || '',
         attachments: messageAttachments.length > 0 ? JSON.stringify(messageAttachments) : null,
       }) as Message;
       
@@ -984,7 +1034,7 @@ export function ChatPanel() {
       // Build messages with attachments for the current user message
       const currentUserMessage: { role: string; content: string; attachments?: MessageAttachment[] } = {
         role: 'user',
-        content: userContent || '[Attached files]',
+        content: userContent || 'Please analyze the attached file(s).',
       };
       
       // Only add image attachments to AI request (PDFs/docs are already in text content)
@@ -1126,7 +1176,7 @@ export function ChatPanel() {
     }
   };
 
-  const processFile = useCallback(async (file: File): Promise<Attachment | null> => {
+  const processFile = useCallback(async (file: File, sourcePath?: string): Promise<Attachment | null> => {
     const id = crypto.randomUUID();
     const mimeType = file.type || '';
     const fileName = file.name.toLowerCase();
@@ -1144,7 +1194,7 @@ export function ChatPanel() {
     const textMimeTypes = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/typescript'];
     const isText = textMimeTypes.some(t => mimeType.startsWith(t)) || textExtensions.test(fileName);
     
-    console.log(`[Notes] Processing file: ${file.name}, type: ${mimeType}, isImage: ${isImage}, isPdf: ${isPdf}, isDoc: ${isDocument}, isText: ${isText}`);
+    console.log(`[Notes] Processing file: ${file.name}, type: ${mimeType}, isImage: ${isImage}, isPdf: ${isPdf}, isDoc: ${isDocument}, isText: ${isText}, sourcePath: ${sourcePath || 'none'}`);
     
     if (!isImage && !isPdf && !isDocument && !isText) {
       console.warn('[Notes] Unsupported file type:', mimeType, fileName);
@@ -1157,6 +1207,7 @@ export function ChatPanel() {
       type: isImage ? 'image' : isPdf ? 'pdf' : isDocument ? 'document' : 'text',
       mimeType: mimeType || 'application/octet-stream',
       isProcessing: false,
+      sourcePath,
     };
     
     try {
@@ -1190,10 +1241,29 @@ export function ChatPanel() {
         
         attachment.extractedText = text;
         console.log(`[Notes] Read text file: ${file.name}, length: ${text.length}`);
+      } else if (isPdf && sourcePath) {
+        // Extract PDF text using Tauri command (only works with file path)
+        try {
+          const invoke = await getInvoke();
+          const text = await invoke<string>('extract_pdf_text', { path: sourcePath });
+          attachment.extractedText = text;
+          console.log(`[Notes] Extracted PDF text: ${file.name}, length: ${text.length}`);
+        } catch (pdfErr) {
+          console.error(`[Notes] Failed to extract PDF text:`, pdfErr);
+        }
+      } else if (isDocument && sourcePath) {
+        // Extract DOCX text using Tauri command (only works with file path)
+        try {
+          const invoke = await getInvoke();
+          const text = await invoke<string>('extract_docx_text', { path: sourcePath });
+          attachment.extractedText = text;
+          console.log(`[Notes] Extracted DOCX text: ${file.name}, length: ${text.length}`);
+        } catch (docxErr) {
+          console.error(`[Notes] Failed to extract DOCX text:`, docxErr);
+        }
       } else {
-        // For PDFs and documents, just store the file reference for now
-        // Text extraction will be done when sending if needed
-        console.log(`[Notes] Added document attachment: ${file.name}`);
+        // For PDFs/docs without sourcePath (from file picker), we can't extract text yet
+        console.log(`[Notes] Added document attachment without text extraction: ${file.name}`);
       }
     } catch (err) {
       console.error('[Notes] Error processing file:', err);
@@ -1203,7 +1273,7 @@ export function ChatPanel() {
     return attachment;
   }, []);
 
-  const handleFileSelect = useCallback(async (files: FileList | null, source: string = 'unknown') => {
+  const handleFileSelect = useCallback(async (files: FileList | null, source: string = 'unknown', sourcePaths?: string[]) => {
     if (!files || files.length === 0) {
       console.log(`[Notes] No files to process (source: ${source})`);
       return;
@@ -1231,8 +1301,9 @@ export function ChatPanel() {
       const newAttachments: Attachment[] = [];
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        console.log(`[Notes] Processing file ${i + 1}/${files.length}: ${file.name}`);
-        const attachment = await processFile(file);
+        const sourcePath = sourcePaths?.[i];
+        console.log(`[Notes] Processing file ${i + 1}/${files.length}: ${file.name}, path: ${sourcePath || 'none'}`);
+        const attachment = await processFile(file, sourcePath);
         if (attachment) {
           newAttachments.push(attachment);
           console.log(`[Notes] Added attachment: ${attachment.id}`);
@@ -1324,8 +1395,9 @@ export function ChatPanel() {
             console.log('[Notes] Files dropped via Tauri:', paths);
             
             if (paths && paths.length > 0) {
-              // Convert file paths to File objects
+              // Convert file paths to File objects, keeping track of source paths
               const files: File[] = [];
+              const sourcePaths: string[] = [];
               const invoke = await getInvoke();
               
               for (const filePath of paths) {
@@ -1357,6 +1429,7 @@ export function ChatPanel() {
                     const result = await invoke('read_file', { path: filePath }) as { content: string };
                     const file = new File([result.content], fileName, { type: mimeType });
                     files.push(file);
+                    sourcePaths.push(filePath);
                     console.log(`[Notes] Read text file: ${fileName}`);
                   } else if (isImage) {
                     // For images, read binary via Tauri command and convert to File
@@ -1374,18 +1447,21 @@ export function ChatPanel() {
                       const blob = new Blob([bytes], { type: mimeType });
                       const file = new File([blob], fileName, { type: mimeType });
                       files.push(file);
+                      sourcePaths.push(filePath);
                       console.log(`[Notes] Created File from image: ${fileName}, size: ${file.size}`);
                     } catch (fetchErr) {
                       console.error(`[Notes] Failed to read image ${filePath}:`, fetchErr);
                       // Still add the file as a placeholder so user sees something
                       const file = new File([], fileName, { type: mimeType });
                       files.push(file);
+                      sourcePaths.push(filePath);
                     }
                   } else {
-                    // For other files (PDF, etc), just create a placeholder
+                    // For PDFs/docs, create a placeholder File - text will be extracted in processFile
                     const file = new File([], fileName, { type: mimeType });
                     files.push(file);
-                    console.log(`[Notes] Created placeholder for: ${fileName}`);
+                    sourcePaths.push(filePath);
+                    console.log(`[Notes] Created placeholder for: ${fileName} (will extract text via path)`);
                   }
                 } catch (err) {
                   console.error(`[Notes] Failed to read dropped file ${filePath}:`, err);
@@ -1396,7 +1472,7 @@ export function ChatPanel() {
                 // Create a FileList-like object
                 const dataTransfer = new DataTransfer();
                 files.forEach(f => dataTransfer.items.add(f));
-                handleFileSelectRef.current(dataTransfer.files, 'tauri-drop');
+                handleFileSelectRef.current(dataTransfer.files, 'tauri-drop', sourcePaths);
               }
             }
           }
@@ -1773,15 +1849,126 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
   );
 }
 
+function MermaidDiagram({ code }: { code: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rendered, setRendered] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [svgContent, setSvgContent] = useState<string>('');
+
+  useEffect(() => {
+    const renderDiagram = async () => {
+      if (!containerRef.current || rendered) return;
+      
+      try {
+        const mermaid = (await import('mermaid')).default;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'dark',
+          themeVariables: {
+            primaryColor: '#3b82f6',
+            primaryTextColor: '#fff',
+            primaryBorderColor: '#60a5fa',
+            lineColor: '#94a3b8',
+            secondaryColor: '#1e293b',
+            tertiaryColor: '#0f172a',
+            background: '#1e293b',
+            mainBkg: '#1e293b',
+            secondBkg: '#334155',
+            fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+            fontSize: '16px',
+          },
+          sequence: {
+            actorMargin: 80,
+            boxMargin: 15,
+            boxTextMargin: 8,
+            noteMargin: 15,
+            messageMargin: 50,
+            mirrorActors: true,
+            useMaxWidth: false,
+            width: 180,
+            height: 60,
+            actorFontSize: 16,
+            messageFontSize: 14,
+            noteFontSize: 14,
+          },
+          flowchart: {
+            useMaxWidth: false,
+            htmlLabels: true,
+            curve: 'basis',
+          },
+        });
+
+        const id = `mermaid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const { svg } = await mermaid.render(id, code);
+        
+        if (containerRef.current) {
+          containerRef.current.innerHTML = svg;
+          setSvgContent(svg);
+          setRendered(true);
+        }
+      } catch (err) {
+        console.error('Mermaid render error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to render diagram');
+      }
+    };
+
+    renderDiagram();
+  }, [code, rendered]);
+
+  if (error) {
+    return (
+      <div className={styles.mermaidError}>
+        <div className={styles.mermaidErrorTitle}>Diagram Error</div>
+        <pre>{error}</pre>
+        <details>
+          <summary>View source</summary>
+          <pre>{code}</pre>
+        </details>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className={styles.mermaidContainer} onClick={() => rendered && setExpanded(true)} title="Click to enlarge">
+        <div ref={containerRef} className={styles.mermaidDiagram}>
+          <span className={styles.mermaidLoading}>Rendering diagram...</span>
+        </div>
+        {rendered && <div className={styles.mermaidExpandHint}>Click to enlarge</div>}
+      </div>
+      
+      {expanded && (
+        <div className={styles.mermaidLightbox} onClick={() => setExpanded(false)}>
+          <div className={styles.mermaidLightboxContent} onClick={(e) => e.stopPropagation()}>
+            <div 
+              className={styles.mermaidLightboxDiagram}
+              dangerouslySetInnerHTML={{ __html: svgContent }}
+            />
+            <button className={styles.mermaidLightboxClose} onClick={() => setExpanded(false)}>
+              <X size={24} />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function CodeBlock({ code, language }: { code: string; language?: string }) {
   const [copied, setCopied] = useState(false);
-  
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
-  
+
+  // Render Mermaid diagrams
+  if (language?.toLowerCase() === 'mermaid') {
+    return <MermaidDiagram code={code} />;
+  }
+
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeHeader}>
@@ -1798,8 +1985,276 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
 }
 
 function MarkdownRenderer({ content }: { content: string }) {
-  const renderMarkdown = (text: string) => {
+  // Pre-process content to convert LaTeX notation to Unicode
+  const preprocessContent = (text: string): string => {
+    return text
+      // Arrows - with and without $...$ wrapper
+      .replace(/\$\\rightarrow\$/g, '→')
+      .replace(/\$\\leftarrow\$/g, '←')
+      .replace(/\$\\leftrightarrow\$/g, '↔')
+      .replace(/\$\\Rightarrow\$/g, '⇒')
+      .replace(/\$\\Leftarrow\$/g, '⇐')
+      .replace(/\$\\uparrow\$/g, '↑')
+      .replace(/\$\\downarrow\$/g, '↓')
+      .replace(/\$\\to\$/g, '→')
+      // LaTeX arrows without $...$ wrapper
+      .replace(/\\rightarrow/g, '→')
+      .replace(/\\leftarrow/g, '←')
+      .replace(/\\leftrightarrow/g, '↔')
+      .replace(/\\Rightarrow/g, '⇒')
+      .replace(/\\Leftarrow/g, '⇐')
+      .replace(/\\to(?![a-zA-Z])/g, '→')
+      .replace(/\\uparrow/g, '↑')
+      .replace(/\\downarrow/g, '↓')
+      // Math symbols
+      .replace(/\$\\times\$/g, '×')
+      .replace(/\$\\div\$/g, '÷')
+      .replace(/\$\\neq\$/g, '≠')
+      .replace(/\$\\leq\$/g, '≤')
+      .replace(/\$\\geq\$/g, '≥')
+      .replace(/\$\\pm\$/g, '±')
+      .replace(/\$\\infty\$/g, '∞')
+      .replace(/\$\\approx\$/g, '≈')
+      .replace(/\$\\sum\$/g, '∑')
+      .replace(/\$\\prod\$/g, '∏')
+      .replace(/\$\\sqrt\$/g, '√')
+      // Greek letters (common ones)
+      .replace(/\$\\alpha\$/g, 'α')
+      .replace(/\$\\beta\$/g, 'β')
+      .replace(/\$\\gamma\$/g, 'γ')
+      .replace(/\$\\delta\$/g, 'δ')
+      .replace(/\$\\pi\$/g, 'π')
+      .replace(/\$\\theta\$/g, 'θ')
+      .replace(/\$\\lambda\$/g, 'λ')
+      .replace(/\$\\mu\$/g, 'μ')
+      .replace(/\$\\sigma\$/g, 'σ')
+      // Clean up any remaining simple $...$ that just contain text
+      .replace(/\$([^$]+)\$/g, '$1')
+      // Convert <mermaid>...</mermaid> XML tags to markdown code fences
+      // Ensure there's a newline before the opening tag
+      .replace(/([^\n])<mermaid>/gi, '$1\n```mermaid\n')
+      .replace(/^<mermaid>/gim, '```mermaid\n')
+      .replace(/<mermaid>\s*/gi, '```mermaid\n')
+      .replace(/\s*<\/mermaid>/gi, '\n```\n');
+  };
+
+  // Remove planning/thinking text and raw mermaid syntax before mermaid code blocks
+  const cleanMermaidOutput = (text: string): string => {
+    // If text contains a mermaid code block, clean up everything before it
+    if (text.includes('```mermaid')) {
+      const mermaidIndex = text.indexOf('```mermaid');
+      const beforeMermaid = text.substring(0, mermaidIndex);
+      const afterStart = text.substring(mermaidIndex);
+      
+      const lines = beforeMermaid.split('\n');
+      
+      // Patterns to remove - planning, intro, and raw mermaid syntax
+      const removePatterns = [
+        /^Plan:/i,
+        /^\d+\.\s+(Identify|Map|Use|Ensure|Create|Define|First|Next|Then)/i,
+        /^(I'll|I will|Let me|Here's|To create|Response|Sure|Okay|OK|Certainly)/i,
+        /^(Based on|According to|The following|Below is)/i,
+        // Raw mermaid syntax
+        /^sequenceDiagram$/i,
+        /^\s*participant\s+/i,
+        /^\s*\w+\s*->>?\s*\w+/i, // Mermaid arrows
+        /^\s*Note\s+(left|right|over)/i,
+        /^\s*(loop|alt|else|end|opt|par|rect)\s*/i,
+      ];
+      
+      // Filter out unwanted lines
+      const filteredLines = lines.filter(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        // Skip very short intro words
+        if (trimmed.length < 25 && /^(Response|Sure|Here|OK|Okay|Here is|Here's):?$/i.test(trimmed)) return false;
+        return !removePatterns.some(p => p.test(trimmed));
+      });
+      
+      // If we removed most content, just return the mermaid block
+      const originalNonEmpty = lines.filter(l => l.trim()).length;
+      if (filteredLines.length < originalNonEmpty / 2 || filteredLines.length === 0) {
+        return afterStart.trim();
+      }
+      
+      return filteredLines.join('\n').trim() + '\n\n' + afterStart.trim();
+    }
+    return text;
+  };
+
+  // Detect and convert text-based sequence diagrams to Mermaid
+  const convertSequenceDiagramToMermaid = (text: string): string => {
     const lines = text.split('\n');
+    
+    // Track participants and build diagram elements
+    const participants = new Set<string>();
+    type DiagramElement = 
+      | { type: 'interaction'; from: string; to: string; message: string; isReturn?: boolean }
+      | { type: 'alt'; label: string }
+      | { type: 'else'; label: string }
+      | { type: 'end' }
+      | { type: 'note'; text: string };
+    
+    const elements: DiagramElement[] = [];
+    const diagramLineIndices: number[] = [];
+    let inAltBlock = false;
+    
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx];
+      const trimmedLine = line.trim();
+      
+      // Detect alt/else blocks: "**alt (Success Path)**" or "1. **alt (Success Path)**"
+      const altMatch = trimmedLine.match(/^\*?\*?\s*`?alt`?\s*\(?([^)*]+)?\)?/i);
+      if (altMatch) {
+        const label = altMatch[1]?.trim() || 'Alternative';
+        elements.push({ type: 'alt', label });
+        diagramLineIndices.push(idx);
+        inAltBlock = true;
+        continue;
+      }
+      
+      // Detect else blocks: "**else (Failure Path)**"
+      const elseMatch = trimmedLine.match(/^\*?\*?\s*`?else`?\s*\(?([^)*]+)?\)?/i);
+      if (elseMatch) {
+        const label = elseMatch[1]?.trim() || 'Otherwise';
+        elements.push({ type: 'else', label });
+        diagramLineIndices.push(idx);
+        continue;
+      }
+      
+      // Match interaction patterns: **Source → Destination**: message
+      const interactionMatch = line.match(/(?:^\s*\d+\.\s*)?(?:\*\s*)?\*?\*?\s*([^*→←\n:]+?)\s*(→|←|->|<-)\s*([^*:\n]+?)\s*\*?\*?\s*:\s*(.+)/);
+      if (interactionMatch) {
+        const [, from, arrow, to, message] = interactionMatch;
+        const cleanFrom = from.trim().replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        const cleanTo = to.trim().replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        
+        if (cleanFrom && cleanTo && cleanFrom !== cleanTo && cleanFrom.length > 1 && cleanTo.length > 1) {
+          participants.add(cleanFrom);
+          participants.add(cleanTo);
+          
+          const isReturn = arrow === '←' || arrow === '<-';
+          if (isReturn) {
+            elements.push({ type: 'interaction', from: cleanTo, to: cleanFrom, message: message.trim(), isReturn: true });
+          } else {
+            elements.push({ type: 'interaction', from: cleanFrom, to: cleanTo, message: message.trim() });
+          }
+          diagramLineIndices.push(idx);
+        }
+      }
+    }
+    
+    // Close any open alt block
+    if (inAltBlock) {
+      elements.push({ type: 'end' });
+    }
+    
+    // Count actual interactions
+    const interactionCount = elements.filter(e => e.type === 'interaction').length;
+    
+    // If we found at least 3 interactions, convert to Mermaid
+    if (interactionCount >= 3) {
+      const participantsList = Array.from(participants);
+      let mermaidCode = 'sequenceDiagram\n';
+      
+      // Add participants with display names
+      for (const p of participantsList) {
+        const displayName = p.replace(/_/g, ' ');
+        mermaidCode += `    participant ${p} as ${displayName}\n`;
+      }
+      mermaidCode += '\n';
+      
+      // Add elements
+      for (const element of elements) {
+        if (element.type === 'interaction') {
+          const arrow = element.isReturn ? '-->>' : '->>';
+          // Clean up message - remove complex args, truncate
+          let msg = element.message
+            .replace(/\([^)]*\)/g, '()')
+            .replace(/[`*_]/g, '')
+            .trim();
+          if (msg.length > 45) {
+            msg = msg.substring(0, 42) + '...';
+          }
+          mermaidCode += `    ${element.from}${arrow}${element.to}: ${msg}\n`;
+        } else if (element.type === 'alt') {
+          mermaidCode += `    alt ${element.label}\n`;
+        } else if (element.type === 'else') {
+          mermaidCode += `    else ${element.label}\n`;
+        } else if (element.type === 'end') {
+          mermaidCode += `    end\n`;
+        }
+      }
+      
+      // Helper to check if a line is diagram-related
+      const isDiagramLine = (l: string): boolean => {
+        const t = l.trim();
+        if (t.length === 0) return true; // Empty lines within diagram area
+        if (t.match(/\[(START|END)\]/i)) return true;
+        // (Message:...) lines - with or without leading bullets/asterisks
+        if (t.includes('(Message:')) return true;
+        // alt/else markers
+        if (t.match(/^(\d+\.\s*)?[-*•]?\s*\*?\*?\s*`?(alt|else)`?\s*[\s(]/i)) return true;
+        // Sequence interaction lines
+        if (t.match(/\*?\*?\s*[^*→←]+\s*(→|←|->|<-)\s*[^*:]+\s*\*?\*?\s*:/)) return true;
+        // Lines that are just asterisks or dashes
+        if (t.match(/^[*•-]{1,3}$/)) return true;
+        // Example error lines - any line containing "Example Error"
+        if (t.toLowerCase().includes('example error')) return true;
+        // Lines that look like wrapped notes: *(text)* or bullet + *(text)*
+        if (t.match(/^[-*•]?\s*\*\([^)]+\)\*?$/)) return true;
+        // Lines that are just parenthetical notes with bullets
+        if (t.match(/^[-*•]\s+\(/)) return true;
+        return false;
+      };
+      
+      // Find first and last diagram lines
+      const firstDiagramLine = Math.min(...diagramLineIndices);
+      const lastDiagramLine = Math.max(...diagramLineIndices);
+      
+      // Extend lastDiagramLine to include any trailing diagram content
+      let extendedLastLine = lastDiagramLine;
+      for (let i = lastDiagramLine + 1; i < lines.length; i++) {
+        if (isDiagramLine(lines[i])) {
+          extendedLastLine = i;
+        } else if (lines[i].trim().length > 0) {
+          // Found non-diagram content, stop extending
+          break;
+        }
+      }
+      
+      // Get lines before diagram
+      const beforeLines = lines.slice(0, firstDiagramLine)
+        .filter(l => !isDiagramLine(l) && l.trim());
+      
+      // Get lines after the extended diagram area
+      const afterLines = lines.slice(extendedLastLine + 1)
+        .filter(l => !isDiagramLine(l) && l.trim());
+      
+      // Build result: before + mermaid + after
+      let result = '';
+      if (beforeLines.length > 0) {
+        result += beforeLines.join('\n') + '\n\n';
+      }
+      result += '```mermaid\n' + mermaidCode + '```';
+      if (afterLines.length > 0) {
+        result += '\n\n' + afterLines.join('\n');
+      }
+      
+      return result;
+    }
+    
+    return text;
+  };
+
+  const renderMarkdown = (text: string) => {
+    let processedText = preprocessContent(text);
+    processedText = cleanMermaidOutput(processedText);
+    // Only auto-convert to mermaid if there's no existing mermaid code block
+    if (!processedText.includes('```mermaid')) {
+      processedText = convertSequenceDiagramToMermaid(processedText);
+    }
+    const lines = processedText.split('\n');
     const elements: React.ReactNode[] = [];
     let i = 0;
     let key = 0;
@@ -2002,14 +2457,16 @@ function MarkdownRenderer({ content }: { content: string }) {
       });
     }
 
-    // Bold **text**
+    // Bold **text** - check if it looks like a label (ends with :)
     const boldRegex = /\*\*(.+?)\*\*/g;
     while ((m = boldRegex.exec(text)) !== null) {
       if (noOverlap(m.index, m.index + m[0].length)) {
+        const content = m[1];
+        const isLabel = content.endsWith(':') || content.includes('(') && content.includes(')');
         matches.push({
           start: m.index,
           end: m.index + m[0].length,
-          element: <strong key={key++}>{m[1]}</strong>,
+          element: <strong key={key++} className={isLabel ? styles.mdStrong : styles.mdBold}>{content}</strong>,
         });
       }
     }
@@ -2021,7 +2478,7 @@ function MarkdownRenderer({ content }: { content: string }) {
         matches.push({
           start: m.index,
           end: m.index + m[0].length,
-          element: <em key={key++}>{m[1]}</em>,
+          element: <em key={key++} className={styles.mdEmphasis}>{m[1]}</em>,
         });
       }
     }
