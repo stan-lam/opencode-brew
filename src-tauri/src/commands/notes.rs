@@ -539,6 +539,23 @@ pub async fn add_message(
     })
 }
 
+#[command]
+pub async fn update_message_content(
+    app: AppHandle,
+    message_id: String,
+    content: String,
+) -> Result<(), String> {
+    let conn = get_connection(&app).await?;
+    
+    conn.execute(
+        "UPDATE messages SET content = ?1 WHERE id = ?2",
+        params![&content, &message_id],
+    )
+    .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
 // ============= Tag Commands =============
 
 #[command]

@@ -78,6 +78,7 @@ interface NotesState {
   
   addMessage: (message: Message) => void;
   updateMessageContent: (id: string, content: string) => void;
+  updateMessageId: (oldId: string, newId: string) => void;
   
   toggleSidebar: () => void;
   setShowArchived: (show: boolean) => void;
@@ -155,6 +156,12 @@ export const useNotesStore = create<NotesState>()(
       updateMessageContent: (id, content) => set((state) => ({
         messages: state.messages.map((m) =>
           m.id === id ? { ...m, content } : m
+        ),
+      })),
+
+      updateMessageId: (oldId, newId) => set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === oldId ? { ...m, id: newId } : m
         ),
       })),
       

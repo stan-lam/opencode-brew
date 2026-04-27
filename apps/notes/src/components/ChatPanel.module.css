@@ -500,7 +500,7 @@
 }
 
 .mdTable td {
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 
 .mdTable tbody tr:hover {
@@ -577,18 +577,45 @@
 }
 
 .thinkingContent {
-  color: var(--text-muted);
+  color: #64748b;
   font-size: 12px;
-  font-family: 'SF Mono', Monaco, Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: 10px 12px;
-  background: rgba(148, 163, 184, 0.05);
-  border-radius: 6px;
+  padding: 12px 14px;
+  background: rgba(100, 116, 139, 0.04);
+  border-radius: 8px;
   margin-bottom: 10px;
-  max-height: 200px;
+  max-height: 300px;
   overflow-y: auto;
   line-height: 1.5;
+  border: 1px solid rgba(100, 116, 139, 0.08);
+  opacity: 0.7;
+}
+
+.thinkingContent strong,
+.thinkingContent b {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.thinkingContent code {
+  color: #64748b;
+  background: rgba(100, 116, 139, 0.1);
+}
+
+.thinkingContent::-webkit-scrollbar {
+  width: 6px;
+}
+
+.thinkingContent::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thinkingContent::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 3px;
+}
+
+.thinkingContent::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
 }
 
 .thinkingStreamText {

@@ -159,6 +159,19 @@ function getWebAccessSystemPrompt(): string {
 
 **CURRENT DATE/TIME:** ${today} (${timestamp})
 
+## ABSOLUTE RULES - READ FIRST
+
+**NEVER output your thinking process, planning, analysis, or self-reflection to the user.**
+**NEVER say things like "Let me analyze...", "Here's my thinking...", "Plan:", "Strategy:", "Goal:", "Challenge:"**
+**NEVER show numbered steps of your reasoning process.**
+
+If you need to think, put it ONLY inside <think>...</think> tags. Everything outside those tags goes directly to the user.
+
+**YOUR OUTPUT MUST BE:**
+- A direct answer (e.g., "The top 5 ATP players are: 1. Sinner 2. Alcaraz...")
+- OR an action suggestion (e.g., "[ACTION:search_web:top 5 ATP players:Search rankings]")
+- NOTHING ELSE
+
 ## CRITICAL OUTPUT FORMAT
 
 **Be concise. Suggest actions. Let the user decide.**
@@ -189,6 +202,15 @@ Assistant: I can get the current AMD stock price.
 
 [ACTION:get_stock_quote:AMD:Get AMD Quote]
 
+**STOCK PRICE QUERIES - IMPORTANT:**
+When the user asks about a stock price (e.g., "himx price", "aapl stock", "what's msft at?"):
+1. Extract the ticker symbol and convert to UPPERCASE
+2. Use the get_stock_quote action - NEVER use search_web for stock prices
+3. Examples:
+   - "himx price" → [ACTION:get_stock_quote:HIMX:Get HIMX Quote]
+   - "nvda?" → [ACTION:get_stock_quote:NVDA:Get NVDA Quote]
+   - "aapl stock" → [ACTION:get_stock_quote:AAPL:Get AAPL Quote]
+
 **Example - WRONG (auto-executing without asking):**
 <get_mlb_standings />
 Here are the standings...
@@ -213,8 +235,13 @@ Write the XML tags directly — do NOT describe them.
 **Get MLB standings (baseball):**
 <get_mlb_standings />
 
-**Search the web (ALWAYS include current date for news):**
-<search_web query="your search query ${shortDate}" />
+**Search the web (use concise keyword queries, not sentences):**
+<search_web query="topic keywords ${shortDate}" />
+IMPORTANT: Search queries must be KEYWORD-BASED, not conversational. Examples:
+- Good: "top 5 ATP tennis players 2026"
+- Good: "WTA rankings April 2026"
+- Bad: "the top players for you" (too vague)
+- Bad: "who are the best tennis players" (conversational, not keywords)
 
 ### SYMBOL REFERENCE:
 - **Stocks**: Use ticker symbols (AAPL, MSFT, GOOGL, TSLA, NVDA, AMD, etc.)
@@ -266,10 +293,17 @@ The current top 5 ATP players are:
 
 Would you like details on WTA rankings, recent tournament results, or head-to-head records?
 
-**Example - Bad (overthinking):**
-The user is asking about tennis players. This is general knowledge that changes frequently. I should analyze what type of rankings they want. First, I'll determine if they mean ATP or WTA...
+**Example - BAD (FORBIDDEN - never do this):**
+"The user is asking for the top 5 ATP players. This is a request for current, frequently changing sports ranking data. I need to use the search_web tool...
 
-NEVER output this kind of verbose reasoning outside <think> tags.
+Plan:
+1. Acknowledge the request.
+2. Suggest using search_web...
+
+Here's a thinking process to arrive at the desired summary:
+1. Analyze the Request..."
+
+THIS IS ABSOLUTELY FORBIDDEN. Never output planning, analysis, thinking processes, strategies, goals, or self-reflection. Just answer directly.
 
 ### MULTI-TURN RULE:
 Even if you already fetched data earlier, if the user asks another question about real-time data, **you MUST output the XML tag again**. Do NOT reference previous tool calls. Do NOT say "as mentioned before". Output the fresh XML tag for every new data request.
@@ -302,6 +336,17 @@ Even if you already fetched data earlier, if the user asks another question abou
        B -->|No| D[Action 2]
    \`\`\`
 5. **Use markdown** for formatting: headers (#), bold (**), lists (-), code blocks (\`\`\`)
+6. **For rankings/leaderboards** (sports, players, teams, etc.): ALWAYS use a markdown table:
+   | Rank | Name | Details |
+   |------|------|---------|
+   | 1 | Player Name | Country, Points |
+   | 2 | Player Name | Country, Points |
+   
+   Example for ATP tennis rankings:
+   | Rank | Player | Country | Points |
+   |------|--------|---------|--------|
+   | 1 | Jannik Sinner | ITA | 13,350 |
+   | 2 | Carlos Alcaraz | ESP | 12,960 |
 `;
 }
 
@@ -310,17 +355,24 @@ function getSummarizationPrompt(): string {
 
 INSTRUCTIONS:
 1. Provide a clear, informative summary of the key information
-2. For news articles: summarize the main points and include relevant links at the end
-3. For stock/market data: present in a clean table format with key metrics
-4. Keep the summary focused and easy to read
-5. Include source links in markdown format: [Source Name](url)
-6. Don't just list the results - synthesize and summarize them
-7. Use bullet points for multiple key takeaways
+2. For news articles: summarize main points with source links
+3. For stock/market data: present in a clean table format
+4. For rankings/leaderboards (sports, players, teams): ALWAYS use a markdown table
+5. Keep the summary focused and easy to read
+6. Don't just list the results - synthesize them
 
-FORMAT FOR NEWS:
-- Brief summary paragraph
-- Key takeaways as bullet points
-- "Sources:" section with linked article titles`;
+FORMAT FOR RANKINGS (ATP, NFL, NBA, etc.):
+Start with a brief intro sentence, then present a table:
+
+As of [date], [context about the rankings]:
+
+| Rank | Player/Team | Details |
+|------|-------------|---------|
+| 1 | Name | Country/Points/Record |
+| 2 | Name | Country/Points/Record |
+...
+
+Sources: [links]`;
 }
 
 interface WebOperation {
@@ -376,6 +428,19 @@ function stripActionTags(content: string): string {
   return content.replace(/\[ACTION:[^\]]+\]/g, '').trim();
 }
 
+function cleanSearchQuery(query: string): string {
+  return query
+    // Remove conversational filler phrases
+    .replace(/\b(?:for you|for me|please|can you|could you|i need|i want)\b/gi, '')
+    // Remove question words at start
+    .replace(/^(?:what|who|where|when|how|which|why)\s+(?:are|is|were|was|do|does|did)?\s*/i, '')
+    // Remove "the" at start
+    .replace(/^the\s+/i, '')
+    // Clean up whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function parseWebOperations(content: string): WebOperation[] {
   const operations: WebOperation[] = [];
   
@@ -386,10 +451,10 @@ function parseWebOperations(content: string): WebOperation[] {
   
   let match;
   while ((match = searchRegexDouble.exec(content)) !== null) {
-    operations.push({ type: 'search_web', query: match[1] });
+    operations.push({ type: 'search_web', query: cleanSearchQuery(match[1]) });
   }
   while ((match = searchRegexSingle.exec(content)) !== null) {
-    operations.push({ type: 'search_web', query: match[1] });
+    operations.push({ type: 'search_web', query: cleanSearchQuery(match[1]) });
   }
   
   // Same for stock quotes
@@ -414,6 +479,24 @@ function parseWebOperations(content: string): WebOperation[] {
     operations.push({ type: 'get_mlb_standings' });
   }
   
+  // Convert web searches for stock prices to get_stock_quote
+  // E.g., <search_web query="himx price" /> should become get_stock_quote for HIMX
+  const searchOps = operations.filter(o => o.type === 'search_web');
+  for (const searchOp of searchOps) {
+    if (searchOp.query) {
+      const stockQueryMatch = searchOp.query.match(/^([a-z]{2,5})\s+(?:price|stock|quote|share)s?$/i);
+      if (stockQueryMatch) {
+        const symbol = stockQueryMatch[1].toUpperCase();
+        console.log(`[Notes] Converting search_web "${searchOp.query}" to get_stock_quote ${symbol}`);
+        const idx = operations.indexOf(searchOp);
+        if (idx > -1) operations.splice(idx, 1);
+        if (!operations.find(o => o.type === 'get_stock_quote' && o.symbol === symbol)) {
+          operations.push({ type: 'get_stock_quote', symbol });
+        }
+      }
+    }
+  }
+  
   console.log('[Notes] Parsed web operations:', operations, 'from content length:', content.length);
   return operations.slice(0, 5);
 }
@@ -429,10 +512,16 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
   }
   
   // Also check for "symbol X" or "ticker X" patterns
+  // IMPORTANT: Must skip common words like "is", "are", "the"
   if (operations.length === 0) {
-    const symbolMatch = content.match(/(?:symbol|ticker)\s+["']?([A-Z]{1,5})["']?/i);
+    // Pattern: "ticker HIMX" or "symbol: AAPL" or "ticker is HIMX"
+    const symbolMatch = content.match(/(?:symbol|ticker)(?:\s+is|\s*:)?\s+["']?([A-Z]{2,5})["']?(?:\s|$|\.)/i);
     if (symbolMatch && /get_stock_quote/i.test(content)) {
-      operations.push({ type: 'get_stock_quote', symbol: symbolMatch[1].toUpperCase() });
+      const sym = symbolMatch[1].toUpperCase();
+      // Skip common words that aren't stock symbols
+      if (!['IS', 'ARE', 'THE', 'FOR', 'AND', 'NOT'].includes(sym)) {
+        operations.push({ type: 'get_stock_quote', symbol: sym });
+      }
     }
   }
   
@@ -452,7 +541,7 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
   // Look for patterns like: search_web with query "dinner ideas"
   const searchQueryMatch = content.match(/search_web.*?(?:query|with)\s*["']([^"']+)["']/i);
   if (searchQueryMatch && searchQueryMatch[1]) {
-    operations.push({ type: 'search_web', query: searchQueryMatch[1] });
+    operations.push({ type: 'search_web', query: cleanSearchQuery(searchQueryMatch[1]) });
   }
   
   // If no search operation found yet, try to extract from natural language
@@ -482,8 +571,8 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
           if (query.length > 3) {
             // Add date context for ranking queries
             const finalQuery = /ranking|player|athlete|team/i.test(query) 
-              ? `${query} ${new Date().getFullYear()}` 
-              : query;
+              ? `${cleanSearchQuery(query)} ${new Date().getFullYear()}` 
+              : cleanSearchQuery(query);
             operations.push({ type: 'search_web', query: finalQuery });
             console.log('[Notes] Extracted search query from intent:', finalQuery);
             break;
@@ -493,37 +582,54 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
     }
   }
 
-  // Detect "I need to get quotes for X and Y" or similar symbol lists
-  const quoteMatch = content.match(/(?:quotes?|prices?)\s*(?:for|of|on)\s*([A-Z]{2,5}(?:\s*,\s*[A-Z]{2,5}|\s*and\s*[A-Z]{2,5})*)/i);
+  // Only extract symbols that appear in UPPERCASE in the original text
+  // This prevents "for you" from being parsed as "YOU" symbol
+  const isUppercaseInOriginal = (text: string, symbol: string): boolean => {
+    // Check if the symbol appears as uppercase in the original text
+    const upperPattern = new RegExp(`\\b${symbol}\\b`);
+    return upperPattern.test(text);
+  };
+
+  // Detect "I need to get quotes for AMD" - symbol must be uppercase in original
+  const quoteMatch = content.match(/(?:quotes?|prices?)\s*(?:for|of|on)\s*([A-Z]{2,5}(?:\s*,\s*[A-Z]{2,5}|\s*and\s*[A-Z]{2,5})*)/);
   if (quoteMatch && !operations.find(o => o.type === 'get_stock_quote')) {
-    const symbols = quoteMatch[1].replace(/\s*,\s*/g, ' ').split(/\s+and\s+/).map(s => s.trim().toUpperCase());
+    const symbols = quoteMatch[1].replace(/\s*,\s*/g, ' ').split(/\s+and\s+/).map(s => s.trim());
     symbols.forEach(s => {
-      if (/^[A-Z]{2,5}$/.test(s)) {
+      if (/^[A-Z]{2,5}$/.test(s) && isUppercaseInOriginal(content, s)) {
         operations.push({ type: 'get_stock_quote', symbol: s });
       }
     });
   }
 
-  // Detect "search for X" or "search X price" patterns with symbols
-  const searchMatch = content.match(/(?:search|find|look up)\s+(?:for\s+)?(?:the\s+)?(?:price|current|stock|quote)\s+(?:of|for)\s*([A-Z]{2,5}(?:\s*and\s*[A-Z]{2,5})*)/i);
+  // Detect "get price for AMD" - symbol must be uppercase
+  const searchMatch = content.match(/(?:search|find|look up|get)\s+(?:for\s+)?(?:the\s+)?(?:price|current|stock|quote)\s+(?:of|for)\s*([A-Z]{2,5})/);
   if (searchMatch && !operations.find(o => o.type === 'get_stock_quote')) {
-    const symbols = searchMatch[1].split(/\s+and\s+/).map(s => s.trim().toUpperCase());
-    symbols.forEach(s => {
-      if (/^[A-Z]{2,5}$/.test(s)) {
-        operations.push({ type: 'get_stock_quote', symbol: s });
-      }
-    });
+    const sym = searchMatch[1];
+    if (/^[A-Z]{2,5}$/.test(sym) && isUppercaseInOriginal(content, sym)) {
+      operations.push({ type: 'get_stock_quote', symbol: sym });
+    }
   }
 
-  // Detect direct "get price for X" or "get quote of Y"
-  const symbolDirect = content.match(/get\s+(?:price|quote|stock|data)\s+(?:for|of)\s*([A-Z]{2,5})/gi);
-  if (symbolDirect) {
-    symbolDirect.forEach(match => {
-      const sym = match.match(/[A-Z]{2,5}/)?.[0];
-      if (sym && !operations.find(o => o.type === 'get_stock_quote' && o.symbol === sym)) {
-        operations.push({ type: 'get_stock_quote', symbol: sym });
+  // CRITICAL: If we have a search_web for what looks like a stock price query, convert to get_stock_quote
+  // This catches cases where AI searched for "himx price" instead of using get_stock_quote
+  const searchOps = operations.filter(o => o.type === 'search_web');
+  for (const searchOp of searchOps) {
+    if (searchOp.query) {
+      // Pattern: "SYMBOL price" or "SYMBOL stock" (2-5 letter symbol)
+      const stockQueryMatch = searchOp.query.match(/^([a-z]{2,5})\s+(?:price|stock|quote|share)s?$/i);
+      if (stockQueryMatch) {
+        const symbol = stockQueryMatch[1].toUpperCase();
+        console.log(`[Notes] Converting web search for "${searchOp.query}" to stock quote for ${symbol}`);
+        // Remove the search op and add stock quote instead
+        const idx = operations.indexOf(searchOp);
+        if (idx > -1) {
+          operations.splice(idx, 1);
+        }
+        if (!operations.find(o => o.type === 'get_stock_quote' && o.symbol === symbol)) {
+          operations.push({ type: 'get_stock_quote', symbol });
+        }
       }
-    });
+    }
   }
 
   if (operations.length > 0) {
@@ -540,23 +646,35 @@ function stripVerboseReasoning(content: string): string {
   // Remove all tool XML tags
   cleaned = cleaned.replace(/<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|fetch_url)[^>]*\/?>/gi, '');
   
-  // Remove "Thinking Process:" sections with numbered steps
-  cleaned = cleaned.replace(/Thinking Process:\s*[\s\S]*?(?=\n\n[A-Z]|\n\nI am|\n\nTo get|\n\n\*\*|$)/gi, '');
+  // AGGRESSIVE: Remove everything from start through "Thinking Process" sections
+  cleaned = cleaned.replace(/^[\s\S]*?Thinking Process:[\s\S]*?(?=\n\n(?:The search results|Based on|Here are|The current|The top|\*\*[A-Z]|#{1,3}\s))/gi, '');
   
-  // Remove verbose intro paragraphs that start with AI reasoning
-  cleaned = cleaned.replace(/^(?:The user is asking[\s\S]*?(?:\.\s*I (?:should|will|need|must)[\s\S]*?\.)?)\s*/i, '');
+  // Remove verbose intro that starts with "The user is asking/wants"
+  cleaned = cleaned.replace(/^The user (?:is asking|wants|asked|requested)[\s\S]*?(?=\n\n(?:The |Here|Based|I can|#{1,3}\s|\*\*))/i, '');
   
-  // Remove "*Self-Correction*" sections
-  cleaned = cleaned.replace(/\*Self-Correction[^*]*\*:?[\s\S]*?(?=\n\n|\n\d+\.)/gi, '');
+  // Remove "I can search..." action suggestions at start
+  cleaned = cleaned.replace(/^I can (?:search|fetch|get|look up)[^\n]*\n+\[ACTION:[^\]]+\]\n*/i, '');
+  
+  // Remove standalone [ACTION:...] lines
+  cleaned = cleaned.replace(/^\[ACTION:[^\]]+\]\s*\n*/gim, '');
+  
+  // Remove "*Self-Correction*" and similar meta sections
+  cleaned = cleaned.replace(/\*?(?:Self-Correction|Final Polish|Review against)[^*\n]*\*?:?[\s\S]*?(?=\n\n(?:The |Here|Based|#{1,3}\s|\*\*)|\n\n$)/gi, '');
   
   // Remove numbered analysis steps (1. **Analyze**, 2. **Determine**, etc.)
-  cleaned = cleaned.replace(/^\d+\.\s+\*\*(?:Analyze|Determine|Address|Formulate|Final Output|Review|Identify|Gather|Synthesize)[^*]*\*\*:?[^\n]*\n?/gim, '');
+  cleaned = cleaned.replace(/^\s*\d+\.\s+\*\*(?:Analyze|Determine|Address|Formulate|Final Output|Review|Identify|Gather|Synthesize|Draft|Challenge|Goal|Strategy)[^*]*\*\*:?[^\n]*(?:\n(?!\n).*)*\n?/gim, '');
+  
+  // Remove bullet points that are meta-commentary
+  cleaned = cleaned.replace(/^\s*\*\s+\*?(?:Goal|Challenge|Strategy|Approach|Main Point)[\s\S]*?(?=\n\n|\n\*\s+[A-Z])/gim, '');
   
   // Remove lines that are purely meta-commentary
-  cleaned = cleaned.replace(/^\s*\(Drafting the response[^)]*\)\s*$/gim, '');
+  cleaned = cleaned.replace(/^\s*\((?:Drafting|This leads|Self-Correction|This fits|Not applicable)[^)]*\)\s*$/gim, '');
   
-  // Remove status messages like "Analyzing results..."
+  // Remove status messages
   cleaned = cleaned.replace(/^\s*(?:Analyzing|Processing|Fetching|Loading)\s+\w+\.{3}\s*$/gim, '');
+  
+  // Remove "Key insights gathered from the search" redundant headers
+  cleaned = cleaned.replace(/^Key insights gathered from the search results indicate:\s*\n/gim, '');
   
   // Clean up multiple blank lines
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
@@ -606,28 +724,61 @@ function splitThinkingFromResponse(content: string): { thinking: string; respons
   // Clean tool tags
   const cleaned = cleanWebOperationTags(withoutThinkTags);
   
-  // FIRST: Check if content starts with clear RESPONSE indicators
-  // If so, treat everything as response (no thinking)
   const firstLine = cleaned.trim().split('\n')[0] || '';
-  const startsWithResponse = /^(?:#|##|###|\*\*|[-*]\s|\d+\.\s|Good |Here |The |Based |According |As of |Currently)/i.test(firstLine);
+  
+  // Check if content starts with clear THINKING patterns FIRST
+  // These patterns indicate AI reasoning that should go to thinking panel
+  const startsWithThinking = /^(?:The user (?:is asking|wants|asked|requested)|I need |I will |I must |I should |Let me |To provide |To answer |This is a (?:subjective|request|question)|\d+\.\s+\*\*)/i.test(firstLine);
+  
+  // Also check for "Here's a thinking process" or numbered steps anywhere in content
+  const hasThinkingProcess = /Here's a thinking process|^\d+\.\s+\*\*(?:Acknowledge|Suggest|Format|Analyze|Determine)/im.test(cleaned);
+  
+  if (startsWithThinking || hasThinkingProcess) {
+    // Find where the actual response starts - prioritize "Final Output" patterns
+    const responseStartPatterns = [
+      // "Final Output Generation" or similar
+      /\n+(?:\d+\.\s*)?\*?\*?\(?(?:Final (?:Output|Response|Answer)|Execution)\)?:?\*?\*?\.?\s*\n/i,
+      // Standard summary/conclusion markers  
+      /\n\n(?:#{1,3}\s*(?:Summary|Conclusion|Answer|Result|Key Takeaway))/i,
+      /\n\n(?:\*\*(?:Summary|Conclusion|Answer|Key Takeaway))/i,
+      /\n\n(?:In (?:summary|conclusion),)/i,
+      /\n\n(?:The (?:top|best|current|answer|result|summary))/i,
+      /\n\n(?:Based on (?:the above|this analysis|these results))/i,
+      // [ACTION:...] tag followed by actual response
+      /\[ACTION:[^\]]+\]\s*\n+(?=\S)/i,
+    ];
+    
+    for (const pattern of responseStartPatterns) {
+      const match = cleaned.match(pattern);
+      if (match && match.index !== undefined) {
+        const thinking = cleaned.substring(0, match.index + (match[0].length || 0)).trim();
+        // For ACTION tags, include everything after; for others, include the match
+        const responseStart = pattern.source.includes('ACTION') 
+          ? match.index + match[0].length
+          : match.index;
+        const response = cleaned.substring(responseStart).trim();
+        return { thinking, response };
+      }
+    }
+    
+    // No clear response found - everything is thinking for now
+    return { thinking: cleaned.trim(), response: '' };
+  }
+  
+  // Check if content starts with clear RESPONSE indicators (not thinking)
+  const startsWithResponse = /^(?:#|##|###|\*\*[A-Z]|[-*]\s|Good |Here (?:are|is)|The (?:search|top|best|current)|Based on|According to|As of |Currently)/i.test(firstLine);
   
   if (startsWithResponse) {
-    // No thinking, everything is response
     return { thinking: '', response: cleaned.trim() };
   }
   
-  // Check for "Thinking Process:" delimiter - everything before and including it is thinking
-  const thinkingProcessMatch = cleaned.match(/^([\s\S]*?Thinking Process:[\s\S]*?)(\n\n(?:I am unable|I cannot|Unfortunately|To get|The |Here|Based on|According to|As of|Currently)[\s\S]*)$/i);
+  // Check for "Thinking Process:" delimiter - everything before is thinking
+  const thinkingProcessMatch = cleaned.match(/^([\s\S]*?(?:Thinking Process|Here's a thinking)[^\n]*[\s\S]*?)(\n\n(?:In summary|In conclusion|The (?:top|best|search|answer)|Based on|#{1,3}\s)[\s\S]*)$/i);
   if (thinkingProcessMatch) {
     const thinking = thinkingProcessMatch[1].trim();
-    const response = stripVerboseReasoning(thinkingProcessMatch[2]).trim();
-    if (response) {
-      return { thinking, response };
-    }
+    const response = thinkingProcessMatch[2].trim();
+    return { thinking, response };
   }
-  
-  // Check if content starts with clear THINKING patterns
-  const startsWithThinking = /^(?:The user |I need |I will |I must |I should |Let me |To provide |To answer )/i.test(firstLine);
   
   if (!startsWithThinking) {
     // No clear thinking, treat as response
@@ -726,7 +877,55 @@ function separateThinkingContent(content: string): { thinking: string; response:
   return { thinking: thinking.trim(), response };
 }
 
-function formatSearchResults(results: WebSearchResult[]): string {
+// Final aggressive cleanup - strip ALL reasoning/thinking patterns
+function finalCleanupResponse(content: string): string {
+  if (!content) return '';
+  
+  let cleaned = content;
+  
+  // AGGRESSIVE: Strip everything from start if it begins with thinking patterns
+  if (/^The user (?:is asking|wants|asked|requested)/i.test(cleaned)) {
+    // Find where actual answer starts
+    const answerPatterns = [
+      /\n\n#{1,3}\s*(?:Summary|Key|Sources|Answer|Results)/i,
+      /\n\n\*\*(?:Summary|Key|Sources|Answer)/i,
+      /\n\nIn (?:summary|conclusion)/i,
+      /\n\nThe (?:search results|top|best|current|answer)/i,
+      /\n\nBased on (?:the above|this|these|my)/i,
+    ];
+    
+    for (const pattern of answerPatterns) {
+      const match = cleaned.match(pattern);
+      if (match && match.index !== undefined) {
+        cleaned = cleaned.substring(match.index + 2); // +2 to skip the \n\n
+        break;
+      }
+    }
+  }
+  
+  // Remove "Here's a thinking process" sections entirely
+  cleaned = cleaned.replace(/Here's a thinking process[\s\S]*?(?=\n\n(?:#{1,3}|In summary|The (?:top|best|search|answer)|Based on|\*\*Summary))/gi, '');
+  
+  // Remove numbered analysis steps (1. **Analyze the Request:**)
+  cleaned = cleaned.replace(/^\s*\d+\.\s*\*?\*?(?:Analyze|Determine|Review|Synthesize|Draft|Final|Source|Data)[^*\n]*\*?\*?:?[^\n]*(?:\n(?!\n|\d+\.).*)*\n?/gim, '');
+  
+  // Remove bullet points that are source analysis (* **Source 1 (sportsdunia):**)
+  cleaned = cleaned.replace(/^\s*\*\s+\*\*Source \d+[^*]*\*\*:?[^\n]*\n?/gim, '');
+  
+  // Remove remaining meta-commentary
+  cleaned = cleaned
+    .replace(/^The user (?:is asking|wants|asked)[^\n]*\n+/i, '')
+    .replace(/^I can (?:search|fetch|get)[^\n]*\n+/i, '')
+    .replace(/^\[ACTION:[^\]]+\]\s*\n*/gim, '')
+    .replace(/^This is a (?:subjective|request)[^\n]*\n+/i, '')
+    .replace(/^\s*\*\s+\*?(?:Goal|Challenge|Strategy|Main Point|Core Theme)[^\n]*\n/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  
+  return cleaned;
+}
+
+async function formatSearchResults(results: WebSearchResult[], autoFetchTop: boolean = true): Promise<string> {
   if (results.length === 0) return 'No search results found.';
   
   let formatted = '**Web Search Results:**\n\n';
@@ -734,6 +933,34 @@ function formatSearchResults(results: WebSearchResult[]): string {
     formatted += `${i + 1}. **[${result.title}](${result.url})**\n`;
     formatted += `   ${result.snippet}\n\n`;
   });
+  
+  // Auto-fetch the top result to get actual content
+  if (autoFetchTop && results.length > 0) {
+    const topUrl = results[0].url;
+    console.log(`[Notes] Auto-fetching top search result: ${topUrl}`);
+    
+    // Use headless browser for JS-heavy sites like ESPN, ATP Tour
+    const jsHeavySites = ['espn.com', 'atptour.com', 'sofascore.com', 'flashscore.com'];
+    const needsRendering = jsHeavySites.some(site => topUrl.includes(site));
+    
+    let content: WebContent | null = null;
+    if (needsRendering) {
+      console.log(`[Notes] Using headless browser for JS-heavy site: ${topUrl}`);
+      content = await fetchUrlContentRendered(topUrl);
+    } else {
+      content = await fetchUrlContent(topUrl);
+    }
+    
+    if (content && content.content) {
+      formatted += '\n---\n**Content from top result:**\n\n';
+      // Truncate to reasonable length for AI context
+      const truncated = content.content.length > 4000 
+        ? content.content.substring(0, 4000) + '\n\n[Content truncated...]'
+        : content.content;
+      formatted += truncated;
+    }
+  }
+  
   return formatted;
 }
 
@@ -1040,24 +1267,18 @@ async function webSearchWithMCP(query: string): Promise<WebSearchResult[]> {
   }
   
   // Fallback to built-in web search
-  // Simplify query - remove dates and ALL filler words upfront
+  // Light cleanup - only remove clearly unhelpful words, keep meaningful terms like "top", "best"
   let simplifiedQuery = query
     .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b/gi, '')
-    .replace(/\b\d{4}\b/g, '') // Remove years
-    // Remove ALL filler/qualifier words in one pass
-    .replace(/\b(?:top|best|most|latest|current|ranked|ranking|rankings)\b/gi, '')
-    .replace(/\b(?:performing|leading|winning|looking|searching|finding|getting)\b/gi, '')
-    .replace(/\b(?:currently|today|right now|as of|at the moment)\b/gi, '')
+    // Only remove action verbs that don't add search value
+    .replace(/\b(?:looking for|searching for|finding|getting|show me|tell me about|what are|who are)\b/gi, '')
+    .replace(/\b(?:currently|right now|as of today|at the moment)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 
-  // If query became too short, use original but still clean dates
+  // If query became too short, use original
   if (simplifiedQuery.length < 5) {
-    simplifiedQuery = query
-      .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b/gi, '')
-      .replace(/\b\d{4}\b/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
+    simplifiedQuery = query.replace(/\s+/g, ' ').trim();
   }
 
   console.log(`[Notes] Falling back to built-in web search with query:`, simplifiedQuery);
@@ -1107,6 +1328,20 @@ async function fetchUrlContent(url: string): Promise<WebContent | null> {
   } catch (error) {
     console.error(`[Notes] Failed to fetch URL:`, error);
     return null;
+  }
+}
+
+async function fetchUrlContentRendered(url: string): Promise<WebContent | null> {
+  try {
+    const invoke = await getInvoke();
+    console.log(`[Notes] Fetching URL with headless browser: ${url}`);
+    const content = await invoke<WebContent>('fetch_url_rendered', { url });
+    console.log(`[Notes] Fetched rendered ${content.title}, ${content.content.length} chars`);
+    return content;
+  } catch (error) {
+    console.error(`[Notes] Failed to fetch rendered URL:`, error);
+    // Fallback to regular fetch
+    return fetchUrlContent(url);
   }
 }
 
@@ -1212,6 +1447,7 @@ export function ChatPanel() {
     setMessages,
     addMessage,
     updateMessageContent,
+    updateMessageId,
     setIsLoading,
     setIsStreaming,
     getActiveConversation,
@@ -1276,7 +1512,7 @@ export function ChatPanel() {
           console.log('[Notes] Executing web search with MCP fallback:', op.query);
           const searchResults = await webSearchWithMCP(op.query);
           console.log('[Notes] Search results:', searchResults.length);
-          return formatSearchResults(searchResults);
+          return await formatSearchResults(searchResults);
         } else if (op.type === 'get_stock_quote' && op.symbol) {
           setWebStatus(`Getting quote: ${op.symbol}`);
           console.log('[Notes] Executing stock quote with MCP fallback:', op.symbol);
@@ -1407,6 +1643,47 @@ export function ChatPanel() {
       setThinkingDuration(null);
       setRawThinkingContent('');
       
+      // Function to extract ONLY the final answer (table or summary sentence + content)
+      const extractFinalResponse = (text: string): string => {
+        // Strategy 1: Find the LAST "As of" or "Based on" sentence and everything after
+        // This is typically the intro to the final answer
+        const lastIntroPatterns = [
+          // "As of the data provided, the top 10 players..." followed by table
+          /(?:^|\n)(As of [^\n]+(?:are|is):[^\n]*)([\s\S]*$)/i,
+          // "Based on the search results, here are..."
+          /(?:^|\n)(Based on [^\n]+(?:are|is):[^\n]*)([\s\S]*$)/i,
+          // "Here are the current top 10..."
+          /(?:^|\n)(Here (?:are|is) the [^\n]+:)([\s\S]*$)/i,
+        ];
+        
+        for (const pattern of lastIntroPatterns) {
+          const matches = [...text.matchAll(new RegExp(pattern.source, 'gi'))];
+          if (matches.length > 0) {
+            const lastMatch = matches[matches.length - 1];
+            const intro = lastMatch[1].trim();
+            const content = lastMatch[2].trim();
+            if (content.includes('|')) {
+              // Has a table
+              return intro + '\n\n' + content;
+            }
+          }
+        }
+        
+        // Strategy 2: Just find the table with its intro line
+        const tableWithIntro = text.match(/([^\n]*(?:are|is):\s*)\n*(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/i);
+        if (tableWithIntro) {
+          return tableWithIntro[1].trim() + '\n\n' + tableWithIntro[2];
+        }
+        
+        // Strategy 3: Just the table alone
+        const tableOnly = text.match(/(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/);
+        if (tableOnly) {
+          return tableOnly[1];
+        }
+        
+        return '';
+      };
+      
       const unlisten = await listenFn(`ai-stream-${conversationId}`, (event: any) => {
         const { content, done } = event.payload;
         if (content) {
@@ -1419,14 +1696,9 @@ export function ChatPanel() {
           fullContent += content;
           const cleanedContent = cleanWebOperationTags(fullContent);
           
-          // Split content into thinking and response parts
-          const { thinking, response } = splitThinkingFromResponse(cleanedContent);
-          
-          // Thinking panel shows thinking content
-          setRawThinkingContent(thinking);
-          
-          // Response panel shows only the response part (empty until response starts)
-          updateMessageContent(assistantPlaceholder.id, response);
+          // During streaming: ONLY show in thinking panel, NOT in response panel
+          setRawThinkingContent(cleanedContent);
+          // Response panel stays empty until streaming is complete
         }
         if (done) {
           // Calculate thinking duration
@@ -1435,12 +1707,13 @@ export function ChatPanel() {
             setThinkingDuration(duration);
           }
           
-          setStreamingPhase('done');
-          // Final split when done
+          // Update thinking panel only - don't update response yet
+          // Response will be updated after web ops complete (or below if no web ops)
           const cleanedContent = cleanWebOperationTags(fullContent);
-          const { thinking, response } = splitThinkingFromResponse(cleanedContent);
-          setRawThinkingContent(thinking);
-          updateMessageContent(assistantPlaceholder.id, response);
+          setRawThinkingContent(cleanedContent);
+          
+          // DON'T set streamingPhase or update message here
+          // That happens after web ops check below
         }
       });
 
@@ -1559,8 +1832,8 @@ export function ChatPanel() {
           try {
             const webResults = await executeWebOperations(webOps);
             
-            // Show interim message while summarizing
-            updateMessageContent(assistantPlaceholder.id, cleanedContent + '\n\n*Analyzing results...*');
+            // Update THINKING panel only (not response) while summarizing
+            setRawThinkingContent(cleanedContent + '\n\n*Analyzing results...*');
 
             // Send results back to AI for summarization
             setWebStatus('Summarizing results...');
@@ -1572,37 +1845,73 @@ export function ChatPanel() {
               conversationId + '-summary'
             );
             
-            // Update message with summarized results
-            const finalContent = cleanedContent 
-              ? `${cleanedContent}\n\n${summarizedContent}`
+            // Update thinking with full content (for thinking panel)
+            const fullThinkingContent = cleanedContent 
+              ? `${cleanedContent}\n\n---\n\n**Summarized Results:**\n${summarizedContent}`
               : summarizedContent;
+            setRawThinkingContent(fullThinkingContent);
             
-            updateMessageContent(assistantPlaceholder.id, finalContent);
-            fullContent = finalContent;
+            // Extract ONLY the final answer for response panel AND for saving
+            const finalResponse = extractFinalResponse(summarizedContent);
+            const responseToShow = finalResponse || summarizedContent;
+            updateMessageContent(assistantPlaceholder.id, responseToShow);
+            
+            // Save ONLY the final response (not thinking)
+            fullContent = responseToShow;
+            
+            // Mark as done - this triggers collapse
+            setStreamingPhase('done');
+            setWebStatus(null);
           } catch (webError) {
             console.error('[Notes] Web operation execution failed:', webError);
-            const errorContent = cleanedContent + '\n\n*Web search failed. Please try again.*';
+            const errorContent = '*Web search failed. Please try again.*';
+            setRawThinkingContent(cleanedContent + '\n\n' + errorContent);
             updateMessageContent(assistantPlaceholder.id, errorContent);
             fullContent = errorContent;
+            setStreamingPhase('done');
+            setWebStatus(null);
           }
         } else {
           console.log('[Notes] No web operations found in response');
+          // No web ops - extract final response and update
+          const cleanedContent = cleanWebOperationTags(fullContent);
+          
+          // Check if there are action tags - if so, preserve them for later execution
+          const actionTagMatch = cleanedContent.match(/\[ACTION:[^\]]+\]/g);
+          if (actionTagMatch && actionTagMatch.length > 0) {
+            // Has action tags - keep the content WITH tags so buttons render on revisit
+            console.log('[Notes] Content has action tags, preserving them');
+            updateMessageContent(assistantPlaceholder.id, cleanedContent);
+            fullContent = cleanedContent;
+          } else {
+            // No action tags - extract final response normally
+            const finalResponse = extractFinalResponse(cleanedContent);
+            const responseToShow = finalResponse || finalCleanupResponse(cleanedContent);
+            updateMessageContent(assistantPlaceholder.id, responseToShow);
+            fullContent = responseToShow;
+          }
+          setStreamingPhase('done');
         }
       } catch (aiError) {
         console.error('AI chat error:', aiError);
         const errorMsg = aiError instanceof Error ? aiError.message : String(aiError);
-        updateMessageContent(assistantPlaceholder.id, `Error: ${errorMsg}\n\nPlease check your AI settings and make sure the provider is running.`);
-        fullContent = `Error: ${errorMsg}`;
+        const errorContent = `Error: ${errorMsg}\n\nPlease check your AI settings and make sure the provider is running.`;
+        updateMessageContent(assistantPlaceholder.id, errorContent);
+        fullContent = errorContent;
+        setStreamingPhase('done');
       }
 
-      // Save assistant message
+      // Save assistant message - only the final response, not thinking
       const finalContent = fullContent || 'Sorry, I could not generate a response.';
-      await invoke('add_message', {
+      const savedAssistantMessage = await invoke('add_message', {
         conversationId: activeConversationId,
         role: 'assistant',
         content: finalContent,
         attachments: null,
-      });
+      }) as Message;
+
+      // Update the local message with the real database ID so future updates work
+      updateMessageId(assistantPlaceholder.id, savedAssistantMessage.id);
 
       unlisten();
     } catch (error) {
@@ -1975,7 +2284,7 @@ export function ChatPanel() {
         case 'search_web': {
           if (action.param) {
             const searchResults = await webSearchWithMCP(action.param);
-            result = formatSearchResults(searchResults);
+            result = await formatSearchResults(searchResults);
           }
           break;
         }
@@ -1985,8 +2294,19 @@ export function ChatPanel() {
         // Update the message content to include the result
         const existingMessage = messages.find(m => m.id === messageId);
         if (existingMessage) {
-          const cleanContent = stripActionTags(existingMessage.content);
-          updateMessageContent(messageId, `${cleanContent}\n\n${result}`);
+          const newContent = result; // Just show the result, not the old content with action tags
+          updateMessageContent(messageId, newContent);
+          
+          // Also save to database so it persists on revisit
+          try {
+            await invoke('update_message_content', {
+              messageId: messageId,
+              content: newContent,
+            });
+            console.log('[Notes] Saved action result to database');
+          } catch (saveError) {
+            console.error('[Notes] Failed to save action result:', saveError);
+          }
         }
       }
     } catch (error) {
@@ -2247,11 +2567,22 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse, thinki
   const isAssistant = !isUser;
   const messageContentRef = useRef<HTMLDivElement>(null);
   
-  // Parse suggested actions from message content
+  // Parse suggested actions from message content AND thinking content
   const suggestedActions = React.useMemo(() => {
     if (isUser) return [];
-    return parseSuggestedActions(message.content);
-  }, [message.content, isUser]);
+    // Check both message content and thinking content for action tags
+    const fromMessage = parseSuggestedActions(message.content);
+    const fromThinking = thinking ? parseSuggestedActions(thinking) : [];
+    // Combine and dedupe by tool+param
+    const all = [...fromMessage, ...fromThinking];
+    const seen = new Set<string>();
+    return all.filter(a => {
+      const key = `${a.tool}:${a.param || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [message.content, thinking, isUser]);
   
   // Get content without action tags
   const displayContent = React.useMemo(() => {
@@ -2282,13 +2613,13 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse, thinki
     }
   }, [isThinking, thinking]);
 
-  // Collapse when streaming is done
+  // Collapse when streaming is done AND response is ready
   useEffect(() => {
-    if (!isThinking && thinking) {
-      // Streaming is done - collapse the thinking panel
+    if (!isThinking && thinking && hasResponse) {
+      // Streaming is done and response is ready - collapse the thinking panel
       setThinkingExpanded(false);
     }
-  }, [isThinking]);
+  }, [isThinking, thinking, hasResponse]);
 
   // Auto-scroll message during streaming
   useEffect(() => {
@@ -2326,7 +2657,7 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse, thinki
     
     return (
       <div className={styles.thinkingContent}>
-        {cleanThinkingContent(thinking)}
+        <MarkdownRenderer content={cleanThinkingContent(thinking)} />
       </div>
     );
   };
@@ -2356,7 +2687,16 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse, thinki
   };
   
   const renderActionButtons = () => {
+    // Hide action buttons if: user message, no actions
     if (isUser || suggestedActions.length === 0) return null;
+    
+    // Check if content is a "real" response (not just intro text with action tags)
+    const strippedContent = stripActionTags(message.content);
+    const isJustIntroText = /^(I can|I'll|Let me|Sure|Okay|Here|Getting|Fetching|Looking up)/i.test(strippedContent.trim()) 
+      && strippedContent.trim().length < 100;
+    
+    // Hide buttons if we have a real response (like actual stock data)
+    if (hasResponse && !isJustIntroText) return null;
     
     const getActionIcon = (tool: string) => {
       switch (tool) {

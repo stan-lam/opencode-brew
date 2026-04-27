@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::command;
 use std::time::Duration;
 use chrono::Datelike;
+use chromiumoxide::{Browser, BrowserConfig};
+use futures::StreamExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -48,6 +50,9 @@ fn create_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .gzip(true)
+        .brotli(true)
+        .deflate(true)
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
@@ -204,6 +209,18 @@ pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<S
         results = search_google(&client, &query, max).await.unwrap_or_default();
     }
     
+    // Final fallback: headless browser (slow but reliable)
+    if results.is_empty() {
+        println!("[web::search_web] All scrapers failed, trying headless browser...");
+        results = search_with_headless_browser(&query, max).await.unwrap_or_default();
+    }
+    
+    // Last resort: text browser (lynx) if installed
+    if results.is_empty() {
+        println!("[web::search_web] Headless browser failed, trying text browser (lynx)...");
+        results = search_with_text_browser(&query, max).await.unwrap_or_default();
+    }
+    
     println!("[web::search_web] Found {} results total", results.len());
     Ok(results)
 }
@@ -252,6 +269,246 @@ async fn search_brave_api(client: &Client, query: &str, max: usize, api_key: &st
     }
     
     println!("[web::brave_api] Found {} results", results.len());
+    Ok(results)
+}
+
+async fn search_with_headless_browser(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    println!("[web::headless] Launching browser for: {}", query);
+    
+    // Configure headless Chrome
+    let config = BrowserConfig::builder()
+        .no_sandbox()
+        .window_size(1920, 1080)
+        .build()
+        .map_err(|e| format!("Browser config error: {}", e))?;
+    
+    let (mut browser, mut handler) = Browser::launch(config)
+        .await
+        .map_err(|e| format!("Browser launch error: {}", e))?;
+    
+    // Spawn the browser handler
+    let handle = tokio::spawn(async move {
+        while let Some(_) = handler.next().await {}
+    });
+    
+    // Try DuckDuckGo first (simpler HTML than Google)
+    let search_url = format!(
+        "https://duckduckgo.com/?q={}&t=h_&ia=web",
+        urlencoding::encode(query)
+    );
+    
+    println!("[web::headless] Navigating to: {}", search_url);
+    
+    let page = browser.new_page(&search_url)
+        .await
+        .map_err(|e| format!("Navigation error: {}", e))?;
+    
+    // Wait for page to load and JavaScript to execute
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    
+    // Debug: Get page title to verify load
+    let title_js = "document.title";
+    if let Ok(title_result) = page.evaluate(title_js).await {
+        if let Ok(title) = title_result.into_value::<String>() {
+            println!("[web::headless] Page title: {}", title);
+        }
+    }
+    
+    // Extract search results using JavaScript - try multiple selectors
+    let js_code = r#"
+        (() => {
+            const results = [];
+            
+            // DuckDuckGo selectors
+            let items = document.querySelectorAll('[data-testid="result"], .result, article[data-nrn="result"]');
+            
+            // If no DDG results, try Google selectors
+            if (items.length === 0) {
+                items = document.querySelectorAll('div.g, div[data-hveid], .MjjYud');
+            }
+            
+            console.log('Found items:', items.length);
+            
+            for (const item of items) {
+                // Try multiple title selectors
+                const titleEl = item.querySelector('h2 a, h3, [data-testid="result-title-a"], .result__title a, a[data-testid="result-extras-url-link"]');
+                // Try multiple link selectors  
+                let linkEl = item.querySelector('a[href^="http"]:not([href*="duckduckgo"]):not([href*="google"])');
+                if (!linkEl) {
+                    linkEl = item.querySelector('a[data-testid="result-extras-url-link"], .result__url');
+                }
+                // Try multiple snippet selectors
+                const snippetEl = item.querySelector('[data-result="snippet"], .result__snippet, .VwiC3b, span[data-testid="result-snippet"]');
+                
+                if (titleEl || linkEl) {
+                    let url = linkEl?.href || titleEl?.href || '';
+                    let title = titleEl?.textContent?.trim() || '';
+                    let snippet = snippetEl?.textContent?.trim() || '';
+                    
+                    // Skip internal links
+                    if (url && !url.includes('duckduckgo.com') && !url.includes('google.com') && title) {
+                        results.push({ title, url, snippet });
+                    }
+                }
+            }
+            
+            // Fallback: just grab all external links with reasonable titles
+            if (results.length === 0) {
+                const allLinks = document.querySelectorAll('a[href^="http"]');
+                for (const link of allLinks) {
+                    const url = link.href;
+                    const title = link.textContent?.trim() || '';
+                    if (url && title && title.length > 10 && title.length < 200 &&
+                        !url.includes('duckduckgo') && !url.includes('google.com') &&
+                        !url.includes('youtube.com/watch')) {
+                        if (!results.find(r => r.url === url)) {
+                            results.push({ title, url, snippet: '' });
+                        }
+                    }
+                }
+            }
+            
+            return JSON.stringify(results.slice(0, 10));
+        })()
+    "#;
+    
+    let result = page.evaluate(js_code)
+        .await
+        .map_err(|e| format!("JS evaluation error: {}", e))?;
+    
+    // Parse the results
+    let results_str = result.into_value::<String>()
+        .unwrap_or_else(|_| "[]".to_string());
+    
+    println!("[web::headless] Raw results: {}", &results_str[..results_str.len().min(500)]);
+    
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&results_str)
+        .unwrap_or_default();
+    
+    let results: Vec<SearchResult> = parsed.iter()
+        .filter_map(|r| {
+            let title = r.get("title")?.as_str()?.to_string();
+            let url = r.get("url")?.as_str()?.to_string();
+            let snippet = r.get("snippet").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            
+            if !title.is_empty() && !url.is_empty() {
+                Some(SearchResult { title, url, snippet })
+            } else {
+                None
+            }
+        })
+        .take(max)
+        .collect();
+    
+    // Clean up
+    let _ = browser.close().await;
+    handle.abort();
+    
+    println!("[web::headless] Found {} results", results.len());
+    Ok(results)
+}
+
+async fn search_with_text_browser(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    use std::process::Command;
+    
+    // Check if lynx is available
+    let lynx_check = Command::new("which")
+        .arg("lynx")
+        .output();
+    
+    if lynx_check.is_err() || !lynx_check.unwrap().status.success() {
+        println!("[web::text_browser] lynx not installed. Install with: brew install lynx");
+        return Ok(Vec::new());
+    }
+    
+    println!("[web::text_browser] Using lynx for: {}", query);
+    
+    // Use DuckDuckGo lite which serves simple HTML to text browsers
+    let search_url = format!(
+        "https://lite.duckduckgo.com/lite/?q={}",
+        urlencoding::encode(query)
+    );
+    
+    // Run lynx in dump mode - outputs plain text
+    let output = Command::new("lynx")
+        .args(&[
+            "-dump",           // Output plain text
+            "-nolist",         // Don't append link list at end
+            "-width=200",      // Wide output to avoid wrapping
+            "-accept_all_cookies",
+            "-useragent=Lynx/2.8.9rel.1 libwww-FM/2.14",
+            &search_url
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run lynx: {}", e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("[web::text_browser] lynx failed: {}", stderr);
+        return Ok(Vec::new());
+    }
+    
+    let text = String::from_utf8_lossy(&output.stdout);
+    println!("[web::text_browser] Got {} bytes of text output", text.len());
+    
+    // Parse the lynx output for search results
+    // DDG lite format: "1.  Title\n    Description\n    www.domain.com"
+    let mut results = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    
+    // Look for numbered results pattern: "1.  Title"
+    let numbered_pattern = regex::Regex::new(r"^\s*(\d+)\.\s+(.+)$").ok();
+    // URL pattern - domain with optional path (no http prefix in DDG lite)
+    let url_pattern = regex::Regex::new(r"^\s*((?:www\.)?[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:/[^\s]*)?)\s*$").ok();
+    
+    if let (Some(num_re), Some(url_re)) = (numbered_pattern, url_pattern) {
+        let mut i = 0;
+        while i < lines.len() && results.len() < max {
+            let line = lines[i];
+            
+            // Check if this is a numbered result line
+            if let Some(caps) = num_re.captures(line) {
+                let title = caps.get(2).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+                
+                if !title.is_empty() {
+                    let mut snippet = String::new();
+                    let mut url = String::new();
+                    
+                    // Look ahead for snippet and URL (within next 5 lines)
+                    for j in (i + 1)..lines.len().min(i + 6) {
+                        let next_line = lines[j].trim();
+                        
+                        // Check if it's a URL line
+                        if let Some(url_caps) = url_re.captures(lines[j]) {
+                            url = format!("https://{}", url_caps.get(1).map(|m| m.as_str()).unwrap_or(""));
+                            break; // URL marks end of this result
+                        } else if !next_line.is_empty() && next_line.len() > 10 {
+                            // It's probably part of the snippet
+                            if snippet.is_empty() {
+                                snippet = next_line.to_string();
+                            } else {
+                                snippet.push(' ');
+                                snippet.push_str(next_line);
+                            }
+                        }
+                    }
+                    
+                    // Only add if we found a URL
+                    if !url.is_empty() && !url.contains("duckduckgo.com") {
+                        println!("[web::text_browser] Found: {} -> {}", title, url);
+                        results.push(SearchResult {
+                            title,
+                            url,
+                            snippet,
+                        });
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    
+    println!("[web::text_browser] Found {} results", results.len());
     Ok(results)
 }
 
@@ -675,6 +932,117 @@ pub async fn fetch_url(url: String) -> Result<WebContent, String> {
     })
 }
 
+#[command]
+pub async fn fetch_url_rendered(url: String) -> Result<WebContent, String> {
+    println!("[web::fetch_url_rendered] Fetching with browser: {}", url);
+    
+    let parsed_url = url::Url::parse(&url)
+        .map_err(|e| format!("Invalid URL: {}", e))?;
+    
+    if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+        return Err("Only HTTP and HTTPS URLs are supported".to_string());
+    }
+    
+    // Use headless browser to render JavaScript
+    let config = BrowserConfig::builder()
+        .no_sandbox()
+        .window_size(1920, 1080)
+        .build()
+        .map_err(|e| format!("Browser config error: {}", e))?;
+    
+    let (mut browser, mut handler) = Browser::launch(config)
+        .await
+        .map_err(|e| format!("Browser launch error: {}", e))?;
+    
+    let handle = tokio::spawn(async move {
+        while let Some(_) = handler.next().await {}
+    });
+    
+    let page = browser.new_page(&url)
+        .await
+        .map_err(|e| format!("Navigation error: {}", e))?;
+    
+    // Wait for page to load and JavaScript to execute
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    
+    // Get the page title
+    let title_js = "document.title";
+    let title = page.evaluate(title_js)
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    
+    // Extract text content, focusing on tables for rankings
+    let content_js = r#"
+        (() => {
+            let content = '';
+            
+            // Try to find ranking tables first
+            const tables = document.querySelectorAll('table');
+            for (const table of tables) {
+                const headers = Array.from(table.querySelectorAll('th')).map(th => th.textContent?.trim() || '');
+                const rows = table.querySelectorAll('tbody tr');
+                
+                if (rows.length > 0) {
+                    // Format as markdown table
+                    if (headers.length > 0) {
+                        content += '| ' + headers.join(' | ') + ' |\n';
+                        content += '|' + headers.map(() => '---').join('|') + '|\n';
+                    }
+                    
+                    for (const row of rows) {
+                        const cells = Array.from(row.querySelectorAll('td')).map(td => td.textContent?.trim() || '');
+                        if (cells.length > 0) {
+                            content += '| ' + cells.join(' | ') + ' |\n';
+                        }
+                    }
+                    content += '\n';
+                }
+            }
+            
+            // If no tables, get main content
+            if (!content) {
+                const main = document.querySelector('main, article, .content, #content') || document.body;
+                const paragraphs = main.querySelectorAll('p, h1, h2, h3, li');
+                for (const p of paragraphs) {
+                    const text = p.textContent?.trim();
+                    if (text && text.length > 10) {
+                        content += text + '\n\n';
+                    }
+                }
+            }
+            
+            return content.slice(0, 10000);
+        })()
+    "#;
+    
+    let content = page.evaluate(content_js)
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<String>().ok())
+        .unwrap_or_default();
+    
+    // Clean up
+    let _ = browser.close().await;
+    handle.abort();
+    
+    let truncated_content = if content.len() > MAX_CONTENT_LENGTH {
+        format!("{}... [truncated]", &content[..MAX_CONTENT_LENGTH])
+    } else {
+        content
+    };
+    
+    println!("[web::fetch_url_rendered] Extracted {} characters", truncated_content.len());
+    
+    Ok(WebContent {
+        url,
+        title,
+        content: truncated_content,
+        content_type: "text/html".to_string(),
+    })
+}
+
 fn extract_text_content(document: &Html) -> String {
     let body_selector = Selector::parse("body").unwrap();
     let main_selector = Selector::parse("main, article, .content, #content, .post, .article").unwrap();
@@ -757,11 +1125,26 @@ pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
     println!("[web::get_stock_quote] Fetching quote for: '{}'", symbol_upper);
     println!("[web::get_stock_quote] ==============================================");
     
-    // Try Google Finance FIRST (most reliable for exact symbol matching)
+    // Try Yahoo Finance API FIRST (returns clean JSON data)
+    println!("[web::get_stock_quote] Trying Yahoo Finance API...");
+    match fetch_yahoo_finance_quote(&client, &symbol_upper).await {
+        Ok(quote) if quote.price > 0.0 => {
+            if quote.symbol.to_uppercase() == symbol_upper {
+                println!("[web::get_stock_quote] SUCCESS from Yahoo Finance: {} @ ${:.2} ({:+.2}%)", 
+                    quote.symbol, quote.price, quote.change_percent);
+                return Ok(quote);
+            } else {
+                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
+            }
+        }
+        Ok(_) => println!("[web::get_stock_quote] Yahoo Finance returned zero price"),
+        Err(e) => println!("[web::get_stock_quote] Yahoo Finance failed: {}", e),
+    }
+    
+    // Try Google Finance as secondary
     println!("[web::get_stock_quote] Trying Google Finance...");
     match fetch_google_finance_quote(&client, &symbol_upper).await {
         Ok(quote) if quote.price > 0.0 => {
-            // Final verification: returned symbol must match requested
             if quote.symbol.to_uppercase() == symbol_upper {
                 println!("[web::get_stock_quote] SUCCESS from Google Finance: {} @ ${:.2}", quote.symbol, quote.price);
                 return Ok(quote);
@@ -773,7 +1156,7 @@ pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
         Err(e) => println!("[web::get_stock_quote] Google Finance failed: {}", e),
     }
     
-    // Try Stocktwits as secondary
+    // Try Stocktwits
     println!("[web::get_stock_quote] Trying Stocktwits...");
     match fetch_stocktwits_quote(&client, &symbol_upper).await {
         Ok(quote) if quote.price > 0.0 => {
@@ -805,6 +1188,98 @@ pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
     
     println!("[web::get_stock_quote] FAILED: Could not get quote for '{}'", symbol_upper);
     Err(format!("Could not find stock quote for '{}'. Please verify the ticker symbol is correct.", symbol_upper))
+}
+
+async fn fetch_yahoo_finance_quote(client: &Client, symbol: &str) -> Result<StockQuote, String> {
+    let symbol_upper = symbol.to_uppercase();
+    
+    // Yahoo Finance v8 API endpoint
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1d",
+        symbol_upper
+    );
+    
+    println!("[web::yahoo] Fetching from: {}", url);
+    
+    let response = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("Yahoo request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Yahoo returned status: {}", response.status()));
+    }
+    
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Yahoo JSON: {}", e))?;
+    
+    // Navigate the JSON structure
+    let result = json
+        .get("chart")
+        .and_then(|c| c.get("result"))
+        .and_then(|r| r.get(0))
+        .ok_or("Invalid Yahoo response structure")?;
+    
+    let meta = result.get("meta").ok_or("No meta in response")?;
+    
+    let returned_symbol = meta
+        .get("symbol")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_uppercase();
+    
+    // Verify symbol matches
+    if !returned_symbol.is_empty() && returned_symbol != symbol_upper {
+        return Err(format!("Symbol mismatch: expected {}, got {}", symbol_upper, returned_symbol));
+    }
+    
+    let price = meta
+        .get("regularMarketPrice")
+        .and_then(|p| p.as_f64())
+        .unwrap_or(0.0);
+    
+    let prev_close = meta
+        .get("chartPreviousClose")
+        .or_else(|| meta.get("previousClose"))
+        .and_then(|p| p.as_f64())
+        .unwrap_or(0.0);
+    
+    let name = meta
+        .get("shortName")
+        .or_else(|| meta.get("longName"))
+        .and_then(|n| n.as_str())
+        .unwrap_or(&symbol_upper)
+        .to_string();
+    
+    let volume = meta
+        .get("regularMarketVolume")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    
+    // Calculate change from previous close
+    let change = if prev_close > 0.0 { price - prev_close } else { 0.0 };
+    let change_percent = if prev_close > 0.0 { (change / prev_close) * 100.0 } else { 0.0 };
+    
+    println!("[web::yahoo] Parsed: {} @ ${:.2}, prev_close=${:.2}, change=${:.4} ({:.4}%)", 
+        symbol_upper, price, prev_close, change, change_percent);
+    
+    if price > 0.0 {
+        Ok(StockQuote {
+            symbol: symbol_upper,
+            name,
+            price,
+            change,
+            change_percent,
+            volume,
+            market_cap: None,
+        })
+    } else {
+        Err("Could not parse Yahoo Finance data".to_string())
+    }
 }
 
 async fn fetch_stocktwits_quote(client: &Client, symbol: &str) -> Result<StockQuote, String> {
@@ -1103,46 +1578,94 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
         }
     }
     
-    // Method 3: Extract change info from patterns in the HTML
-    // Google Finance shows: $29.37 [arrow] +2.45% (+$0.70) Today
+    // Method 3: Extract change info - MUST be careful to get TODAY's change, not 52-week or other metrics
+    // Google Finance page has many percentages - we need the one for daily change
     if price > 0.0 && (change_percent == 0.0 || change == 0.0) {
-        // Look for patterns with sign, percentage, and dollar change
-        let change_patterns = [
-            // Format: +2.45% or -1.26% (change percent with sign)
-            r#"([+-])(\d{1,2}\.\d{1,2})%"#,
-            // Format: regularMarketChangePercent in JSON
+        // Priority 1: Look for JSON data with regularMarketChange (most reliable)
+        let json_patterns = [
+            // regularMarketChange in JSON - this is the actual dollar change
+            r#""regularMarketChange":\{"raw":([+-]?\d+\.?\d*)"#,
+            // regularMarketChangePercent in JSON  
             r#""regularMarketChangePercent":\{"raw":([+-]?\d+\.?\d*)"#,
-            // Format from data in script tags
-            r#"changePercent["\s:]+([+-]?\d+\.?\d*)"#,
         ];
         
-        for pattern in change_patterns {
+        let mut found_change = 0.0;
+        let mut found_pct = 0.0;
+        
+        for (i, pattern) in json_patterns.iter().enumerate() {
             if let Ok(re) = regex::Regex::new(pattern) {
+                if let Some(caps) = re.captures(html) {
+                    if let Some(m) = caps.get(1) {
+                        if let Ok(val) = m.as_str().parse::<f64>() {
+                            if i == 0 {
+                                found_change = val;
+                                println!("[web::google] Found regularMarketChange: {:.4}", val);
+                            } else {
+                                found_pct = val;
+                                println!("[web::google] Found regularMarketChangePercent: {:.4}", val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if found_change != 0.0 {
+            change = found_change;
+            if found_pct != 0.0 {
+                change_percent = found_pct;
+            } else {
+                change_percent = (change / price) * 100.0;
+            }
+        } else if found_pct != 0.0 {
+            change_percent = found_pct;
+            change = price * change_percent / 100.0;
+        }
+        
+        // Priority 2: Look for specific pattern "Today" or "1 day" change which appears near daily change
+        // Format: (+$0.77) (+6.37%) or (-$0.77) (-6.37%) followed by "today" or "1D"
+        if change == 0.0 {
+            // Pattern: "(+$X.XX)" or "(-$X.XX)" - dollar change in parentheses
+            if let Ok(re) = regex::Regex::new(r#"\(([+-])\$(\d+\.?\d*)\)"#) {
                 for caps in re.captures_iter(html) {
-                    let pct = if caps.len() == 3 {
-                        // Pattern with separate sign
-                        let sign = caps.get(1).map(|m| m.as_str()).unwrap_or("+");
-                        let value = caps.get(2).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0);
-                        if sign == "-" { -value } else { value }
-                    } else if caps.len() == 2 {
-                        // Pattern with embedded sign
-                        caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0)
-                    } else {
-                        0.0
-                    };
-                    
-                    // Valid change percent should be reasonable (< 50%)
-                    if pct.abs() > 0.001 && pct.abs() < 50.0 {
-                        change_percent = pct;
-                        change = price * change_percent / 100.0;
-                        println!("[web::google] Parsed change: {:+.2}% (${:+.2})", change_percent, change);
+                    let sign = caps.get(1).map(|m| m.as_str()).unwrap_or("+");
+                    let value = caps.get(2).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0);
+                    // Daily change should be a reasonable fraction of price (< 30%)
+                    if value > 0.0 && value < price * 0.3 {
+                        change = if sign == "-" { -value } else { value };
+                        println!("[web::google] Found dollar change pattern: ${:+.4}", change);
                         break;
                     }
                 }
-                if change_percent != 0.0 {
-                    break;
+            }
+            
+            // Pattern: "(+X.XX%)" or "(-X.XX%)" - percent change in parentheses
+            if let Ok(re) = regex::Regex::new(r#"\(([+-])(\d{1,2}\.?\d*)%\)"#) {
+                for caps in re.captures_iter(html) {
+                    let sign = caps.get(1).map(|m| m.as_str()).unwrap_or("+");
+                    let value = caps.get(2).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0);
+                    // Daily change percent should be reasonable (< 30%)
+                    if value > 0.0 && value < 30.0 {
+                        let pct = if sign == "-" { -value } else { value };
+                        if change_percent == 0.0 {
+                            change_percent = pct;
+                            println!("[web::google] Found percent change pattern: {:+.4}%", pct);
+                        }
+                        break;
+                    }
                 }
             }
+            
+            // Calculate missing value from the one we found
+            if change != 0.0 && change_percent == 0.0 {
+                change_percent = (change / price) * 100.0;
+            } else if change_percent != 0.0 && change == 0.0 {
+                change = price * change_percent / 100.0;
+            }
+        }
+        
+        if change != 0.0 || change_percent != 0.0 {
+            println!("[web::google] Final change values: ${:+.4} ({:+.4}%)", change, change_percent);
         }
     }
     
