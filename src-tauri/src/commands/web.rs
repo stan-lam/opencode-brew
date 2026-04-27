@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::Datelike;
 use chromiumoxide::{Browser, BrowserConfig};
 use futures::StreamExt;
+use tokio::time::timeout;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -173,56 +174,126 @@ pub async fn get_mlb_standings(season: Option<i32>) -> Result<MLBStandings, Stri
     })
 }
 
+// Search the web using multiple sources IN PARALLEL
+// First successful result wins, others are canceled
+// Tier 1 (fast): Brave API, Bing, DuckDuckGo, Google - race in parallel
+// Tier 2 (slow): Headless browser, Lynx - sequential fallback only if Tier 1 fails
 #[command]
 pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<SearchResult>, String> {
     let max = max_results.unwrap_or(5).min(10) as usize;
     let client = create_client()?;
     
-    println!("[web::search_web] Searching for: {}", query);
+    println!("[web::search_web] Searching for: {} (PARALLEL)", query);
     
-    // Try Brave Search API first (if API key is set)
-    if let Ok(api_key) = std::env::var("BRAVE_SEARCH_API_KEY") {
-        if !api_key.is_empty() {
-            println!("[web::search_web] Using Brave Search API...");
-            if let Ok(results) = search_brave_api(&client, &query, max, &api_key).await {
-                if !results.is_empty() {
-                    println!("[web::search_web] Brave API found {} results", results.len());
-                    return Ok(results);
+    // Per-source timeout for fast sources
+    let fast_timeout = Duration::from_secs(8);
+    
+    // Get Brave API key if available
+    let brave_api_key = std::env::var("BRAVE_SEARCH_API_KEY").ok()
+        .filter(|k| !k.is_empty());
+    
+    // Use a channel to receive results from parallel tasks
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<SearchResult>)>(4);
+    
+    // TIER 1: Fast sources - race in parallel
+    let fast_sources: Vec<(&str, bool)> = vec![
+        ("Brave API", brave_api_key.is_some()),
+        ("Bing", true),
+        ("DuckDuckGo", true),
+        ("Google", true),
+    ];
+    
+    let mut spawned = 0;
+    for (source_name, enabled) in fast_sources {
+        if !enabled {
+            continue;
+        }
+        
+        let client = client.clone();
+        let query = query.clone();
+        let tx = tx.clone();
+        let source_name = source_name.to_string();
+        let api_key = brave_api_key.clone();
+        
+        tokio::spawn(async move {
+            let result = match source_name.as_str() {
+                "Brave API" => {
+                    if let Some(key) = api_key {
+                        timeout(fast_timeout, search_brave_api(&client, &query, max, &key)).await
+                    } else {
+                        return;
+                    }
                 }
-            }
+                "Bing" => timeout(fast_timeout, search_bing(&client, &query, max)).await,
+                "DuckDuckGo" => timeout(fast_timeout, search_duckduckgo(&client, &query, max)).await,
+                "Google" => timeout(fast_timeout, search_google(&client, &query, max)).await,
+                _ => return,
+            };
+            
+            let results = match result {
+                Ok(Ok(r)) if !r.is_empty() => {
+                    println!("[web::search_web] {} found {} results", source_name, r.len());
+                    r
+                }
+                Ok(Ok(_)) => {
+                    println!("[web::search_web] {} returned empty results", source_name);
+                    vec![]
+                }
+                Ok(Err(e)) => {
+                    println!("[web::search_web] {} failed: {}", source_name, e);
+                    vec![]
+                }
+                Err(_) => {
+                    println!("[web::search_web] {} timed out", source_name);
+                    vec![]
+                }
+            };
+            
+            let _ = tx.send((source_name, results)).await;
+        });
+        spawned += 1;
+    }
+    
+    // Drop our sender so the channel closes when all tasks complete
+    drop(tx);
+    
+    // Wait for first valid result from Tier 1
+    let mut received = 0;
+    while let Some((source, results)) = rx.recv().await {
+        received += 1;
+        if !results.is_empty() {
+            println!("[web::search_web] Using {} results from {} (received {}/{} responses)", 
+                results.len(), source, received, spawned);
+            return Ok(results);
         }
     }
     
-    // Fallback to scraping (unreliable but free)
-    // Try Bing first
-    let mut results = search_bing(&client, &query, max).await.unwrap_or_default();
+    println!("[web::search_web] All {} fast sources failed, trying slow fallbacks...", received);
     
-    // If no results, try DuckDuckGo
-    if results.is_empty() {
-        println!("[web::search_web] Bing returned no results, trying DuckDuckGo...");
-        results = search_duckduckgo(&client, &query, max).await.unwrap_or_default();
+    // TIER 2: Slow fallbacks - only if all fast sources failed
+    // These are expensive (headless browser) so we run them sequentially
+    let slow_timeout = Duration::from_secs(30);
+    
+    // Try headless browser
+    println!("[web::search_web] Trying headless browser...");
+    if let Ok(Ok(results)) = timeout(slow_timeout, search_with_headless_browser(&query, max)).await {
+        if !results.is_empty() {
+            println!("[web::search_web] Headless browser found {} results", results.len());
+            return Ok(results);
+        }
     }
     
-    // If still no results, try Google
-    if results.is_empty() {
-        println!("[web::search_web] DuckDuckGo returned no results, trying Google...");
-        results = search_google(&client, &query, max).await.unwrap_or_default();
+    // Try text browser (lynx) as last resort
+    println!("[web::search_web] Trying text browser (lynx)...");
+    if let Ok(Ok(results)) = timeout(slow_timeout, search_with_text_browser(&query, max)).await {
+        if !results.is_empty() {
+            println!("[web::search_web] Lynx found {} results", results.len());
+            return Ok(results);
+        }
     }
     
-    // Final fallback: headless browser (slow but reliable)
-    if results.is_empty() {
-        println!("[web::search_web] All scrapers failed, trying headless browser...");
-        results = search_with_headless_browser(&query, max).await.unwrap_or_default();
-    }
-    
-    // Last resort: text browser (lynx) if installed
-    if results.is_empty() {
-        println!("[web::search_web] Headless browser failed, trying text browser (lynx)...");
-        results = search_with_text_browser(&query, max).await.unwrap_or_default();
-    }
-    
-    println!("[web::search_web] Found {} results total", results.len());
-    Ok(results)
+    println!("[web::search_web] All sources failed, returning empty results");
+    Ok(vec![])
 }
 
 async fn search_brave_api(client: &Client, query: &str, max: usize, api_key: &str) -> Result<Vec<SearchResult>, String> {
@@ -1115,78 +1186,98 @@ pub struct MarketMovers {
     pub most_active: Vec<StockQuote>,
 }
 
-// Try multiple sources for stock quotes
+// Helper to validate a stock quote result
+fn validate_quote(result: Result<StockQuote, String>, symbol: &str, source: &str) -> Option<StockQuote> {
+    match result {
+        Ok(quote) if quote.price > 0.0 => {
+            if quote.symbol.to_uppercase() == symbol.to_uppercase() {
+                println!("[web::get_stock_quote] SUCCESS from {}: {} @ ${:.2} ({:+.2}%)", 
+                    source, quote.symbol, quote.price, quote.change_percent);
+                Some(quote)
+            } else {
+                println!("[web::get_stock_quote] {} SYMBOL MISMATCH: requested '{}', got '{}'", 
+                    source, symbol, quote.symbol);
+                None
+            }
+        }
+        Ok(_) => {
+            println!("[web::get_stock_quote] {} returned zero price", source);
+            None
+        }
+        Err(e) => {
+            println!("[web::get_stock_quote] {} failed: {}", source, e);
+            None
+        }
+    }
+}
+
+// Try multiple sources for stock quotes IN PARALLEL
+// First successful result wins, others are canceled
 #[command]
 pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
     let client = create_client()?;
     let symbol_upper = symbol.to_uppercase().trim().to_string();
     
     println!("[web::get_stock_quote] ==============================================");
-    println!("[web::get_stock_quote] Fetching quote for: '{}'", symbol_upper);
+    println!("[web::get_stock_quote] Fetching quote for '{}' (PARALLEL)", symbol_upper);
     println!("[web::get_stock_quote] ==============================================");
     
-    // Try Yahoo Finance API FIRST (returns clean JSON data)
-    println!("[web::get_stock_quote] Trying Yahoo Finance API...");
-    match fetch_yahoo_finance_quote(&client, &symbol_upper).await {
-        Ok(quote) if quote.price > 0.0 => {
-            if quote.symbol.to_uppercase() == symbol_upper {
-                println!("[web::get_stock_quote] SUCCESS from Yahoo Finance: {} @ ${:.2} ({:+.2}%)", 
-                    quote.symbol, quote.price, quote.change_percent);
-                return Ok(quote);
-            } else {
-                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
-            }
-        }
-        Ok(_) => println!("[web::get_stock_quote] Yahoo Finance returned zero price"),
-        Err(e) => println!("[web::get_stock_quote] Yahoo Finance failed: {}", e),
+    // Per-source timeout (5 seconds each)
+    let source_timeout = Duration::from_secs(5);
+    
+    // Use a channel to receive results from parallel tasks
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Option<StockQuote>)>(4);
+    
+    // Spawn all sources in parallel
+    let sources = vec![
+        ("Yahoo Finance", "yahoo"),
+        ("Google Finance", "google"),
+        ("Stocktwits", "stocktwits"),
+        ("MarketWatch", "marketwatch"),
+    ];
+    
+    for (source_name, source_id) in sources {
+        let client = client.clone();
+        let symbol = symbol_upper.clone();
+        let tx = tx.clone();
+        let source_name = source_name.to_string();
+        let source_id = source_id.to_string();
+        
+        tokio::spawn(async move {
+            let result = match source_id.as_str() {
+                "yahoo" => timeout(source_timeout, fetch_yahoo_finance_quote(&client, &symbol)).await,
+                "google" => timeout(source_timeout, fetch_google_finance_quote(&client, &symbol)).await,
+                "stocktwits" => timeout(source_timeout, fetch_stocktwits_quote(&client, &symbol)).await,
+                "marketwatch" => timeout(source_timeout, fetch_marketwatch_quote(&client, &symbol)).await,
+                _ => return,
+            };
+            
+            let quote = match result {
+                Ok(inner) => validate_quote(inner, &symbol, &source_name),
+                Err(_) => {
+                    println!("[web::get_stock_quote] {} timed out", source_name);
+                    None
+                }
+            };
+            
+            let _ = tx.send((source_name, quote)).await;
+        });
     }
     
-    // Try Google Finance as secondary
-    println!("[web::get_stock_quote] Trying Google Finance...");
-    match fetch_google_finance_quote(&client, &symbol_upper).await {
-        Ok(quote) if quote.price > 0.0 => {
-            if quote.symbol.to_uppercase() == symbol_upper {
-                println!("[web::get_stock_quote] SUCCESS from Google Finance: {} @ ${:.2}", quote.symbol, quote.price);
-                return Ok(quote);
-            } else {
-                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
-            }
+    // Drop our sender so the channel closes when all tasks complete
+    drop(tx);
+    
+    // Wait for first valid result
+    let mut received = 0;
+    while let Some((source, quote_opt)) = rx.recv().await {
+        received += 1;
+        if let Some(quote) = quote_opt {
+            println!("[web::get_stock_quote] Using result from {} (received {} responses)", source, received);
+            return Ok(quote);
         }
-        Ok(_) => println!("[web::get_stock_quote] Google Finance returned zero price"),
-        Err(e) => println!("[web::get_stock_quote] Google Finance failed: {}", e),
     }
     
-    // Try Stocktwits
-    println!("[web::get_stock_quote] Trying Stocktwits...");
-    match fetch_stocktwits_quote(&client, &symbol_upper).await {
-        Ok(quote) if quote.price > 0.0 => {
-            if quote.symbol.to_uppercase() == symbol_upper {
-                println!("[web::get_stock_quote] SUCCESS from Stocktwits: {} @ ${:.2}", quote.symbol, quote.price);
-                return Ok(quote);
-            } else {
-                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
-            }
-        }
-        Ok(_) => println!("[web::get_stock_quote] Stocktwits returned zero price"),
-        Err(e) => println!("[web::get_stock_quote] Stocktwits failed: {}", e),
-    }
-    
-    // Fallback to MarketWatch
-    println!("[web::get_stock_quote] Trying MarketWatch...");
-    match fetch_marketwatch_quote(&client, &symbol_upper).await {
-        Ok(quote) if quote.price > 0.0 => {
-            if quote.symbol.to_uppercase() == symbol_upper {
-                println!("[web::get_stock_quote] SUCCESS from MarketWatch: {} @ ${:.2}", quote.symbol, quote.price);
-                return Ok(quote);
-            } else {
-                println!("[web::get_stock_quote] SYMBOL MISMATCH: requested '{}', got '{}'", symbol_upper, quote.symbol);
-            }
-        }
-        Ok(_) => println!("[web::get_stock_quote] MarketWatch returned zero price"),
-        Err(e) => println!("[web::get_stock_quote] MarketWatch failed: {}", e),
-    }
-    
-    println!("[web::get_stock_quote] FAILED: Could not get quote for '{}'", symbol_upper);
+    println!("[web::get_stock_quote] FAILED: All {} sources failed for '{}'", received, symbol_upper);
     Err(format!("Could not find stock quote for '{}'. Please verify the ticker symbol is correct.", symbol_upper))
 }
 
