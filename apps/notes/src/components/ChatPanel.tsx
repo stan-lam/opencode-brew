@@ -161,19 +161,40 @@ function getWebAccessSystemPrompt(): string {
 
 ## CRITICAL OUTPUT FORMAT
 
-**ALL internal reasoning MUST be wrapped in <think>...</think> tags.** Only content OUTSIDE these tags is shown to the user.
-- NEVER output reasoning, analysis, or "I will/need/should" statements outside of <think> tags
-- NEVER mention tool names or XML syntax outside of <think> tags
-- Go directly from <think> to the tool tag, then to your response
+**Be concise. Suggest actions. Let the user decide.**
+
+When the user asks for data (stocks, sports, web search), DO NOT automatically fetch it. Instead:
+1. Briefly acknowledge their request (1 sentence max)
+2. Suggest the action using the [ACTION:...] format
+3. Wait for user to confirm
+
+**SUGGESTING ACTIONS:**
+Use this format to suggest an action the user can approve:
+[ACTION:tool_name:description]
+
+Examples:
+- [ACTION:get_mlb_standings:Fetch current MLB standings]
+- [ACTION:get_stock_quote:AAPL:Get Apple stock price]
+- [ACTION:search_web:top tennis players 2026:Search for tennis rankings]
 
 **Example - CORRECT:**
-<think>User wants AMD stock price. I'll fetch it.</think>
-<get_stock_quote symbol="AMD" />
-Here's the current price for AMD...
+User: "What are the MLB standings?"
+Assistant: I can fetch the current MLB standings for you.
 
-**Example - WRONG (never do this):**
-The user is asking for AMD. I will use the get_stock_quote tool.
-<get_stock_quote symbol="AMD" />
+[ACTION:get_mlb_standings:Get MLB Standings]
+
+**Example - CORRECT:**
+User: "How's AMD doing?"
+Assistant: I can get the current AMD stock price.
+
+[ACTION:get_stock_quote:AMD:Get AMD Quote]
+
+**Example - WRONG (auto-executing without asking):**
+<get_mlb_standings />
+Here are the standings...
+
+**Example - WRONG (verbose reasoning):**
+The user is asking for MLB standings. This requires real-time data. I should use the get_mlb_standings tool...
 
 CRITICAL: When searching for news or current events, ALWAYS include today's date "${shortDate}" or "today" in your search queries to get the most recent results. Do NOT rely on cached or outdated information.
 
@@ -188,6 +209,9 @@ Write the XML tags directly — do NOT describe them.
 
 **Get market movers (top gainers, losers, most active):**
 <get_market_movers />
+
+**Get MLB standings (baseball):**
+<get_mlb_standings />
 
 **Search the web (ALWAYS include current date for news):**
 <search_web query="your search query ${shortDate}" />
@@ -223,6 +247,29 @@ You can then summarize, analyze, or use that content as requested.
 3. For market overview: use <get_market_movers /> to get top movers
 4. Multiple tool calls in one response are encouraged for comprehensive data
 5. When URL content is provided, summarize or process it as the user requests
+
+### RESPONSE STYLE - SIMPLE QUESTIONS:
+For simple or generic questions (rankings, "best of", general knowledge):
+1. **Give a direct answer FIRST** - Don't explain your reasoning, just answer
+2. **Keep it concise** - A brief summary or list is often enough
+3. **Offer follow-ups at the end** - "Would you like more details on [specific aspect]?"
+
+**Example - Good (direct + follow-up):**
+User: "Who are the top tennis players?"
+<think>Rankings query, search for current ATP rankings.</think>
+<search_web query="ATP top 10 rankings Apr 2026" />
+The current top 5 ATP players are:
+1. Jannik Sinner
+2. Carlos Alcaraz
+3. Novak Djokovic
+...
+
+Would you like details on WTA rankings, recent tournament results, or head-to-head records?
+
+**Example - Bad (overthinking):**
+The user is asking about tennis players. This is general knowledge that changes frequently. I should analyze what type of rankings they want. First, I'll determine if they mean ATP or WTA...
+
+NEVER output this kind of verbose reasoning outside <think> tags.
 
 ### MULTI-TURN RULE:
 Even if you already fetched data earlier, if the user asks another question about real-time data, **you MUST output the XML tag again**. Do NOT reference previous tool calls. Do NOT say "as mentioned before". Output the fresh XML tag for every new data request.
@@ -277,9 +324,56 @@ FORMAT FOR NEWS:
 }
 
 interface WebOperation {
-  type: 'search_web' | 'get_stock_quote' | 'get_market_movers';
+  type: 'search_web' | 'get_stock_quote' | 'get_market_movers' | 'get_mlb_standings';
   query?: string;
   symbol?: string;
+}
+
+interface MLBTeamStanding {
+  team_name: string;
+  wins: number;
+  losses: number;
+  pct: string;
+  games_back: string;
+  division: string;
+  league: string;
+  streak: string;
+  last_ten: string;
+}
+
+interface MLBStandings {
+  season: number;
+  standings: MLBTeamStanding[];
+}
+
+interface SuggestedAction {
+  tool: string;
+  param?: string;
+  label: string;
+}
+
+function parseSuggestedActions(content: string): SuggestedAction[] {
+  const actions: SuggestedAction[] = [];
+  // Match [ACTION:tool:param:label] or [ACTION:tool:label]
+  const actionRegex = /\[ACTION:(\w+)(?::([^:\]]+))?:([^\]]+)\]/g;
+  
+  let match;
+  while ((match = actionRegex.exec(content)) !== null) {
+    const tool = match[1];
+    // If there are 3 capture groups and match[3] exists, format is tool:param:label
+    // If only tool:label, match[2] is the label and match[3] is undefined
+    if (match[3]) {
+      actions.push({ tool, param: match[2], label: match[3] });
+    } else {
+      actions.push({ tool, label: match[2] || tool });
+    }
+  }
+  
+  return actions;
+}
+
+function stripActionTags(content: string): string {
+  return content.replace(/\[ACTION:[^\]]+\]/g, '').trim();
 }
 
 function parseWebOperations(content: string): WebOperation[] {
@@ -314,6 +408,12 @@ function parseWebOperations(content: string): WebOperation[] {
     operations.push({ type: 'get_market_movers' });
   }
   
+  // MLB standings
+  const mlbStandingsRegex = /<get_mlb_standings[^>]*\/?>/gi;
+  while ((match = mlbStandingsRegex.exec(content)) !== null) {
+    operations.push({ type: 'get_mlb_standings' });
+  }
+  
   console.log('[Notes] Parsed web operations:', operations, 'from content length:', content.length);
   return operations.slice(0, 5);
 }
@@ -322,15 +422,75 @@ function parseWebOperations(content: string): WebOperation[] {
 function parseWebOperationsFromIntent(content: string): WebOperation[] {
   const operations: WebOperation[] = [];
 
-  // Detect "I will call/use X tool" patterns
-  if (/will call the?\s*`?get_stock_quote`? tool|need to use the?\s*`?get_stock_quote`? tool|will fetch the?\s*`?get_stock_quote`? tool|will use the?\s*`?get_stock_quote`? tool/i.test(content)) {
-    operations.push({ type: 'get_stock_quote', symbol: 'AMD' });
+  // Detect stock quote intent with symbol extraction
+  const stockToolMatch = content.match(/(?:will|need to|should)\s+(?:call|use|fetch)\s+(?:the\s+)?`?get_stock_quote`?\s+tool\s+(?:with\s+)?(?:the\s+)?(?:symbol\s+)?["']?([A-Z]{1,5})["']?/i);
+  if (stockToolMatch && stockToolMatch[1]) {
+    operations.push({ type: 'get_stock_quote', symbol: stockToolMatch[1].toUpperCase() });
   }
+  
+  // Also check for "symbol X" or "ticker X" patterns
+  if (operations.length === 0) {
+    const symbolMatch = content.match(/(?:symbol|ticker)\s+["']?([A-Z]{1,5})["']?/i);
+    if (symbolMatch && /get_stock_quote/i.test(content)) {
+      operations.push({ type: 'get_stock_quote', symbol: symbolMatch[1].toUpperCase() });
+    }
+  }
+  
   if (/will call the?\s*`?get_market_movers`? tool|need to use the?\s*`?get_market_movers`? tool/i.test(content)) {
     operations.push({ type: 'get_market_movers' });
   }
-  if (/will call the?\s*`?search_web`? tool|need to use the?\s*`?search_web`? tool/i.test(content)) {
-    operations.push({ type: 'search_web', query: 'web search' });
+  
+  // Detect MLB standings from XML tags or intent
+  if (/<get_mlb_standings\s*\/?>/i.test(content)) {
+    operations.push({ type: 'get_mlb_standings' });
+  } else if (/\b(?:mlb|baseball)\s+(?:standings|rankings|teams)/i.test(content) && 
+             /(?:get_mlb_standings|mlb.*tool|baseball.*standings)/i.test(content)) {
+    operations.push({ type: 'get_mlb_standings' });
+  }
+  
+  // Detect search_web intent with query extraction
+  // Look for patterns like: search_web with query "dinner ideas"
+  const searchQueryMatch = content.match(/search_web.*?(?:query|with)\s*["']([^"']+)["']/i);
+  if (searchQueryMatch && searchQueryMatch[1]) {
+    operations.push({ type: 'search_web', query: searchQueryMatch[1] });
+  }
+  
+  // If no search operation found yet, try to extract from natural language
+  if (!operations.find(o => o.type === 'search_web')) {
+    // Detect "web search tool" or "search_web" mentions
+    const mentionsWebSearch = /(?:search_web|web search tool|use.+search|will search|should search)/i.test(content);
+    
+    if (mentionsWebSearch) {
+      // Try multiple patterns to extract the search query
+      const searchPatterns = [
+        // "search for the latest ATP rankings"
+        /(?:will |should |need to )?search(?:ing)?\s+(?:for|about|the web for)\s+["']?([^"'\n.]+?)["']?(?:\.|,|$)/i,
+        // "find the most current rankings"
+        /(?:to find|find|look up|get)\s+(?:the most |the latest |current )?["']?([^"'\n.]+?)["']?(?:\.|,|$)/i,
+        // search_web tool to find/get X
+        /search_web.*?(?:to find|to get|for)\s+["']?([^"'\n.]+?)["']?(?:\.|,|$)/i,
+        // quoted search term
+        /search.*?["']([^"']+)["']/i,
+      ];
+      
+      for (const pattern of searchPatterns) {
+        const match = content.match(pattern);
+        if (match && match[1]) {
+          const query = match[1].trim()
+            .replace(/^(?:the most |the latest |current |information on |data on |rankings for )/i, '')
+            .trim();
+          if (query.length > 3) {
+            // Add date context for ranking queries
+            const finalQuery = /ranking|player|athlete|team/i.test(query) 
+              ? `${query} ${new Date().getFullYear()}` 
+              : query;
+            operations.push({ type: 'search_web', query: finalQuery });
+            console.log('[Notes] Extracted search query from intent:', finalQuery);
+            break;
+          }
+        }
+      }
+    }
   }
 
   // Detect "I need to get quotes for X and Y" or similar symbol lists
@@ -373,33 +533,183 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
   return operations.slice(0, 5);
 }
 
+function stripVerboseReasoning(content: string): string {
+  // Remove <think>...</think> blocks entirely (not just tags)
+  let cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  
+  // Remove all tool XML tags
+  cleaned = cleaned.replace(/<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|fetch_url)[^>]*\/?>/gi, '');
+  
+  // Remove "Thinking Process:" sections with numbered steps
+  cleaned = cleaned.replace(/Thinking Process:\s*[\s\S]*?(?=\n\n[A-Z]|\n\nI am|\n\nTo get|\n\n\*\*|$)/gi, '');
+  
+  // Remove verbose intro paragraphs that start with AI reasoning
+  cleaned = cleaned.replace(/^(?:The user is asking[\s\S]*?(?:\.\s*I (?:should|will|need|must)[\s\S]*?\.)?)\s*/i, '');
+  
+  // Remove "*Self-Correction*" sections
+  cleaned = cleaned.replace(/\*Self-Correction[^*]*\*:?[\s\S]*?(?=\n\n|\n\d+\.)/gi, '');
+  
+  // Remove numbered analysis steps (1. **Analyze**, 2. **Determine**, etc.)
+  cleaned = cleaned.replace(/^\d+\.\s+\*\*(?:Analyze|Determine|Address|Formulate|Final Output|Review|Identify|Gather|Synthesize)[^*]*\*\*:?[^\n]*\n?/gim, '');
+  
+  // Remove lines that are purely meta-commentary
+  cleaned = cleaned.replace(/^\s*\(Drafting the response[^)]*\)\s*$/gim, '');
+  
+  // Remove status messages like "Analyzing results..."
+  cleaned = cleaned.replace(/^\s*(?:Analyzing|Processing|Fetching|Loading)\s+\w+\.{3}\s*$/gim, '');
+  
+  // Clean up multiple blank lines
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  
+  return cleaned.trim();
+}
+
 function cleanWebOperationTags(content: string): string {
   return content
-    // Extract content inside <think>...</think> blocks (strip tags, keep text)
-    .replace(/<think>([\s\S]*?)<\/think>/gi, '$1')
+    // Remove <think>...</think> blocks entirely
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
     // Remove all variations of tool XML tags
     .replace(/<search_web[^>]*\/?>/gi, '')
     .replace(/<get_stock_quote[^>]*\/?>/gi, '')
     .replace(/<get_market_movers[^>]*\/?>/gi, '')
+    .replace(/<get_mlb_standings[^>]*\/?>/gi, '')
     .replace(/<fetch_url[^>]*\/?>/gi, '')
     // Remove tool mentions in backticks (e.g., `<get_stock_quote>`)
-    .replace(/`<(?:search_web|get_stock_quote|get_market_movers|fetch_url)[^`]*>`/gi, 'the tool')
+    .replace(/`<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|fetch_url)[^`]*>`/gi, 'the tool')
+    // Remove "Analyzing results..." status lines
+    .replace(/^\s*Analyzing results\.{3}\s*$/gim, '')
     .trim();
 }
 
-function cleanThinkingFromResponse(content: string): string {
+// For thinking panel: convert XML tags to readable tool names instead of removing
+function cleanThinkingContent(content: string): string {
   return content
     // Remove <think>...</think> blocks
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    // Remove "Thinking Process:" sections until we hit actual response content
-    .replace(/\*?\*?Thinking Process:?\*?\*?[\s\S]*?(?=Based on|Here is|Here's|The current|In summary|To summarize|##|$)/gi, '')
-    // Remove numbered/bulleted reasoning steps
-    .replace(/^[\s]*[\d]+\.\s*\*?\*?(?:Analyze|Determine|Extract|Format|Review|Final|Identify|Consider|Check|Evaluate)[^\n]*(?:\n(?!Based on|Here|In summary|##)[^\n]*)*\n?/gim, '')
-    // Remove lines starting with reasoning patterns
-    .replace(/^[\s]*[-•*]?\s*(?:Analyze the|Determine|Extract Data|Format the|Review|Final Polish|I will|I need|I should|Let me)[^\n]*\n?/gim, '')
-    // Clean up extra whitespace
-    .replace(/\n{3,}/g, '\n\n')
+    // Convert tool XML tags to readable names
+    .replace(/<search_web\s+query="([^"]+)"[^>]*\/?>/gi, '`search_web` with query "$1"')
+    .replace(/<search_web\s+query='([^']+)'[^>]*\/?>/gi, "`search_web` with query '$1'")
+    .replace(/<get_stock_quote\s+symbol="([^"]+)"[^>]*\/?>/gi, '`get_stock_quote` for $1')
+    .replace(/<get_stock_quote\s+symbol='([^']+)'[^>]*\/?>/gi, '`get_stock_quote` for $1')
+    .replace(/<get_market_movers[^>]*\/?>/gi, '`get_market_movers`')
+    .replace(/<get_mlb_standings[^>]*\/?>/gi, '`get_mlb_standings`')
+    .replace(/<fetch_url[^>]*\/?>/gi, '`fetch_url`')
+    // Clean up backtick mentions
+    .replace(/`<(\w+)[^`]*>`/gi, '`$1`')
     .trim();
+}
+
+function splitThinkingFromResponse(content: string): { thinking: string; response: string } {
+  // Remove <think>...</think> blocks first
+  const withoutThinkTags = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  
+  // Clean tool tags
+  const cleaned = cleanWebOperationTags(withoutThinkTags);
+  
+  // FIRST: Check if content starts with clear RESPONSE indicators
+  // If so, treat everything as response (no thinking)
+  const firstLine = cleaned.trim().split('\n')[0] || '';
+  const startsWithResponse = /^(?:#|##|###|\*\*|[-*]\s|\d+\.\s|Good |Here |The |Based |According |As of |Currently)/i.test(firstLine);
+  
+  if (startsWithResponse) {
+    // No thinking, everything is response
+    return { thinking: '', response: cleaned.trim() };
+  }
+  
+  // Check for "Thinking Process:" delimiter - everything before and including it is thinking
+  const thinkingProcessMatch = cleaned.match(/^([\s\S]*?Thinking Process:[\s\S]*?)(\n\n(?:I am unable|I cannot|Unfortunately|To get|The |Here|Based on|According to|As of|Currently)[\s\S]*)$/i);
+  if (thinkingProcessMatch) {
+    const thinking = thinkingProcessMatch[1].trim();
+    const response = stripVerboseReasoning(thinkingProcessMatch[2]).trim();
+    if (response) {
+      return { thinking, response };
+    }
+  }
+  
+  // Check if content starts with clear THINKING patterns
+  const startsWithThinking = /^(?:The user |I need |I will |I must |I should |Let me |To provide |To answer )/i.test(firstLine);
+  
+  if (!startsWithThinking) {
+    // No clear thinking, treat as response
+    return { thinking: '', response: cleaned.trim() };
+  }
+  
+  // Split into lines for pattern matching
+  const lines = cleaned.split('\n');
+  
+  // Patterns that indicate a line is part of thinking/reasoning
+  const thinkingPatterns = [
+    /\.{3}\s*$/,  // Lines ending with "..."
+    /^(?:The user |I need to |I will |I must |I should |Let me |This is a |This requires )/i,
+    /^(?:To provide |To find |To get |To answer |Since |Looking at |Looking for )/i,
+    /^(?:Here's a thinking|Here's my |Thinking Process|My approach|Self-Correction)/i,
+    /^\d+\.\s+\*?\*?(?:Analyze|Determine|Review|Synthesize|Structure|Format|Draft|Final|Address|Formulate|Identify|Gather|Check)/i,
+    /^[\s]*\*\s*\*?(?:Main Point|Key Takeaway|Tone|Format|Refining|Goal|Approach)/i,
+    /\(This leads to|This leads to the final|Drafting the response/i,
+    /^(?:First,? I|Next,? I|Then,? I|Finally,? I)/i,  // Sequential reasoning
+    /^<get_\w+[^>]*\/?>\s*$/i,  // Tool XML tags on their own line
+    /^Analyzing results/i,  // Status messages
+  ];
+  
+  // Patterns that indicate actual response content has started
+  const responsePatterns = [
+    /^(?:The search results|Here is the|Here's the|Here are the|Based on|According to)/i,
+    /^(?:As of |Currently,|The top |The best |The current )/i,  // Sports/rankings
+    /^(?:Key takeaways|Summary|Sources:|##|\*\*[A-Z])/i,
+    /^(?:I am unable|I cannot|Unfortunately|To get the most)/i,
+    /^\d+\.\s+(?:\*\*)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\*\*)?(?:\s*[-–—]|\s*:)/,  // Numbered lists with names (1. **Yankees** -)
+  ];
+  
+  let lastThinkingLineIndex = -1;
+  let firstResponseLineIndex = -1;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    // Check for thinking patterns
+    for (const pattern of thinkingPatterns) {
+      if (pattern.test(line)) {
+        lastThinkingLineIndex = i;
+        break;
+      }
+    }
+    
+    // Check for response patterns (only count if after some thinking)
+    if (firstResponseLineIndex === -1 && i > 0) {
+      for (const pattern of responsePatterns) {
+        if (pattern.test(line)) {
+          firstResponseLineIndex = i;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Determine split point - prefer response pattern if found after thinking
+  let splitIndex = -1;
+  if (firstResponseLineIndex > 0 && firstResponseLineIndex > lastThinkingLineIndex) {
+    splitIndex = firstResponseLineIndex;
+  } else if (lastThinkingLineIndex >= 0 && lastThinkingLineIndex < lines.length - 1) {
+    splitIndex = lastThinkingLineIndex + 1;
+  }
+  
+  if (splitIndex > 0) {
+    const thinking = lines.slice(0, splitIndex).join('\n').trim();
+    const response = stripVerboseReasoning(lines.slice(splitIndex).join('\n')).trim();
+    if (response) {
+      return { thinking, response };
+    }
+  }
+  
+  // If we found thinking patterns but no clear response yet
+  if (lastThinkingLineIndex >= 0) {
+    // Still in thinking phase - no response yet
+    return { thinking: cleaned.trim(), response: '' };
+  }
+  
+  // No thinking patterns - treat as pure response
+  return { thinking: '', response: cleaned.trim() };
 }
 
 function separateThinkingContent(content: string): { thinking: string; response: string } {
@@ -457,6 +767,60 @@ function formatMarketMovers(movers: MarketMovers): string {
     result += `| **${stock.symbol}** | $${stock.price.toFixed(2)} | ${stock.volume.toLocaleString()} |\n`;
   });
   
+  return result;
+}
+
+function formatMLBStandings(data: MLBStandings): string {
+  let result = `## ⚾ MLB Standings (${data.season} Season)\n\n`;
+  
+  // Group by league and division
+  const grouped: Record<string, Record<string, MLBTeamStanding[]>> = {};
+  
+  for (const team of data.standings) {
+    if (!grouped[team.league]) {
+      grouped[team.league] = {};
+    }
+    if (!grouped[team.league][team.division]) {
+      grouped[team.league][team.division] = [];
+    }
+    grouped[team.league][team.division].push(team);
+  }
+  
+  // Sort leagues: American League first, then National League
+  const leagues = Object.keys(grouped).sort((a, b) => {
+    if (a.includes('American')) return -1;
+    if (b.includes('American')) return 1;
+    return a.localeCompare(b);
+  });
+  
+  for (const league of leagues) {
+    result += `### ${league}\n\n`;
+    
+    // Sort divisions: East, Central, West
+    const divisions = Object.keys(grouped[league]).sort((a, b) => {
+      const order = ['East', 'Central', 'West'];
+      const aOrder = order.findIndex(o => a.includes(o));
+      const bOrder = order.findIndex(o => b.includes(o));
+      return aOrder - bOrder;
+    });
+    
+    for (const division of divisions) {
+      const teams = grouped[league][division];
+      // Sort by wins descending
+      teams.sort((a, b) => b.wins - a.wins);
+      
+      result += `#### ${division}\n`;
+      result += '| Team | W | L | PCT | GB | L10 | STRK |\n';
+      result += '|------|---|---|-----|----|----|------|\n';
+      
+      for (const team of teams) {
+        result += `| ${team.team_name} | ${team.wins} | ${team.losses} | ${team.pct} | ${team.games_back} | ${team.last_ten} | ${team.streak} |\n`;
+      }
+      result += '\n';
+    }
+  }
+  
+  result += `\n*Data from MLB Stats API*`;
   return result;
 }
 
@@ -676,8 +1040,46 @@ async function webSearchWithMCP(query: string): Promise<WebSearchResult[]> {
   }
   
   // Fallback to built-in web search
-  console.log(`[Notes] Falling back to built-in web search`);
-  return invoke<WebSearchResult[]>('search_web', { query, maxResults: 5 });
+  // Simplify query - remove dates and ALL filler words upfront
+  let simplifiedQuery = query
+    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b/gi, '')
+    .replace(/\b\d{4}\b/g, '') // Remove years
+    // Remove ALL filler/qualifier words in one pass
+    .replace(/\b(?:top|best|most|latest|current|ranked|ranking|rankings)\b/gi, '')
+    .replace(/\b(?:performing|leading|winning|looking|searching|finding|getting)\b/gi, '')
+    .replace(/\b(?:currently|today|right now|as of|at the moment)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // If query became too short, use original but still clean dates
+  if (simplifiedQuery.length < 5) {
+    simplifiedQuery = query
+      .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b/gi, '')
+      .replace(/\b\d{4}\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  console.log(`[Notes] Falling back to built-in web search with query:`, simplifiedQuery);
+
+  // Try with simplified query
+  let results = await invoke<WebSearchResult[]>('search_web', { query: simplifiedQuery, maxResults: 5 });
+
+  // If no results, try even more minimal (just nouns)
+  if (results.length === 0) {
+    // Extract just the core subject (e.g., "MLB teams standings" → "MLB standings")
+    const minimalQuery = simplifiedQuery
+      .replace(/\b(?:teams|players|list|results)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (minimalQuery.length > 3 && minimalQuery !== simplifiedQuery) {
+      console.log(`[Notes] Retrying with minimal query:`, minimalQuery);
+      results = await invoke<WebSearchResult[]>('search_web', { query: minimalQuery, maxResults: 5 });
+    }
+  }
+  
+  return results;
 }
 
 interface WebContent {
@@ -820,6 +1222,8 @@ export function ChatPanel() {
   const [streamingPhase, setStreamingPhase] = useState<'streaming' | 'executing' | 'done'>('streaming');
   const [rawThinkingContent, setRawThinkingContent] = useState('');
   const [thinkingCollapsed, setThinkingCollapsed] = useState(false);
+  const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
+  const [thinkingDuration, setThinkingDuration] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -885,6 +1289,13 @@ export function ChatPanel() {
           const movers = await getMarketMoversWithMCP();
           console.log('[Notes] Market movers:', movers);
           return formatMarketMovers(movers);
+        } else if (op.type === 'get_mlb_standings') {
+          setWebStatus('Getting MLB standings...');
+          console.log('[Notes] Executing MLB standings');
+          const invoke = await getInvoke();
+          const standings = await invoke<MLBStandings>('get_mlb_standings', {});
+          console.log('[Notes] MLB standings:', standings);
+          return formatMLBStandings(standings);
         }
         return null;
       } catch (error) {
@@ -988,21 +1399,48 @@ export function ChatPanel() {
       const conversationId = `notes-${activeConversationId}`;
       
       let fullContent = '';
+      let thinkingStart: number | null = null;
+      
+      // Reset thinking state for new message
+      setStreamingPhase('streaming');
+      setThinkingStartTime(null);
+      setThinkingDuration(null);
+      setRawThinkingContent('');
+      
       const unlisten = await listenFn(`ai-stream-${conversationId}`, (event: any) => {
         const { content, done } = event.payload;
         if (content) {
+          // Track when thinking starts
+          if (!thinkingStart) {
+            thinkingStart = Date.now();
+            setThinkingStartTime(thinkingStart);
+          }
+          
           fullContent += content;
-          // Always show full stream in thinking panel (cleaned of tool tags)
-          setRawThinkingContent(cleanWebOperationTags(fullContent));
-          // Response panel: clean all thinking content (tags + reasoning patterns)
-          const cleanedResponse = cleanThinkingFromResponse(cleanWebOperationTags(fullContent));
-          updateMessageContent(assistantPlaceholder.id, cleanedResponse);
+          const cleanedContent = cleanWebOperationTags(fullContent);
+          
+          // Split content into thinking and response parts
+          const { thinking, response } = splitThinkingFromResponse(cleanedContent);
+          
+          // Thinking panel shows thinking content
+          setRawThinkingContent(thinking);
+          
+          // Response panel shows only the response part (empty until response starts)
+          updateMessageContent(assistantPlaceholder.id, response);
         }
         if (done) {
+          // Calculate thinking duration
+          if (thinkingStart) {
+            const duration = Math.round((Date.now() - thinkingStart) / 1000);
+            setThinkingDuration(duration);
+          }
+          
           setStreamingPhase('done');
-          // Final cleanup when done
-          const cleanedResponse = cleanThinkingFromResponse(cleanWebOperationTags(fullContent));
-          updateMessageContent(assistantPlaceholder.id, cleanedResponse);
+          // Final split when done
+          const cleanedContent = cleanWebOperationTags(fullContent);
+          const { thinking, response } = splitThinkingFromResponse(cleanedContent);
+          setRawThinkingContent(thinking);
+          updateMessageContent(assistantPlaceholder.id, response);
         }
       });
 
@@ -1506,6 +1944,57 @@ export function ChatPanel() {
       handleSend();
     }
   };
+  
+  // Handle execution of suggested actions when user clicks
+  const handleExecuteAction = async (action: SuggestedAction, messageId: string) => {
+    console.log('[Notes] Executing action:', action);
+    setWebStatus(`Executing: ${action.label}...`);
+    
+    try {
+      const invoke = await getInvoke();
+      let result = '';
+      
+      switch (action.tool) {
+        case 'get_mlb_standings': {
+          const standings = await invoke<MLBStandings>('get_mlb_standings', {});
+          result = formatMLBStandings(standings);
+          break;
+        }
+        case 'get_stock_quote': {
+          if (action.param) {
+            const quote = await getStockQuoteWithMCP(action.param);
+            result = formatStockQuote(quote);
+          }
+          break;
+        }
+        case 'get_market_movers': {
+          const movers = await getMarketMoversWithMCP();
+          result = formatMarketMovers(movers);
+          break;
+        }
+        case 'search_web': {
+          if (action.param) {
+            const searchResults = await webSearchWithMCP(action.param);
+            result = formatSearchResults(searchResults);
+          }
+          break;
+        }
+      }
+      
+      if (result) {
+        // Update the message content to include the result
+        const existingMessage = messages.find(m => m.id === messageId);
+        if (existingMessage) {
+          const cleanContent = stripActionTags(existingMessage.content);
+          updateMessageContent(messageId, `${cleanContent}\n\n${result}`);
+        }
+      }
+    } catch (error) {
+      console.error('[Notes] Action execution failed:', error);
+    } finally {
+      setWebStatus(null);
+    }
+  };
 
   return (
     <div 
@@ -1537,6 +2026,10 @@ export function ChatPanel() {
             new Date(message.created_at).toDateString() !== new Date(messages[index - 1].created_at).toDateString()
           );
           
+          // Only apply thinking props to the last assistant message
+          const isLastMessage = index === messages.length - 1;
+          const isLastAssistant = isLastMessage && message.role === 'assistant';
+          
           return (
             <React.Fragment key={message.id}>
               {showDateSeparator && message.created_at && (
@@ -1546,8 +2039,11 @@ export function ChatPanel() {
               )}
               <MessageBubble
                 message={message}
-                thinking={streamingPhase !== 'done' && message.role === 'assistant' && rawThinkingContent ? rawThinkingContent : undefined}
+                thinking={isLastAssistant ? rawThinkingContent : undefined}
                 hasResponse={!!message.content.trim()}
+                thinkingDuration={isLastAssistant && streamingPhase === 'done' ? thinkingDuration : null}
+                isThinking={isLastAssistant && streamingPhase !== 'done'}
+                onExecuteAction={(action) => handleExecuteAction(action, message.id)}
               />
             </React.Fragment>
           );
@@ -1683,6 +2179,9 @@ interface MessageBubbleProps {
   showDate?: boolean;
   thinking?: string;
   hasResponse?: boolean;
+  thinkingDuration?: number | null;
+  isThinking?: boolean;
+  onExecuteAction?: (action: SuggestedAction) => void;
 }
 
 function formatMessageTime(dateStr: string): string {
@@ -1735,12 +2234,29 @@ function formatDateSeparator(dateStr: string): string {
   }
 }
 
-function MessageBubble({ message, showDate = true, thinking, hasResponse }: MessageBubbleProps) {
+function MessageBubble({ message, showDate = true, thinking, hasResponse, thinkingDuration, isThinking, onExecuteAction }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const [expandedImage, setExpandedImage] = useState<string | null>(null);
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [imagePosition, setImagePosition] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [executingAction, setExecutingAction] = useState<string | null>(null);
   const isUser = message.role === 'user';
   const isAssistant = !isUser;
   const messageContentRef = useRef<HTMLDivElement>(null);
+  
+  // Parse suggested actions from message content
+  const suggestedActions = React.useMemo(() => {
+    if (isUser) return [];
+    return parseSuggestedActions(message.content);
+  }, [message.content, isUser]);
+  
+  // Get content without action tags
+  const displayContent = React.useMemo(() => {
+    return stripActionTags(message.content);
+  }, [message.content]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(message.content);
@@ -1758,6 +2274,22 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
     }
   }, [message.attachments]);
 
+  // Auto-expand thinking panel during streaming, collapse when response streaming is done
+  useEffect(() => {
+    if (isThinking && thinking) {
+      // Expand while streaming
+      setThinkingExpanded(true);
+    }
+  }, [isThinking, thinking]);
+
+  // Collapse when streaming is done
+  useEffect(() => {
+    if (!isThinking && thinking) {
+      // Streaming is done - collapse the thinking panel
+      setThinkingExpanded(false);
+    }
+  }, [isThinking]);
+
   // Auto-scroll message during streaming
   useEffect(() => {
     if (thinking && messageContentRef.current) {
@@ -1765,24 +2297,97 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
     }
   }, [thinking, message.content]);
 
-  // Render: thinking text inline (muted) or final response (cleaned markdown)
-  const renderBody = () => {
-    // If we have a response and were showing thinking, replace thinking with response
-    if (hasResponse) {
-      return <MarkdownRenderer content={message.content} />;
-    }
-    if (thinking) {
-      return <div className={styles.thinkingText}>{cleanWebOperationTags(thinking)}</div>;
-    }
-    if (message.content) {
-      return isUser ? message.content : <MarkdownRenderer content={message.content} />;
-    }
+  // Render thinking header with "Thinking..." or "Thought for Xs"
+  const renderThinkingHeader = () => {
+    // Use the isThinking prop to determine if currently streaming
+    const showHeader = isThinking || (thinkingDuration && thinkingDuration > 0);
+    
+    if (!showHeader || isUser) return null;
+    
     return (
-      <span className={styles.typing}>
-        <span></span>
-        <span></span>
-        <span></span>
-      </span>
+      <div 
+        className={styles.thinkingHeader} 
+        onClick={() => setThinkingExpanded(!thinkingExpanded)}
+      >
+        <Brain size={14} className={isThinking ? styles.thinkingIconPulse : styles.thinkingIconStatic} />
+        {isThinking ? (
+          <span className={styles.thinkingLabel}>Thinking...</span>
+        ) : (
+          <span className={styles.thinkingLabel}>Thought for {thinkingDuration}s</span>
+        )}
+        <ChevronDown size={14} className={`${styles.thinkingChevron} ${thinkingExpanded ? styles.rotated : ''}`} />
+      </div>
+    );
+  };
+
+  // Render expanded thinking content (works during streaming and after)
+  const renderThinkingContent = () => {
+    if (!thinkingExpanded || !thinking || isUser) return null;
+    
+    return (
+      <div className={styles.thinkingContent}>
+        {cleanThinkingContent(thinking)}
+      </div>
+    );
+  };
+
+  // Render: response content (thinking is shown via header, not in body)
+  const renderBody = () => {
+    // User messages always show content
+    if (isUser && message.content) {
+      return message.content;
+    }
+    // Show response content if available (even during streaming)
+    // Use displayContent which has action tags stripped
+    if (displayContent.trim()) {
+      return <MarkdownRenderer content={displayContent} />;
+    }
+    return null;
+  };
+  
+  const handleActionClick = async (action: SuggestedAction) => {
+    if (executingAction || !onExecuteAction) return;
+    setExecutingAction(action.tool);
+    try {
+      await onExecuteAction(action);
+    } finally {
+      setExecutingAction(null);
+    }
+  };
+  
+  const renderActionButtons = () => {
+    if (isUser || suggestedActions.length === 0) return null;
+    
+    const getActionIcon = (tool: string) => {
+      switch (tool) {
+        case 'get_mlb_standings': return '⚾';
+        case 'get_stock_quote': return '📈';
+        case 'get_market_movers': return '📊';
+        case 'search_web': return '🔍';
+        default: return '▶️';
+      }
+    };
+    
+    return (
+      <div className={styles.actionButtons}>
+        {suggestedActions.map((action, idx) => (
+          <button
+            key={idx}
+            className={styles.actionButton}
+            onClick={() => handleActionClick(action)}
+            disabled={!!executingAction}
+          >
+            {executingAction === action.tool ? (
+              <span className={styles.actionLoading}>Loading...</span>
+            ) : (
+              <>
+                <span className={styles.actionIcon}>{getActionIcon(action.tool)}</span>
+                <span>{action.label}</span>
+              </>
+            )}
+          </button>
+        ))}
+      </div>
     );
   };
 
@@ -1819,17 +2424,24 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
     );
   };
 
+  const bodyContent = renderBody();
+  
   return (
     <div className={`${styles.messageBubble} ${isUser ? styles.user : styles.assistant}`}>
       {renderAttachments()}
-      <div className={`${styles.messageContent} ${thinking ? styles.thinkingInline : ''}`} ref={messageContentRef}>
-        {renderBody()}
-      </div>
+      {renderThinkingHeader()}
+      {thinkingExpanded && renderThinkingContent()}
+      {bodyContent && (
+        <div className={styles.messageContent} ref={messageContentRef}>
+          {bodyContent}
+        </div>
+      )}
+      {renderActionButtons()}
       <div className={styles.messageFooter}>
         {showDate && message.created_at && (
           <span className={styles.messageTime}>{formatMessageTime(message.created_at)}</span>
         )}
-        {!isUser && message.content && (
+        {!isUser && (hasResponse || message.content) && (
           <div className={styles.messageActions}>
             <button onClick={handleCopy} className={styles.actionBtn} title="Copy">
               {copied ? <Check size={14} /> : <Copy size={14} />}
@@ -1838,9 +2450,76 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse }: Mess
         )}
       </div>
       {expandedImage && (
-        <div className={styles.imageLightbox} onClick={() => setExpandedImage(null)}>
-          <img src={expandedImage} alt="Expanded view" />
-          <button className={styles.closeLightbox} onClick={() => setExpandedImage(null)}>
+        <div 
+          className={styles.imageLightbox} 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setExpandedImage(null);
+              setZoomLevel(1);
+              setImagePosition({ x: 0, y: 0 });
+            }
+          }}
+          onWheel={(e) => {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? -0.1 : 0.1;
+            setZoomLevel(prev => Math.min(Math.max(0.5, prev + delta), 4));
+          }}
+        >
+          <div className={styles.lightboxContent}>
+            <img 
+              src={expandedImage} 
+              alt="Expanded view"
+              style={{
+                transform: `scale(${zoomLevel}) translate(${imagePosition.x}px, ${imagePosition.y}px)`,
+                cursor: zoomLevel > 1 ? (isDragging ? 'grabbing' : 'grab') : 'default',
+              }}
+              draggable={false}
+              onMouseDown={(e) => {
+                if (zoomLevel > 1) {
+                  setIsDragging(true);
+                  setDragStart({ x: e.clientX - imagePosition.x * zoomLevel, y: e.clientY - imagePosition.y * zoomLevel });
+                }
+              }}
+              onMouseMove={(e) => {
+                if (isDragging && zoomLevel > 1) {
+                  setImagePosition({
+                    x: (e.clientX - dragStart.x) / zoomLevel,
+                    y: (e.clientY - dragStart.y) / zoomLevel,
+                  });
+                }
+              }}
+              onMouseUp={() => setIsDragging(false)}
+              onMouseLeave={() => setIsDragging(false)}
+            />
+          </div>
+          <div className={styles.zoomControls}>
+            <button 
+              className={styles.zoomBtn} 
+              onClick={(e) => { e.stopPropagation(); setZoomLevel(prev => Math.min(prev + 0.25, 4)); }}
+              title="Zoom in"
+            >
+              +
+            </button>
+            <span className={styles.zoomLevel}>{Math.round(zoomLevel * 100)}%</span>
+            <button 
+              className={styles.zoomBtn} 
+              onClick={(e) => { e.stopPropagation(); setZoomLevel(prev => Math.max(prev - 0.25, 0.5)); }}
+              title="Zoom out"
+            >
+              −
+            </button>
+            <button 
+              className={styles.zoomBtn} 
+              onClick={(e) => { e.stopPropagation(); setZoomLevel(1); setImagePosition({ x: 0, y: 0 }); }}
+              title="Reset zoom"
+            >
+              ⟲
+            </button>
+          </div>
+          <button 
+            className={styles.closeLightbox} 
+            onClick={() => { setExpandedImage(null); setZoomLevel(1); setImagePosition({ x: 0, y: 0 }); }}
+          >
             <X size={24} />
           </button>
         </div>

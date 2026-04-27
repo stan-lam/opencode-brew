@@ -346,6 +346,7 @@ pub fn run() {
             commands::web::fetch_url,
             commands::web::get_stock_quote,
             commands::web::get_market_movers,
+            commands::web::get_mlb_standings,
             commands::mcp::mcp_start_server,
             commands::mcp::mcp_stop_server,
             commands::mcp::mcp_list_tools,

@@ -3,6 +3,7 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use tauri::command;
 use std::time::Duration;
+use chrono::Datelike;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -23,6 +24,26 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const MAX_CONTENT_LENGTH: usize = 8000;
 
+// MLB API types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MLBTeamStanding {
+    pub team_name: String,
+    pub wins: i32,
+    pub losses: i32,
+    pub pct: String,
+    pub games_back: String,
+    pub division: String,
+    pub league: String,
+    pub streak: String,
+    pub last_ten: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MLBStandings {
+    pub season: i32,
+    pub standings: Vec<MLBTeamStanding>,
+}
+
 fn create_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(USER_AGENT)
@@ -32,39 +53,492 @@ fn create_client() -> Result<Client, String> {
 }
 
 #[command]
+pub async fn get_mlb_standings(season: Option<i32>) -> Result<MLBStandings, String> {
+    let client = create_client()?;
+    let year = season.unwrap_or_else(|| {
+        chrono::Local::now().year()
+    });
+    
+    // MLB Stats API - 103 = American League, 104 = National League
+    let url = format!(
+        "https://statsapi.mlb.com/api/v1/standings?leagueId=103,104&season={}&standingsTypes=regularSeason",
+        year
+    );
+    
+    println!("[web::mlb] Fetching standings for {}: {}", year, url);
+    
+    let response = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("MLB API request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("MLB API failed with status: {}", response.status()));
+    }
+    
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse MLB API response: {}", e))?;
+    
+    let mut standings = Vec::new();
+    
+    if let Some(records) = json.get("records").and_then(|r| r.as_array()) {
+        for record in records {
+            let division = record.get("division")
+                .and_then(|d| d.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            
+            let league = record.get("league")
+                .and_then(|l| l.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            
+            if let Some(team_records) = record.get("teamRecords").and_then(|t| t.as_array()) {
+                for team_record in team_records {
+                    let team_name = team_record.get("team")
+                        .and_then(|t| t.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    
+                    let wins = team_record.get("wins")
+                        .and_then(|w| w.as_i64())
+                        .unwrap_or(0) as i32;
+                    
+                    let losses = team_record.get("losses")
+                        .and_then(|l| l.as_i64())
+                        .unwrap_or(0) as i32;
+                    
+                    let pct = team_record.get("winningPercentage")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("0.000")
+                        .to_string();
+                    
+                    let games_back = team_record.get("gamesBack")
+                        .and_then(|g| g.as_str())
+                        .unwrap_or("-")
+                        .to_string();
+                    
+                    let streak_code = team_record.get("streak")
+                        .and_then(|s| s.get("streakCode"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("-")
+                        .to_string();
+                    
+                    let last_ten = team_record.get("records")
+                        .and_then(|r| r.get("splitRecords"))
+                        .and_then(|s| s.as_array())
+                        .and_then(|arr| arr.iter().find(|r| {
+                            r.get("type").and_then(|t| t.as_str()) == Some("lastTen")
+                        }))
+                        .map(|r| {
+                            let w = r.get("wins").and_then(|w| w.as_i64()).unwrap_or(0);
+                            let l = r.get("losses").and_then(|l| l.as_i64()).unwrap_or(0);
+                            format!("{}-{}", w, l)
+                        })
+                        .unwrap_or("-".to_string());
+                    
+                    standings.push(MLBTeamStanding {
+                        team_name,
+                        wins,
+                        losses,
+                        pct,
+                        games_back,
+                        division: division.clone(),
+                        league: league.clone(),
+                        streak: streak_code,
+                        last_ten,
+                    });
+                }
+            }
+        }
+    }
+    
+    println!("[web::mlb] Found {} teams", standings.len());
+    
+    Ok(MLBStandings {
+        season: year,
+        standings,
+    })
+}
+
+#[command]
 pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<SearchResult>, String> {
     let max = max_results.unwrap_or(5).min(10) as usize;
     let client = create_client()?;
     
-    let encoded_query = urlencoding::encode(&query);
+    println!("[web::search_web] Searching for: {}", query);
+    
+    // Try Brave Search API first (if API key is set)
+    if let Ok(api_key) = std::env::var("BRAVE_SEARCH_API_KEY") {
+        if !api_key.is_empty() {
+            println!("[web::search_web] Using Brave Search API...");
+            if let Ok(results) = search_brave_api(&client, &query, max, &api_key).await {
+                if !results.is_empty() {
+                    println!("[web::search_web] Brave API found {} results", results.len());
+                    return Ok(results);
+                }
+            }
+        }
+    }
+    
+    // Fallback to scraping (unreliable but free)
+    // Try Bing first
+    let mut results = search_bing(&client, &query, max).await.unwrap_or_default();
+    
+    // If no results, try DuckDuckGo
+    if results.is_empty() {
+        println!("[web::search_web] Bing returned no results, trying DuckDuckGo...");
+        results = search_duckduckgo(&client, &query, max).await.unwrap_or_default();
+    }
+    
+    // If still no results, try Google
+    if results.is_empty() {
+        println!("[web::search_web] DuckDuckGo returned no results, trying Google...");
+        results = search_google(&client, &query, max).await.unwrap_or_default();
+    }
+    
+    println!("[web::search_web] Found {} results total", results.len());
+    Ok(results)
+}
+
+async fn search_brave_api(client: &Client, query: &str, max: usize, api_key: &str) -> Result<Vec<SearchResult>, String> {
+    let encoded_query = urlencoding::encode(query);
     let search_url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
-        encoded_query
+        "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
+        encoded_query,
+        max
     );
     
-    println!("[web::search_web] Searching for: {}", query);
+    println!("[web::brave_api] Searching: {}", query);
     
     let response = client
         .get(&search_url)
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", api_key)
         .send()
         .await
-        .map_err(|e| format!("Search request failed: {}", e))?;
+        .map_err(|e| format!("Brave API request failed: {}", e))?;
     
     if !response.status().is_success() {
-        return Err(format!("Search failed with status: {}", response.status()));
+        let status = response.status();
+        println!("[web::brave_api] Failed with status: {}", status);
+        return Err(format!("Brave API failed with status: {}", status));
+    }
+    
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Brave API response: {}", e))?;
+    
+    let mut results = Vec::new();
+    
+    if let Some(web_results) = json.get("web").and_then(|w| w.get("results")).and_then(|r| r.as_array()) {
+        for result in web_results.iter().take(max) {
+            let title = result.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+            let url = result.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string();
+            let snippet = result.get("description").and_then(|d| d.as_str()).unwrap_or_default().to_string();
+            
+            if !title.is_empty() && !url.is_empty() {
+                results.push(SearchResult { title, url, snippet });
+            }
+        }
+    }
+    
+    println!("[web::brave_api] Found {} results", results.len());
+    Ok(results)
+}
+
+async fn search_bing(client: &Client, query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    let encoded_query = urlencoding::encode(query);
+    let search_url = format!(
+        "https://www.bing.com/search?q={}&count={}",
+        encoded_query,
+        max
+    );
+    
+    println!("[web::bing] Searching: {}", search_url);
+    
+    let response = client
+        .get(&search_url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5")
+        .header("Accept-Encoding", "gzip, deflate")
+        .header("DNT", "1")
+        .header("Connection", "keep-alive")
+        .header("Upgrade-Insecure-Requests", "1")
+        .send()
+        .await
+        .map_err(|e| format!("Bing request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        println!("[web::bing] Failed with status: {}", response.status());
+        return Err(format!("Bing failed with status: {}", response.status()));
     }
     
     let html = response
         .text()
         .await
-        .map_err(|e| format!("Failed to read search response: {}", e))?;
+        .map_err(|e| format!("Failed to read Bing response: {}", e))?;
+    
+    println!("[web::bing] Response length: {} bytes", html.len());
     
     let document = Html::parse_document(&html);
-    let result_selector = Selector::parse(".result").unwrap();
-    let title_selector = Selector::parse(".result__title a").unwrap();
-    let snippet_selector = Selector::parse(".result__snippet").unwrap();
-    
     let mut results = Vec::new();
+    
+    // Strategy 1: Bing organic results with .b_algo
+    if let Ok(result_selector) = Selector::parse("li.b_algo") {
+        let title_selector = Selector::parse("h2 a").ok();
+        let snippet_selector = Selector::parse(".b_caption p, .b_algoSlug").ok();
+        
+        for result in document.select(&result_selector).take(max) {
+            let (title, url) = title_selector.as_ref()
+                .and_then(|sel| result.select(sel).next())
+                .map(|el| {
+                    let t = el.text().collect::<String>().trim().to_string();
+                    let u = el.value().attr("href").unwrap_or_default().to_string();
+                    (t, u)
+                })
+                .unwrap_or_default();
+            
+            let snippet = snippet_selector.as_ref()
+                .and_then(|sel| result.select(sel).next())
+                .map(|el| el.text().collect::<String>())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            
+            if !title.is_empty() && !url.is_empty() && url.starts_with("http") {
+                results.push(SearchResult { title, url, snippet });
+            }
+        }
+    }
+    
+    // Strategy 2: Try alternative Bing selectors
+    if results.is_empty() {
+        println!("[web::bing] Standard selectors failed, trying alternatives...");
+        
+        // Try finding any links with titles that look like search results
+        if let Ok(link_selector) = Selector::parse("a[href^='http']") {
+            for link in document.select(&link_selector) {
+                let url = link.value().attr("href").unwrap_or_default().to_string();
+                let title = link.text().collect::<String>().trim().to_string();
+                
+                // Filter: must be external, have meaningful title, not Bing/Microsoft internal
+                if url.starts_with("http") 
+                    && !url.contains("bing.com")
+                    && !url.contains("microsoft.com")
+                    && !url.contains("go.microsoft")
+                    && !title.is_empty()
+                    && title.len() > 10
+                    && title.len() < 200
+                    && !results.iter().any(|r: &SearchResult| r.url == url)
+                {
+                    results.push(SearchResult {
+                        title,
+                        url,
+                        snippet: String::new(),
+                    });
+                    if results.len() >= max {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Debug: print sample of HTML if no results
+    if results.is_empty() {
+        // Check if it's a captcha or error page
+        let html_lower = html.to_lowercase();
+        if html_lower.contains("captcha") || html_lower.contains("unusual traffic") {
+            println!("[web::bing] BLOCKED: Captcha/bot detection triggered");
+        } else if html_lower.contains("b_algo") {
+            println!("[web::bing] HTML contains b_algo but selector failed");
+        } else {
+            println!("[web::bing] No b_algo found in HTML. Sample: {}...", 
+                &html.chars().skip(1000).take(500).collect::<String>());
+        }
+    }
+    
+    println!("[web::bing] Found {} results", results.len());
+    Ok(results)
+}
+
+async fn search_duckduckgo(client: &Client, query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    let encoded_query = urlencoding::encode(query);
+    
+    // Use the lite version which is more scraper-friendly
+    let search_url = format!(
+        "https://lite.duckduckgo.com/lite/?q={}",
+        encoded_query
+    );
+    
+    println!("[web::duckduckgo] Searching: {}", search_url);
+    
+    let response = client
+        .get(&search_url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5")
+        .header("DNT", "1")
+        .header("Connection", "keep-alive")
+        .header("Upgrade-Insecure-Requests", "1")
+        .send()
+        .await
+        .map_err(|e| format!("DuckDuckGo request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        println!("[web::duckduckgo] Failed with status: {}", response.status());
+        return Err(format!("DuckDuckGo failed with status: {}", response.status()));
+    }
+    
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read DuckDuckGo response: {}", e))?;
+    
+    // Debug: print first 500 chars of response
+    println!("[web::duckduckgo] Response preview: {}...", &html.chars().take(500).collect::<String>());
+    
+    let document = Html::parse_document(&html);
+    
+    // Try multiple selector strategies
+    let mut results = Vec::new();
+    
+    // Strategy 1: Lite version uses table rows
+    if let Ok(row_selector) = Selector::parse("table tr") {
+        if let Ok(link_selector) = Selector::parse("a.result-link") {
+            for row in document.select(&row_selector).take(max * 2) {
+                if let Some(link) = row.select(&link_selector).next() {
+                    let title = link.text().collect::<String>().trim().to_string();
+                    let url = link.value().attr("href").unwrap_or_default().to_string();
+                    
+                    if !title.is_empty() && !url.is_empty() && url.starts_with("http") {
+                        results.push(SearchResult { 
+                            title, 
+                            url, 
+                            snippet: String::new() 
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    // Strategy 2: Try the standard result class selectors
+    if results.is_empty() {
+        if let Ok(result_selector) = Selector::parse(".result, .web-result, .results_links") {
+            let title_selector = Selector::parse(".result__title a, .result__a, a.result-link").ok();
+            let snippet_selector = Selector::parse(".result__snippet, .result__body").ok();
+            
+            for result in document.select(&result_selector).take(max) {
+                let title = title_selector.as_ref()
+                    .and_then(|sel| result.select(sel).next())
+                    .map(|el| el.text().collect::<String>())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                
+                let url = title_selector.as_ref()
+                    .and_then(|sel| result.select(sel).next())
+                    .and_then(|el| el.value().attr("href"))
+                    .map(|href| {
+                        if href.contains("//duckduckgo.com/l/?uddg=") {
+                            urlencoding::decode(href.split("uddg=").nth(1).unwrap_or(href))
+                                .map(|s| s.split('&').next().unwrap_or(&s).to_string())
+                                .unwrap_or_else(|_| href.to_string())
+                        } else {
+                            href.to_string()
+                        }
+                    })
+                    .unwrap_or_default();
+                
+                let snippet = snippet_selector.as_ref()
+                    .and_then(|sel| result.select(sel).next())
+                    .map(|el| el.text().collect::<String>())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                
+                if !title.is_empty() && !url.is_empty() {
+                    results.push(SearchResult { title, url, snippet });
+                }
+            }
+        }
+    }
+    
+    // Strategy 3: Find all links that look like results
+    if results.is_empty() {
+        if let Ok(link_selector) = Selector::parse("a[href^='http']") {
+            for link in document.select(&link_selector).take(max * 3) {
+                let url = link.value().attr("href").unwrap_or_default().to_string();
+                let title = link.text().collect::<String>().trim().to_string();
+                
+                // Filter out DuckDuckGo internal links and empty titles
+                if !url.contains("duckduckgo.com") 
+                    && !url.contains("duck.co")
+                    && !title.is_empty() 
+                    && title.len() > 5 
+                    && url.starts_with("http")
+                {
+                    if !results.iter().any(|r: &SearchResult| r.url == url) {
+                        results.push(SearchResult { 
+                            title, 
+                            url, 
+                            snippet: String::new() 
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    // Limit results
+    results.truncate(max);
+    
+    println!("[web::duckduckgo] Found {} results", results.len());
+    Ok(results)
+}
+
+async fn search_google(client: &Client, query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+    let encoded_query = urlencoding::encode(query);
+    let search_url = format!(
+        "https://www.google.com/search?q={}&num={}",
+        encoded_query,
+        max
+    );
+    
+    println!("[web::google] Searching: {}", search_url);
+    
+    let response = client
+        .get(&search_url)
+        .send()
+        .await
+        .map_err(|e| format!("Google request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Google failed with status: {}", response.status()));
+    }
+    
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Google response: {}", e))?;
+    
+    let document = Html::parse_document(&html);
+    let mut results = Vec::new();
+    
+    // Google search results are in divs with class "g"
+    let result_selector = Selector::parse("div.g").unwrap();
+    let title_selector = Selector::parse("h3").unwrap();
+    let link_selector = Selector::parse("a").unwrap();
+    let snippet_selector = Selector::parse("div.VwiC3b, span.aCOpRe, div[data-sncf]").unwrap();
     
     for result in document.select(&result_selector).take(max) {
         let title = result
@@ -76,16 +550,17 @@ pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<S
             .to_string();
         
         let url = result
-            .select(&title_selector)
+            .select(&link_selector)
             .next()
             .and_then(|el| el.value().attr("href"))
             .map(|href| {
-                if href.starts_with("//duckduckgo.com/l/?uddg=") {
-                    urlencoding::decode(&href[25..])
-                        .map(|s| s.split('&').next().unwrap_or(&s).to_string())
-                        .unwrap_or_else(|_| href.to_string())
-                } else {
+                // Clean up Google redirect URLs
+                if href.starts_with("/url?q=") {
+                    href[7..].split('&').next().unwrap_or(href).to_string()
+                } else if href.starts_with("http") {
                     href.to_string()
+                } else {
+                    String::new()
                 }
             })
             .unwrap_or_default();
@@ -98,12 +573,42 @@ pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<S
             .trim()
             .to_string();
         
-        if !title.is_empty() && !url.is_empty() {
+        if !title.is_empty() && !url.is_empty() && url.starts_with("http") {
             results.push(SearchResult { title, url, snippet });
         }
     }
     
-    println!("[web::search_web] Found {} results", results.len());
+    // If the "g" selector didn't work, try alternative selectors
+    if results.is_empty() {
+        println!("[web::google] Standard selectors failed, trying alternatives...");
+        
+        // Try to find any links with titles
+        let link_selector = Selector::parse("a[href^='http']").unwrap();
+        for link in document.select(&link_selector).take(max * 2) {
+            let url = link.value().attr("href").unwrap_or_default().to_string();
+            
+            // Skip Google's own URLs
+            if url.contains("google.com") || url.contains("gstatic.com") {
+                continue;
+            }
+            
+            let title = link.text().collect::<String>().trim().to_string();
+            
+            if !title.is_empty() && title.len() > 10 && !url.is_empty() {
+                results.push(SearchResult { 
+                    title, 
+                    url, 
+                    snippet: String::new() 
+                });
+                
+                if results.len() >= max {
+                    break;
+                }
+            }
+        }
+    }
+    
+    println!("[web::google] Found {} results", results.len());
     Ok(results)
 }
 
