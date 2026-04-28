@@ -108,15 +108,55 @@ export interface Action {
   on_error: 'stop' | 'continue' | 'retry';
 }
 
+// Combine strategies for parallel action outputs
+export type CombineStrategy = 'array' | 'named' | 'merge_json' | 'first_success';
+
+// Stage represents a group of actions that run in parallel
+export interface WorkflowStage {
+  id: string;
+  name: string;
+  actions: Action[];  // Actions in this stage run in parallel
+  combineStrategy: CombineStrategy;
+  order: number;
+}
+
 export interface Agent {
   id: string;
   name: string;
   description?: string;
   trigger: TriggerType;
-  actions: Action[];
+  // New: stages-based workflow (actions within stage run in parallel, stages run sequentially)
+  stages: WorkflowStage[];
+  // Legacy: flat actions array (for backward compatibility - will be migrated to stages)
+  actions?: Action[];
   enabled: boolean;
   created_at: string;
   updated_at: string;
+}
+
+// Helper to migrate legacy actions to stages format
+export function migrateActionsToStages(actions: Action[]): WorkflowStage[] {
+  if (!actions || actions.length === 0) return [];
+  
+  // Wrap each action in its own stage (sequential behavior by default)
+  return actions.map((action, index) => ({
+    id: `stage-${action.id}`,
+    name: `Step ${index + 1}`,
+    actions: [action],
+    combineStrategy: 'first_success' as CombineStrategy,
+    order: index,
+  }));
+}
+
+// Helper to get stages from an agent (handles legacy format)
+export function getAgentStages(agent: Agent): WorkflowStage[] {
+  if (agent.stages && agent.stages.length > 0) {
+    return agent.stages;
+  }
+  if (agent.actions && agent.actions.length > 0) {
+    return migrateActionsToStages(agent.actions);
+  }
+  return [];
 }
 
 export interface ExecutionLog {

@@ -1014,9 +1014,15 @@ pub async fn fetch_url_rendered(url: String) -> Result<WebContent, String> {
         return Err("Only HTTP and HTTPS URLs are supported".to_string());
     }
     
-    // Use headless browser to render JavaScript
+    // Create a unique temp directory for this browser instance to allow parallel execution
+    let unique_id = uuid::Uuid::new_v4().to_string();
+    let user_data_dir = std::env::temp_dir().join(format!("chromiumoxide-{}", unique_id));
+    println!("[web::fetch_url_rendered] Using unique browser profile: {:?}", user_data_dir);
+    
+    // Use headless browser to render JavaScript with unique data dir for parallel support
     let config = BrowserConfig::builder()
         .no_sandbox()
+        .user_data_dir(&user_data_dir)
         .window_size(1920, 1080)
         .build()
         .map_err(|e| format!("Browser config error: {}", e))?;
@@ -1094,9 +1100,16 @@ pub async fn fetch_url_rendered(url: String) -> Result<WebContent, String> {
         .and_then(|r| r.into_value::<String>().ok())
         .unwrap_or_default();
     
-    // Clean up
+    // Clean up browser
     let _ = browser.close().await;
     handle.abort();
+    
+    // Clean up temp directory (non-blocking, ignore errors)
+    let cleanup_dir = user_data_dir.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&cleanup_dir);
+    });
     
     let truncated_content = if content.len() > MAX_CONTENT_LENGTH {
         format!("{}... [truncated]", &content[..MAX_CONTENT_LENGTH])

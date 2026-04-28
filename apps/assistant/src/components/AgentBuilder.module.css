@@ -249,18 +249,60 @@
 
 .actionFields {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .actionFields .input,
 .actionFields .textarea {
-  flex: 1;
-  min-width: 200px;
+  width: 100%;
 }
 
 .actionFields .select {
+  width: 100%;
+}
+
+.actionFieldRow {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.actionFieldRow .select {
   width: auto;
+  flex-shrink: 0;
+}
+
+.actionFieldRow .input,
+.actionFieldRow .textarea {
+  flex: 1;
+}
+
+.actionFieldGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.actionFieldGroup label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.validationError {
+  color: var(--accent-red);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.inputError {
+  border-color: var(--accent-red) !important;
+}
+
+.inputError:focus {
+  border-color: var(--accent-red) !important;
+  box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.2);
 }
 
 .footer {

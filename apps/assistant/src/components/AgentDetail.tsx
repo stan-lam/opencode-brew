@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Play, Edit, Trash2, Clock, FileText, Globe, Terminal, Loader2, CheckCircle, XCircle, History, Mail, MessageSquare } from 'lucide-react';
-import { useAssistantStore, ExecutionLog } from '../store/assistantStore';
+import { Play, Edit, Trash2, Clock, FileText, Globe, Terminal, Loader2, CheckCircle, XCircle, History, Mail, MessageSquare, Layers, Zap } from 'lucide-react';
+import { useAssistantStore, ExecutionLog, getAgentStages } from '../store/assistantStore';
 import styles from './AgentDetail.module.css';
 
 async function getInvoke() {
@@ -173,19 +173,40 @@ export function AgentDetail() {
         </section>
 
         <section className={styles.section}>
-          <h3>Actions ({agent.actions.length})</h3>
-          <div className={styles.actionsList}>
-            {agent.actions.map((action, index) => (
-              <div key={action.id} className={styles.actionCard}>
-                <div className={styles.actionNumber}>{index + 1}</div>
-                <div className={styles.actionIcon}>
-                  {getActionIcon(action.action_type.type)}
+          <h3>
+            <Layers size={18} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+            Workflow Stages ({getAgentStages(agent).length})
+          </h3>
+          <div className={styles.stagesList}>
+            {getAgentStages(agent).map((stage, stageIndex) => (
+              <div key={stage.id} className={styles.stageCard}>
+                <div className={styles.stageHeader}>
+                  <div className={styles.stageNumber}>{stageIndex + 1}</div>
+                  <span className={styles.stageName}>{stage.name}</span>
+                  {stage.actions.length > 1 && (
+                    <span className={styles.parallelBadge}>
+                      <Zap size={12} />
+                      {stage.actions.length} parallel
+                    </span>
+                  )}
                 </div>
-                <div className={styles.actionInfo}>
-                  <span className={styles.actionName}>{action.name}</span>
-                  <span className={styles.actionType}>{action.action_type.type}</span>
+                <div className={stage.actions.length > 1 ? styles.parallelActions : styles.sequentialActions}>
+                  {stage.actions.map((action, actionIndex) => (
+                    <div key={action.id} className={styles.actionCard}>
+                      <div className={styles.actionIcon}>
+                        {getActionIcon(action.action_type.type)}
+                      </div>
+                      <div className={styles.actionInfo}>
+                        <span className={styles.actionName}>{action.name}</span>
+                        <span className={styles.actionType}>{action.action_type.type.toUpperCase()}</span>
+                      </div>
+                      <span className={styles.onError}>{action.on_error}</span>
+                    </div>
+                  ))}
                 </div>
-                <span className={styles.onError}>{action.on_error}</span>
+                {stageIndex < getAgentStages(agent).length - 1 && (
+                  <div className={styles.stageConnector}>↓</div>
+                )}
               </div>
             ))}
           </div>

@@ -80,7 +80,7 @@ export function AgentList() {
                   {agent.trigger.type}
                 </span>
                 <span className={styles.actionCount}>
-                  {agent.actions.length} action{agent.actions.length !== 1 ? 's' : ''}
+                  {agent.actions?.length ?? agent.stages?.reduce((acc, s) => acc + s.actions.length, 0) ?? 0} action{(agent.actions?.length ?? 0) !== 1 ? 's' : ''}
                 </span>
               </div>
             </div>

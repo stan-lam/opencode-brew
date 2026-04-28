@@ -1,7 +1,85 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle, XCircle, Loader2, Clock, ChevronRight, RefreshCw } from 'lucide-react';
+import { CheckCircle, XCircle, Loader2, Clock, ChevronRight, RefreshCw, Layers, Zap } from 'lucide-react';
 import { useAssistantStore, ExecutionLog, ActionLog } from '../store/assistantStore';
 import styles from './ExecutionHistory.module.css';
+
+interface GroupedActions {
+  stageName: string;
+  stageIndex: number;
+  actions: ActionLog[];
+  isParallel: boolean;
+}
+
+// Group actions by stage based on output patterns
+function groupActionsByStage(actions: ActionLog[], output?: string | null): GroupedActions[] {
+  if (!output) {
+    // No output to parse, return each action as its own "stage"
+    return actions.map((action, idx) => ({
+      stageName: `Step ${idx + 1}`,
+      stageIndex: idx,
+      actions: [action],
+      isParallel: false,
+    }));
+  }
+  
+  // Parse stages from output (format: "=== Stage N: Name ===")
+  const stageMatches = output.matchAll(/=== Stage (\d+): (.+?) ===/g);
+  const stageInfo: { index: number; name: string }[] = [];
+  for (const match of stageMatches) {
+    stageInfo.push({ index: parseInt(match[1]) - 1, name: match[2] });
+  }
+  
+  if (stageInfo.length === 0) {
+    // No stage info found, return each action as its own stage
+    return actions.map((action, idx) => ({
+      stageName: `Step ${idx + 1}`,
+      stageIndex: idx,
+      actions: [action],
+      isParallel: false,
+    }));
+  }
+  
+  // Group actions by stage
+  const groups: GroupedActions[] = [];
+  let currentActionIdx = 0;
+  
+  for (const stage of stageInfo) {
+    // Count actions in this stage by looking at output
+    const stageOutputStart = output.indexOf(`=== Stage ${stage.index + 1}:`);
+    const nextStageStart = output.indexOf(`=== Stage ${stage.index + 2}:`);
+    const stageSection = nextStageStart > 0 
+      ? output.slice(stageOutputStart, nextStageStart)
+      : output.slice(stageOutputStart);
+    
+    // Count [action_name] patterns in this stage section
+    const actionMatches = stageSection.match(/\[([^\]]+)\] (Success|Error):/g) || [];
+    const actionsInStage = Math.max(1, actionMatches.length);
+    
+    const stageActions = actions.slice(currentActionIdx, currentActionIdx + actionsInStage);
+    if (stageActions.length > 0) {
+      groups.push({
+        stageName: stage.name,
+        stageIndex: stage.index,
+        actions: stageActions,
+        isParallel: stageActions.length > 1,
+      });
+    }
+    currentActionIdx += actionsInStage;
+  }
+  
+  // Add any remaining actions
+  if (currentActionIdx < actions.length) {
+    const remaining = actions.slice(currentActionIdx);
+    groups.push({
+      stageName: `Step ${groups.length + 1}`,
+      stageIndex: groups.length,
+      actions: remaining,
+      isParallel: remaining.length > 1,
+    });
+  }
+  
+  return groups;
+}
 
 async function getInvoke() {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -144,22 +222,41 @@ export function ExecutionHistory() {
             </div>
 
             <div className={styles.actionLogs}>
-              <h4>Actions</h4>
-              {executionDetails.actions.map((action) => (
-                <div key={`act-${action.id}`} className={`${styles.actionLog} ${styles[action.status]}`}>
-                  <div className={styles.actionLogHeader}>
-                    {getStatusIcon(action.status)}
-                    <span className={styles.actionName}>{action.action_name}</span>
-                    <span className={styles.actionDuration}>
-                      {formatDuration(action.started_at, action.finished_at)}
-                    </span>
+              <h4>
+                <Layers size={16} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+                Workflow Stages
+              </h4>
+              {groupActionsByStage(executionDetails.actions, executionDetails.execution.output).map((group) => (
+                <div key={`stage-${group.stageIndex}`} className={styles.stageGroup}>
+                  <div className={styles.stageGroupHeader}>
+                    <span className={styles.stageNumber}>{group.stageIndex + 1}</span>
+                    <span className={styles.stageName}>{group.stageName}</span>
+                    {group.isParallel && (
+                      <span className={styles.parallelBadge}>
+                        <Zap size={12} />
+                        {group.actions.length} parallel
+                      </span>
+                    )}
                   </div>
-                  {action.output && (
-                    <pre className={styles.output}>{action.output}</pre>
-                  )}
-                  {action.error && (
-                    <pre className={styles.error}>{action.error}</pre>
-                  )}
+                  <div className={group.isParallel ? styles.parallelActionsContainer : styles.sequentialActionsContainer}>
+                    {group.actions.map((action) => (
+                      <div key={`act-${action.id}`} className={`${styles.actionLog} ${styles[action.status]}`}>
+                        <div className={styles.actionLogHeader}>
+                          {getStatusIcon(action.status)}
+                          <span className={styles.actionName}>{action.action_name}</span>
+                          <span className={styles.actionDuration}>
+                            {formatDuration(action.started_at, action.finished_at)}
+                          </span>
+                        </div>
+                        {action.output && (
+                          <pre className={styles.output}>{action.output}</pre>
+                        )}
+                        {action.error && (
+                          <pre className={styles.error}>{action.error}</pre>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>

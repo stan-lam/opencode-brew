@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
-import { X, X as XIcon, Plus, Trash2, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
-import { useAssistantStore, Agent, Action, TriggerType, ActionType } from '../store/assistantStore';
+import { X, X as XIcon, Plus, Trash2, ChevronDown, ChevronRight, RefreshCw, Layers } from 'lucide-react';
+import { useAssistantStore, Agent, Action, TriggerType, ActionType, WorkflowStage, CombineStrategy, getAgentStages } from '../store/assistantStore';
+import { WorkflowStageEditor } from './WorkflowStageEditor';
 import styles from './AgentBuilder.module.css';
 
 async function getInvoke() {
@@ -137,7 +138,13 @@ export function AgentBuilder() {
     }
   }, [existingAgent?.trigger.expression, triggerType, cronToFrequency]);
 
-  const [actions, setActions] = useState<Action[]>(existingAgent?.actions || []);
+  // Use stages-based workflow (migrate from legacy actions if needed)
+  const [stages, setStages] = useState<WorkflowStage[]>(() => {
+    if (existingAgent) {
+      return getAgentStages(existingAgent);
+    }
+    return [];
+  });
 
   const handleClose = () => {
     if (isEditing) {
@@ -147,28 +154,150 @@ export function AgentBuilder() {
     }
   };
 
-  const handleAddAction = () => {
-    const newAction: Action = {
+  // Stage management
+  const handleAddStage = () => {
+    const newStage: WorkflowStage = {
       id: generateId(),
-      name: 'New Action',
-      action_type: { type: 'cli', command: '', args: [] },
-      order: actions.length,
-      on_error: 'stop',
+      name: `Stage ${stages.length + 1}`,
+      actions: [{
+        id: generateId(),
+        name: 'New Action',
+        action_type: { type: 'cli', command: '', args: [] },
+        order: 0,
+        on_error: 'continue',
+      }],
+      combineStrategy: 'first_success',
+      order: stages.length,
     };
-    setActions([...actions, newAction]);
+    setStages([...stages, newStage]);
+  };
+
+  const handleRemoveStage = (stageId: string) => {
+    setStages(stages.filter((s) => s.id !== stageId));
+  };
+
+  const handleUpdateStage = (stageId: string, updates: Partial<WorkflowStage>) => {
+    setStages(stages.map((s) => s.id === stageId ? { ...s, ...updates } : s));
+  };
+
+  const handleMoveStageUp = (stageIndex: number) => {
+    if (stageIndex === 0) return;
+    const newStages = [...stages];
+    [newStages[stageIndex - 1], newStages[stageIndex]] = [newStages[stageIndex], newStages[stageIndex - 1]];
+    newStages.forEach((s, i) => s.order = i);
+    setStages(newStages);
+  };
+
+  const handleMoveStageDown = (stageIndex: number) => {
+    if (stageIndex >= stages.length - 1) return;
+    const newStages = [...stages];
+    [newStages[stageIndex], newStages[stageIndex + 1]] = [newStages[stageIndex + 1], newStages[stageIndex]];
+    newStages.forEach((s, i) => s.order = i);
+    setStages(newStages);
+  };
+
+  // Legacy action handlers (for ActionEditor compatibility)
+  const handleAddAction = () => {
+    // Add a new stage with a single action
+    handleAddStage();
   };
 
   const handleRemoveAction = (id: string) => {
-    setActions(actions.filter((a) => a.id !== id));
+    // Find and remove action from its stage
+    setStages(stages.map((stage) => ({
+      ...stage,
+      actions: stage.actions.filter((a) => a.id !== id),
+    })).filter((stage) => stage.actions.length > 0));
   };
 
   const handleUpdateAction = (id: string, updates: Partial<Action>) => {
-    setActions(actions.map((a) => a.id === id ? { ...a, ...updates } : a));
+    setStages(stages.map((stage) => ({
+      ...stage,
+      actions: stage.actions.map((a) => a.id === id ? { ...a, ...updates } : a),
+    })));
+  };
+
+  // Validation helper for actions
+  const validateAction = (action: Action): string[] => {
+    const errors: string[] = [];
+    const at = action.action_type;
+    
+    switch (at.type) {
+      case 'cli':
+        if (!at.command?.trim()) errors.push(`"${action.name}": Command is required`);
+        break;
+      case 'api':
+        if (!at.url?.trim()) errors.push(`"${action.name}": URL is required`);
+        if (at.auth_type === 'basic') {
+          if (!at.auth_username?.trim()) errors.push(`"${action.name}": Username is required for Basic Auth`);
+          if (!at.auth_password?.trim()) errors.push(`"${action.name}": Password is required for Basic Auth`);
+        }
+        if (at.auth_type === 'bearer' && !at.auth_bearer_token?.trim()) {
+          errors.push(`"${action.name}": Bearer token is required`);
+        }
+        if (at.auth_type === 'api_key') {
+          if (!at.auth_api_key_name?.trim()) errors.push(`"${action.name}": API key header name is required`);
+          if (!at.auth_api_key_value?.trim()) errors.push(`"${action.name}": API key value is required`);
+        }
+        break;
+      case 'ai_prompt':
+        if (!at.prompt?.trim()) errors.push(`"${action.name}": Prompt is required`);
+        if (at.model_settings) {
+          if (at.model_settings.provider === 'openai' && !at.model_settings.openaiKey?.trim()) {
+            errors.push(`"${action.name}": OpenAI API key is required (or uncheck custom model settings to use global)`);
+          }
+          if (at.model_settings.provider === 'anthropic' && !at.model_settings.anthropicKey?.trim()) {
+            errors.push(`"${action.name}": Anthropic API key is required (or uncheck custom model settings to use global)`);
+          }
+          if (at.model_settings.provider === 'custom') {
+            if (!at.model_settings.customBaseUrl?.trim()) {
+              errors.push(`"${action.name}": Custom API base URL is required`);
+            }
+          }
+        }
+        break;
+      case 'save_file':
+        if (!at.path?.trim()) errors.push(`"${action.name}": File path is required`);
+        break;
+      case 'send_email':
+        if (!at.from?.trim()) errors.push(`"${action.name}": From email is required`);
+        if (!at.to?.trim()) errors.push(`"${action.name}": To email is required`);
+        if (!at.smtp_host?.trim()) errors.push(`"${action.name}": SMTP host is required`);
+        if (!at.password?.trim()) errors.push(`"${action.name}": SMTP password is required`);
+        break;
+      case 'send_slack':
+        if (!at.webhook_url?.trim()) errors.push(`"${action.name}": Slack webhook URL is required`);
+        if (!at.message?.trim()) errors.push(`"${action.name}": Message is required`);
+        break;
+      case 'send_discord':
+        if (!at.webhook_url?.trim()) errors.push(`"${action.name}": Discord webhook URL is required`);
+        if (!at.content?.trim()) errors.push(`"${action.name}": Content is required`);
+        break;
+      case 'mcp':
+        if (!at.server_id?.trim()) errors.push(`"${action.name}": MCP server ID is required`);
+        if (!at.tool_name?.trim()) errors.push(`"${action.name}": Tool name is required`);
+        break;
+    }
+    return errors;
   };
 
   const handleSave = async () => {
+    // Validate agent name
     if (!name.trim()) {
       alert('Please enter an agent name');
+      return;
+    }
+
+    // Validate all actions
+    const validationErrors: string[] = [];
+    stages.forEach((stage) => {
+      stage.actions.forEach((action) => {
+        validationErrors.push(...validateAction(action));
+      });
+    });
+
+    if (validationErrors.length > 0) {
+      alert(`Please fix the following issues:\n\n${validationErrors.join('\n')}`);
       return;
     }
 
@@ -185,13 +314,28 @@ export function AgentBuilder() {
     try {
       const invoke = await getInvoke();
       
+      // Flatten stages to actions for backward compatibility
+      const flatActions: Action[] = stages.flatMap((stage, stageIndex) =>
+        stage.actions.map((action, actionIndex) => ({
+          ...action,
+          order: stageIndex * 100 + actionIndex,
+        }))
+      );
+      
+      // Convert stages to backend format (camelCase to snake_case for combineStrategy)
+      const backendStages = stages.map(stage => ({
+        ...stage,
+        combine_strategy: stage.combineStrategy,
+      }));
+      
       if (isEditing && existingAgent) {
         await invoke('update_agent', {
           id: existingAgent.id,
           name,
           description: description || null,
           trigger,
-          actions,
+          actions: flatActions,
+          stages: backendStages,
           enabled: existingAgent.enabled,
         });
         updateAgentInStore({
@@ -199,7 +343,8 @@ export function AgentBuilder() {
           name,
           description: description || undefined,
           trigger,
-          actions,
+          stages,
+          actions: flatActions,
           updated_at: new Date().toISOString(),
         });
         setIsEditing(false);
@@ -208,9 +353,11 @@ export function AgentBuilder() {
           name,
           description: description || null,
           trigger,
-          actions,
+          actions: flatActions,
+          stages: backendStages,
         }) as Agent;
-        addAgent(newAgent);
+        // Add stages to the returned agent for proper state management
+        addAgent({ ...newAgent, stages });
         setIsCreating(false);
       }
     } catch (error) {
@@ -547,25 +694,50 @@ export function AgentBuilder() {
 
         <div className={styles.actionsSection}>
           <div className={styles.actionsHeader}>
-            <label>Actions</label>
-            <button onClick={handleAddAction} className={styles.addActionBtn}>
+            <label>
+              <Layers size={16} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+              Workflow Stages
+            </label>
+            <button onClick={handleAddStage} className={styles.addActionBtn}>
               <Plus size={16} />
-              Add Action
+              Add Stage
             </button>
           </div>
 
-          {actions.map((action, index) => (
-            <ActionEditor
-              key={action.id}
-              action={action}
-              index={index}
-              onUpdate={(updates) => handleUpdateAction(action.id, updates)}
-              onRemove={() => handleRemoveAction(action.id)}
+          <p className={styles.hint} style={{ marginBottom: '16px' }}>
+            Stages run sequentially. Actions within a stage run in parallel.
+          </p>
+
+          {stages.map((stage, index) => (
+            <WorkflowStageEditor
+              key={stage.id}
+              stage={stage}
+              stageIndex={index}
+              onUpdate={(updates) => handleUpdateStage(stage.id, updates)}
+              onRemove={() => handleRemoveStage(stage.id)}
+              onMoveUp={() => handleMoveStageUp(index)}
+              onMoveDown={() => handleMoveStageDown(index)}
+              canMoveUp={index > 0}
+              canMoveDown={index < stages.length - 1}
+              renderActionEditor={(action, actionIndex, onUpdate, onRemove) => (
+                <ActionEditor
+                  action={action}
+                  index={actionIndex}
+                  onUpdate={onUpdate}
+                  onRemove={onRemove}
+                />
+              )}
             />
           ))}
 
-          {actions.length === 0 && (
-            <p className={styles.noActions}>No actions added yet</p>
+          {stages.length === 0 && (
+            <div className={styles.noActions}>
+              <p>No workflow stages added yet</p>
+              <button onClick={handleAddStage} className={styles.addActionBtn} style={{ marginTop: '12px' }}>
+                <Plus size={16} />
+                Add Your First Stage
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -692,42 +864,50 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
         </select>
 
         {action.action_type.type === 'cli' && (
-          <input
-            type="text"
-            value={action.action_type.command || ''}
-            onChange={(e) => onUpdate({
-              action_type: { ...action.action_type, command: e.target.value }
-            })}
-            placeholder="Command (e.g., npm run build)"
-            className={styles.input}
-          />
+          <div className={styles.actionFieldGroup}>
+            <label>Command <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+            <input
+              type="text"
+              value={action.action_type.command || ''}
+              onChange={(e) => onUpdate({
+                action_type: { ...action.action_type, command: e.target.value }
+              })}
+              placeholder="e.g., npm run build"
+              className={`${styles.input} ${!action.action_type.command?.trim() ? styles.inputError : ''}`}
+            />
+          </div>
         )}
 
         {action.action_type.type === 'api' && (
           <>
-            <select
-              value={action.action_type.method || 'GET'}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, method: e.target.value }
-              })}
-              className={styles.select}
-              style={{ width: '100px' }}
-            >
-              <option value="GET">GET</option>
-              <option value="POST">POST</option>
-              <option value="PUT">PUT</option>
-              <option value="DELETE">DELETE</option>
-              <option value="PATCH">PATCH</option>
-            </select>
-            <input
-              type="url"
-              value={action.action_type.url || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, url: e.target.value }
-              })}
-              placeholder="https://api.example.com/endpoint"
-              className={styles.input}
-            />
+            <div className={styles.actionFieldGroup}>
+              <label>URL <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <div className={styles.actionFieldRow}>
+                <select
+                  value={action.action_type.method || 'GET'}
+                  onChange={(e) => onUpdate({
+                    action_type: { ...action.action_type, method: e.target.value }
+                  })}
+                  className={styles.select}
+                  style={{ width: '100px' }}
+                >
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="DELETE">DELETE</option>
+                  <option value="PATCH">PATCH</option>
+                </select>
+                <input
+                  type="url"
+                  value={action.action_type.url || ''}
+                  onChange={(e) => onUpdate({
+                    action_type: { ...action.action_type, url: e.target.value }
+                  })}
+                  placeholder="https://api.example.com/endpoint"
+                  className={`${styles.input} ${!action.action_type.url?.trim() ? styles.inputError : ''}`}
+                />
+              </div>
+            </div>
 
             <button
               className={styles.advancedToggle}
@@ -995,32 +1175,38 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
             )}
 
             {/* Request Body */}
-            <textarea
-              value={action.action_type.body || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, body: e.target.value }
-              })}
-              placeholder={`Request body (use {{previous_output}} for variables)...`}
-              className={styles.textarea}
-              rows={4}
-              style={{ fontSize: '13px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre', overflowX: 'auto' }}
-            />
-            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}. Supports JSON, form data, or plain text.</p>
+            <div className={styles.actionFieldGroup}>
+              <label>Request Body</label>
+              <textarea
+                value={action.action_type.body || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, body: e.target.value }
+                })}
+                placeholder={`Request body (use {{previous_output}} for variables)...`}
+                className={styles.textarea}
+                rows={4}
+                style={{ fontSize: '13px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre', overflowX: 'auto' }}
+              />
+              <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}. Supports JSON, form data, or plain text.</p>
+            </div>
           </>
         )}
 
         {action.action_type.type === 'ai_prompt' && (
           <>
-            <textarea
-              value={action.action_type.prompt || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, prompt: e.target.value }
-              })}
-              placeholder="Enter your prompt... (use {{previous_output}} to include previous action's result)"
-              className={styles.textarea}
-              rows={2}
-            />
-            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}, {'{{time}}'}</p>
+            <div className={styles.actionFieldGroup}>
+              <label>Prompt <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <textarea
+                value={action.action_type.prompt || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, prompt: e.target.value }
+                })}
+                placeholder="Enter your prompt... (use {{previous_output}} to include previous action's result)"
+                className={`${styles.textarea} ${!action.action_type.prompt?.trim() ? styles.inputError : ''}`}
+                rows={3}
+              />
+              <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}, {'{{time}}'}</p>
+            </div>
             
             <button 
               className={styles.advancedToggle}
@@ -1346,24 +1532,31 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
 
         {action.action_type.type === 'save_file' && (
           <>
-            <input
-              type="text"
-              value={(action.action_type as any).path || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, path: e.target.value }
-              })}
-              placeholder="File path (e.g., ~/Documents/output.txt)"
-              className={styles.input}
-            />
-            <textarea
-              value={(action.action_type as any).content || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, content: e.target.value }
-              })}
-              placeholder="Content to save (use {{previous_output}} to save previous action's result)"
-              className={styles.textarea}
-              rows={2}
-            />
+            <div className={styles.actionFieldGroup}>
+              <label>File Path <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <input
+                type="text"
+                value={(action.action_type as any).path || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, path: e.target.value }
+                })}
+                placeholder="e.g., ~/Documents/output.txt"
+                className={`${styles.input} ${!(action.action_type as any).path?.trim() ? styles.inputError : ''}`}
+              />
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Content</label>
+              <textarea
+                value={(action.action_type as any).content || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, content: e.target.value }
+                })}
+                placeholder="Content to save (use {{previous_output}} to save previous action's result)"
+                className={styles.textarea}
+                rows={2}
+              />
+              <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}, {'{{datetime}}'}</p>
+            </div>
             <label className={styles.checkboxLabel}>
               <input
                 type="checkbox"
@@ -1374,7 +1567,6 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
               />
               Append to file (instead of overwrite)
             </label>
-            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}, {'{{datetime}}'}</p>
           </>
         )}
 
@@ -1460,85 +1652,109 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
 
         {action.action_type.type === 'send_slack' && (
           <>
-            <input
-              type="url"
-              value={(action.action_type as any).webhook_url || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, webhook_url: e.target.value }
-              })}
-              placeholder="Slack Webhook URL (https://hooks.slack.com/...)"
-              className={styles.input}
-            />
-            <input
-              type="text"
-              value={(action.action_type as any).channel || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, channel: e.target.value }
-              })}
-              placeholder="Channel (e.g., #general or @user)"
-              className={styles.input}
-            />
-            <textarea
-              value={(action.action_type as any).message || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, message: e.target.value }
-              })}
-              placeholder="Message (use {{previous_output}} to include previous action's result)"
-              className={styles.textarea}
-              rows={3}
-            />
-            <input
-              type="text"
-              value={(action.action_type as any).username || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, username: e.target.value }
-              })}
-              placeholder="Bot username (optional)"
-              className={styles.input}
-            />
-            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
+            <div className={styles.actionFieldGroup}>
+              <label>Webhook URL <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <input
+                type="url"
+                value={(action.action_type as any).webhook_url || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, webhook_url: e.target.value }
+                })}
+                placeholder="https://hooks.slack.com/..."
+                className={`${styles.input} ${!(action.action_type as any).webhook_url?.trim() ? styles.inputError : ''}`}
+              />
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Channel</label>
+              <input
+                type="text"
+                value={(action.action_type as any).channel || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, channel: e.target.value }
+                })}
+                placeholder="#general or @user"
+                className={styles.input}
+              />
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Message <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <textarea
+                value={(action.action_type as any).message || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, message: e.target.value }
+                })}
+                placeholder="Message (use {{previous_output}} to include previous action's result)"
+                className={`${styles.textarea} ${!(action.action_type as any).message?.trim() ? styles.inputError : ''}`}
+                rows={3}
+              />
+              <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Bot Username</label>
+              <input
+                type="text"
+                value={(action.action_type as any).username || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, username: e.target.value }
+                })}
+                placeholder="Optional"
+                className={styles.input}
+              />
+            </div>
           </>
         )}
 
         {action.action_type.type === 'send_discord' && (
           <>
-            <input
-              type="url"
-              value={(action.action_type as any).webhook_url || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, webhook_url: e.target.value }
-              })}
-              placeholder="Discord Webhook URL (https://discord.com/api/webhooks/...)"
-              className={styles.input}
-            />
-            <textarea
-              value={(action.action_type as any).content || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, content: e.target.value }
-              })}
-              placeholder="Message content (use {{previous_output}} to include previous action's result)"
-              className={styles.textarea}
-              rows={3}
-            />
-            <input
-              type="text"
-              value={(action.action_type as any).username || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, username: e.target.value }
-              })}
-              placeholder="Bot username (optional)"
-              className={styles.input}
-            />
-            <input
-              type="url"
-              value={(action.action_type as any).avatar_url || ''}
-              onChange={(e) => onUpdate({
-                action_type: { ...action.action_type, avatar_url: e.target.value }
-              })}
-              placeholder="Avatar URL (optional)"
-              className={styles.input}
-            />
-            <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
+            <div className={styles.actionFieldGroup}>
+              <label>Webhook URL <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <input
+                type="url"
+                value={(action.action_type as any).webhook_url || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, webhook_url: e.target.value }
+                })}
+                placeholder="https://discord.com/api/webhooks/..."
+                className={`${styles.input} ${!(action.action_type as any).webhook_url?.trim() ? styles.inputError : ''}`}
+              />
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Content <span style={{ color: 'var(--accent-red)' }}>*</span></label>
+              <textarea
+                value={(action.action_type as any).content || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, content: e.target.value }
+                })}
+                placeholder="Message content (use {{previous_output}} to include previous action's result)"
+                className={`${styles.textarea} ${!(action.action_type as any).content?.trim() ? styles.inputError : ''}`}
+                rows={3}
+              />
+              <p className={styles.hint}>Variables: {'{{previous_output}}'}, {'{{output_1}}'}, {'{{date}}'}</p>
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Bot Username</label>
+              <input
+                type="text"
+                value={(action.action_type as any).username || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, username: e.target.value }
+                })}
+                placeholder="Optional"
+                className={styles.input}
+              />
+            </div>
+            <div className={styles.actionFieldGroup}>
+              <label>Avatar URL</label>
+              <input
+                type="url"
+                value={(action.action_type as any).avatar_url || ''}
+                onChange={(e) => onUpdate({
+                  action_type: { ...action.action_type, avatar_url: e.target.value }
+                })}
+                placeholder="Optional"
+                className={styles.input}
+              />
+            </div>
           </>
         )}
 

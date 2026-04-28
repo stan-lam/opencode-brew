@@ -1,46 +1,57 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Manager};
-use tokio::sync::Mutex;
 use chrono::Utc;
 use uuid::Uuid;
+use regex::Regex;
+
+use crate::commands::web;
 
 // ============= Default AI System Prompt (with web access capabilities) =============
 
-const DEFAULT_AI_SYSTEM_PROMPT: &str = r#"You are a helpful AI assistant with access to web tools. You MUST use these tools for ANY question about:
-- **Stock prices, market data, cryptocurrency prices** - These change constantly, NEVER guess or make up numbers
-- **Current events, recent news, or anything time-sensitive**
-- **Weather, sports scores, or live data**
+// Dynamic system prompt with current date - similar to Notes
+fn get_ai_system_prompt() -> String {
+    let now = chrono::Local::now();
+    let today = now.format("%A, %B %d, %Y").to_string();
+    let short_date = now.format("%b %d, %Y").to_string();
+    
+    format!(
+r#"You are a helpful AI assistant with web access and real-time data capabilities.
 
-### Available Tools (use XML tags):
+CURRENT DATE: {today}
 
-**Search the web:**
-<search_web query="your search query" />
+AVAILABLE TOOLS (use XML tags directly):
 
-**Fetch content from a URL:**
+Search the web:
+<search_web query="topic keywords {short_date}" />
+
+Fetch content from a URL:
 <fetch_url url="https://example.com/page" />
 
-**Get a stock quote:**
+Get a stock quote:
 <get_stock_quote symbol="TICKER" />
 
-**Get market movers (gainers/losers/active):**
+Get market movers:
 <get_market_movers />
 
-### STOCK QUERIES - ALWAYS USE THE CORRECT TOOL:
-- For a specific stock price (AMD, AAPL, etc.): <get_stock_quote symbol="TICKER" />
-- For top gainers/losers: <get_market_movers />
-- For stock news: <search_web query="TICKER news" />
+TOOL USAGE STRATEGY:
+1. Search first with keywords + date to find relevant pages
+2. Fetch the best URL from search results to get actual data
+3. For rankings, ESPN and official sites have the best data
 
-### CRITICAL RULES:
-1. NEVER just tell the user to "check these links" - FETCH the data and present the actual numbers
-2. NEVER make up stock prices or financial data
-3. ALWAYS use the stock quote tool for specific tickers
-4. ALWAYS present data in a clear table format
-5. NEVER say you don't have access to live data - you DO have tools for it
-6. NEVER give generic advice about checking financial websites yourself"#;
+CRITICAL RULES:
+1. ALWAYS use search_web first, then fetch_url to get actual data
+2. NEVER make up data - use tools to get real information
+3. Present data in clear table format with actual values
+4. If search results only show links, use fetch_url on the most relevant URL
+5. Be concise and direct"#,
+        today = today,
+        short_date = short_date
+    )
+}
+
 
 // ============= Data Types =============
 
@@ -148,15 +159,67 @@ pub struct Action {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CombineStrategy {
+    Array,
+    Named,
+    MergeJson,
+    FirstSuccess,
+}
+
+impl Default for CombineStrategy {
+    fn default() -> Self {
+        CombineStrategy::FirstSuccess
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStage {
+    pub id: String,
+    pub name: String,
+    pub actions: Vec<Action>,
+    pub combine_strategy: CombineStrategy,
+    pub order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
     pub trigger: TriggerType,
+    // New: stage-based workflow (actions within stage run in parallel, stages run sequentially)
+    #[serde(default)]
+    pub stages: Vec<WorkflowStage>,
+    // Legacy: flat actions array (for backward compatibility)
+    #[serde(default)]
     pub actions: Vec<Action>,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl Agent {
+    // Get effective stages - handles migration from legacy actions format
+    pub fn get_stages(&self) -> Vec<WorkflowStage> {
+        if !self.stages.is_empty() {
+            return self.stages.clone();
+        }
+        
+        // Migrate legacy actions: wrap each action in its own stage for sequential execution
+        self.actions
+            .iter()
+            .enumerate()
+            .map(|(idx, action)| WorkflowStage {
+                id: format!("stage-{}", action.id),
+                name: format!("Step {}", idx + 1),
+                actions: vec![action.clone()],
+                combine_strategy: CombineStrategy::FirstSuccess,
+                order: idx as i32,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,12 +336,21 @@ pub async fn list_agents(app: AppHandle) -> Result<Vec<Agent>, String> {
             let trigger_json: String = row.get(3)?;
             let actions_json: String = row.get(4)?;
             
+            // Try to parse stages first, fall back to actions for legacy data
+            let stages: Vec<WorkflowStage> = serde_json::from_str(&actions_json).unwrap_or_default();
+            let actions: Vec<Action> = if stages.is_empty() {
+                serde_json::from_str(&actions_json).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            
             Ok(Agent {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 description: row.get(2)?,
                 trigger: serde_json::from_str(&trigger_json).unwrap_or(TriggerType::Manual),
-                actions: serde_json::from_str(&actions_json).unwrap_or_default(),
+                stages,
+                actions,
                 enabled: row.get::<_, i32>(5)? != 0,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
@@ -298,13 +370,52 @@ pub async fn create_agent(
     description: Option<String>,
     trigger: TriggerType,
     actions: Vec<Action>,
+    stages: Option<Vec<WorkflowStage>>,
 ) -> Result<Agent, String> {
     let conn = get_connection(&app).await?;
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     
     let trigger_json = serde_json::to_string(&trigger).map_err(|e| e.to_string())?;
-    let actions_json = serde_json::to_string(&actions).map_err(|e| e.to_string())?;
+    
+    // If stages are provided, store them; otherwise store flat actions for backward compatibility
+    let (final_stages, actions_json) = if let Some(ref s) = stages {
+        if !s.is_empty() {
+            // Store stages directly
+            let stages_json = serde_json::to_string(s).map_err(|e| e.to_string())?;
+            (s.clone(), stages_json)
+        } else {
+            // Empty stages, use actions
+            let actions_json = serde_json::to_string(&actions).map_err(|e| e.to_string())?;
+            let migrated_stages = actions
+                .iter()
+                .enumerate()
+                .map(|(idx, action)| WorkflowStage {
+                    id: format!("stage-{}", action.id),
+                    name: format!("Step {}", idx + 1),
+                    actions: vec![action.clone()],
+                    combine_strategy: CombineStrategy::FirstSuccess,
+                    order: idx as i32,
+                })
+                .collect();
+            (migrated_stages, actions_json)
+        }
+    } else {
+        // No stages provided, migrate from actions
+        let actions_json = serde_json::to_string(&actions).map_err(|e| e.to_string())?;
+        let migrated_stages = actions
+            .iter()
+            .enumerate()
+            .map(|(idx, action)| WorkflowStage {
+                id: format!("stage-{}", action.id),
+                name: format!("Step {}", idx + 1),
+                actions: vec![action.clone()],
+                combine_strategy: CombineStrategy::FirstSuccess,
+                order: idx as i32,
+            })
+            .collect();
+        (migrated_stages, actions_json)
+    };
     
     conn.execute(
         "INSERT INTO agents (id, name, description, trigger_json, actions_json, enabled, created_at, updated_at) 
@@ -318,6 +429,7 @@ pub async fn create_agent(
         name,
         description,
         trigger,
+        stages: final_stages,
         actions,
         enabled: true,
         created_at: now.clone(),
@@ -333,13 +445,24 @@ pub async fn update_agent(
     description: Option<String>,
     trigger: TriggerType,
     actions: Vec<Action>,
+    stages: Option<Vec<WorkflowStage>>,
     enabled: bool,
 ) -> Result<(), String> {
     let conn = get_connection(&app).await?;
     let now = Utc::now().to_rfc3339();
     
     let trigger_json = serde_json::to_string(&trigger).map_err(|e| e.to_string())?;
-    let actions_json = serde_json::to_string(&actions).map_err(|e| e.to_string())?;
+    
+    // If stages are provided, store them; otherwise store flat actions
+    let actions_json = if let Some(ref s) = stages {
+        if !s.is_empty() {
+            serde_json::to_string(s).map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_string(&actions).map_err(|e| e.to_string())?
+        }
+    } else {
+        serde_json::to_string(&actions).map_err(|e| e.to_string())?
+    };
     
     conn.execute(
         "UPDATE agents SET name = ?1, description = ?2, trigger_json = ?3, actions_json = ?4, enabled = ?5, updated_at = ?6 WHERE id = ?7",
@@ -391,12 +514,21 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
                 let trigger_json: String = row.get(3)?;
                 let actions_json: String = row.get(4)?;
                 
+                // Try to parse stages first, fall back to actions for legacy data
+                let stages: Vec<WorkflowStage> = serde_json::from_str(&actions_json).unwrap_or_default();
+                let actions: Vec<Action> = if stages.is_empty() {
+                    serde_json::from_str(&actions_json).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                
                 Ok(Agent {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
                     trigger: serde_json::from_str(&trigger_json).unwrap_or(TriggerType::Manual),
-                    actions: serde_json::from_str(&actions_json).unwrap_or_default(),
+                    stages,
+                    actions,
                     enabled: row.get::<_, i32>(5)? != 0,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
@@ -425,57 +557,111 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
     let mut has_error = false;
     let mut error_msg = None;
     
-    // Context for variable substitution between actions
+    // Context for variable substitution between stages/actions
     let mut context: HashMap<String, String> = HashMap::new();
     let mut previous_output = String::new();
     
-    // Execute each action
-    for (index, action) in agent.actions.iter().enumerate() {
-        let action_id = Uuid::new_v4().to_string();
-        let action_started = Utc::now().to_rfc3339();
+    // Get effective stages (handles migration from legacy actions format)
+    let stages = agent.get_stages();
+    
+    // Execute stages sequentially
+    for (stage_index, stage) in stages.iter().enumerate() {
+        output_parts.push(format!("=== Stage {}: {} ===", stage_index + 1, stage.name));
         
-        conn.execute(
-            "INSERT INTO action_logs (id, execution_id, action_id, action_name, started_at, status) VALUES (?1, ?2, ?3, ?4, ?5, 'running')",
-            params![&action_id, &execution_id, &action.id, &action.name, &action_started],
-        )
-        .map_err(|e| e.to_string())?;
-        
-        // Substitute variables in action before execution
-        let substituted_action = substitute_variables(&action.action_type, &context, &previous_output);
-        let result = execute_action(&app, &substituted_action).await;
-        
-        let action_finished = Utc::now().to_rfc3339();
-        
-        match result {
-            Ok(output) => {
-                output_parts.push(format!("[{}] Success: {}", action.name, output));
+        // Execute all actions within the stage in parallel
+        let action_futures: Vec<_> = stage.actions.iter().map(|action| {
+            let app_clone = app.clone();
+            let context_clone = context.clone();
+            let previous_output_clone = previous_output.clone();
+            let action_clone = action.clone();
+            let execution_id_clone = execution_id.clone();
+            
+            async move {
+                let action_log_id = Uuid::new_v4().to_string();
+                let action_started = Utc::now().to_rfc3339();
                 
-                // Store output for variable substitution in subsequent actions
-                previous_output = output.clone();
-                context.insert(format!("output_{}", index + 1), output.clone());
-                context.insert(action.name.clone(), output.clone());
+                // Insert action log entry
+                if let Ok(conn) = get_connection(&app_clone).await {
+                    let _ = conn.execute(
+                        "INSERT INTO action_logs (id, execution_id, action_id, action_name, started_at, status) VALUES (?1, ?2, ?3, ?4, ?5, 'running')",
+                        params![&action_log_id, &execution_id_clone, &action_clone.id, &action_clone.name, &action_started],
+                    );
+                }
                 
-                conn.execute(
-                    "UPDATE action_logs SET finished_at = ?1, status = 'success', output = ?2 WHERE id = ?3",
-                    params![&action_finished, &output, &action_id],
-                )
-                .map_err(|e| e.to_string())?;
+                // Substitute variables in action before execution
+                let substituted_action = substitute_variables(&action_clone.action_type, &context_clone, &previous_output_clone);
+                let result = execute_action(&app_clone, &substituted_action).await;
+                
+                let action_finished = Utc::now().to_rfc3339();
+                
+                // Update action log with result
+                if let Ok(conn) = get_connection(&app_clone).await {
+                    match &result {
+                        Ok(output) => {
+                            let _ = conn.execute(
+                                "UPDATE action_logs SET finished_at = ?1, status = 'success', output = ?2 WHERE id = ?3",
+                                params![&action_finished, &output, &action_log_id],
+                            );
+                        }
+                        Err(err) => {
+                            let _ = conn.execute(
+                                "UPDATE action_logs SET finished_at = ?1, status = 'failed', error = ?2 WHERE id = ?3",
+                                params![&action_finished, &err, &action_log_id],
+                            );
+                        }
+                    }
+                }
+                
+                (action_clone.name.clone(), result)
             }
-            Err(err) => {
-                output_parts.push(format!("[{}] Error: {}", action.name, err));
-                has_error = true;
-                error_msg = Some(err.clone());
-                
-                conn.execute(
-                    "UPDATE action_logs SET finished_at = ?1, status = 'failed', error = ?2 WHERE id = ?3",
-                    params![&action_finished, &err, &action_id],
-                )
-                .map_err(|e| e.to_string())?;
-                
-                if action.on_error == "stop" {
-                    break;
+        }).collect();
+        
+        // Wait for all actions in this stage to complete in parallel
+        let results = futures::future::join_all(action_futures).await;
+        
+        // Process results and combine based on strategy
+        let mut stage_outputs: Vec<(String, String)> = Vec::new();
+        let mut stage_has_error = false;
+        let mut should_stop = false;
+        
+        for (action_name, result) in &results {
+            match result {
+                Ok(output) => {
+                    output_parts.push(format!("  [{}] Success: {}", action_name, output));
+                    stage_outputs.push((action_name.clone(), output.clone()));
+                    
+                    // Store individual action output
+                    context.insert(format!("{}_output", action_name), output.clone());
+                }
+                Err(err) => {
+                    output_parts.push(format!("  [{}] Error: {}", action_name, err));
+                    stage_has_error = true;
+                    has_error = true;
+                    error_msg = Some(err.clone());
+                    
+                    // Check if any action in this stage has on_error = "stop"
+                    for action in &stage.actions {
+                        if action.name == *action_name && action.on_error == "stop" {
+                            should_stop = true;
+                            break;
+                        }
+                    }
                 }
             }
+        }
+        
+        // Combine stage outputs based on combine strategy
+        let combined_output = combine_stage_outputs(&stage.combine_strategy, &stage_outputs, &results);
+        
+        // Update context with stage output
+        context.insert(format!("stage_{}_output", stage_index + 1), combined_output.clone());
+        context.insert(format!("{}_output", stage.name), combined_output.clone());
+        previous_output = combined_output;
+        
+        // Stop execution if any action with on_error="stop" failed
+        if should_stop {
+            output_parts.push(format!("  Stopping workflow due to error in stage {}", stage.name));
+            break;
         }
     }
     
@@ -637,7 +823,7 @@ async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<Str
             execute_mcp_tool(app, server_id, tool_name, arguments).await
         }
         ActionType::AiPrompt { prompt, system_prompt, model_settings } => {
-            execute_ai_prompt(app, prompt, system_prompt.as_deref(), model_settings.as_ref()).await
+            execute_ai_prompt_with_tools(app, prompt, system_prompt.as_deref(), model_settings.as_ref()).await
         }
         ActionType::SaveFile { path, content, append } => {
             execute_save_file(path, content, append.unwrap_or(false)).await
@@ -650,6 +836,48 @@ async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<Str
         }
         ActionType::SendDiscord { webhook_url, content, username, avatar_url } => {
             execute_send_discord(webhook_url, content, username.as_deref(), avatar_url.as_deref()).await
+        }
+    }
+}
+
+// Combine outputs from parallel actions within a stage based on the combine strategy
+fn combine_stage_outputs(
+    strategy: &CombineStrategy,
+    successful_outputs: &[(String, String)],
+    all_results: &[(String, Result<String, String>)],
+) -> String {
+    match strategy {
+        CombineStrategy::Array => {
+            // All successful outputs as JSON array
+            let outputs: Vec<&str> = successful_outputs.iter().map(|(_, o)| o.as_str()).collect();
+            serde_json::to_string(&outputs).unwrap_or_else(|_| "[]".to_string())
+        }
+        CombineStrategy::Named => {
+            // Each action's output as named JSON object
+            let map: HashMap<&str, &str> = successful_outputs
+                .iter()
+                .map(|(name, output)| (name.as_str(), output.as_str()))
+                .collect();
+            serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+        }
+        CombineStrategy::MergeJson => {
+            // Merge all JSON outputs into one object
+            let mut merged: HashMap<String, serde_json::Value> = HashMap::new();
+            for (_, output) in successful_outputs {
+                if let Ok(obj) = serde_json::from_str::<HashMap<String, serde_json::Value>>(output) {
+                    merged.extend(obj);
+                }
+            }
+            serde_json::to_string(&merged).unwrap_or_else(|_| "{}".to_string())
+        }
+        CombineStrategy::FirstSuccess => {
+            // Use first successful result
+            for (_, result) in all_results {
+                if let Ok(output) = result {
+                    return output.clone();
+                }
+            }
+            String::new()
         }
     }
 }
@@ -933,15 +1161,16 @@ async fn execute_ai_prompt(
             };
             println!("[scheduler] Using Ollama base URL: {}", base_url);
 
-            // Build the effective system prompt (always include web access capabilities)
+            // Build the effective system prompt (always include web access capabilities with current date)
+            let base_sys_prompt = get_ai_system_prompt();
             let effective_sys = if let Some(sys) = system_prompt {
                 if !sys.trim().is_empty() {
-                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                    format!("{}\n\n---\n\n{}", sys, base_sys_prompt)
                 } else {
-                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                    base_sys_prompt
                 }
             } else {
-                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                base_sys_prompt
             };
 
             // Combine system prompt with user prompt for generate API
@@ -986,10 +1215,46 @@ async fn execute_ai_prompt(
             let json: serde_json::Value = response.json().await
                 .map_err(|e| format!("Failed to parse Ollama response: {}", e))?;
             
-            json.get("response")
+            println!("[scheduler] Ollama raw response keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            
+            let result = json.get("response")
                 .and_then(|r| r.as_str())
                 .map(|s| s.to_string())
-                .ok_or_else(|| "Invalid response format from Ollama".to_string())
+                .ok_or_else(|| {
+                    println!("[scheduler] Ollama response missing 'response' field. Full JSON: {}", 
+                        serde_json::to_string_pretty(&json).unwrap_or_default());
+                    "Invalid response format from Ollama".to_string()
+                })?;
+            
+            println!("[scheduler] Ollama response length: {} chars", result.len());
+            
+            // Retry once if Ollama returns empty response (can happen with concurrent requests)
+            if result.is_empty() {
+                println!("[scheduler] Ollama returned empty response, retrying after delay...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                
+                let retry_response = client
+                    .post(&url)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Ollama retry failed: {}", e))?;
+                
+                if retry_response.status().is_success() {
+                    let retry_json: serde_json::Value = retry_response.json().await
+                        .map_err(|e| format!("Failed to parse Ollama retry response: {}", e))?;
+                    
+                    if let Some(retry_result) = retry_json.get("response").and_then(|r| r.as_str()) {
+                        if !retry_result.is_empty() {
+                            println!("[scheduler] Ollama retry succeeded with {} chars", retry_result.len());
+                            return Ok(retry_result.to_string());
+                        }
+                    }
+                }
+                println!("[scheduler] Ollama retry also returned empty");
+            }
+            
+            Ok(result)
         }
         
         "openai" => {
@@ -997,14 +1262,15 @@ async fn execute_ai_prompt(
                 return Err("OpenAI API key not configured. Please set it in Settings.".to_string());
             }
 
+            let base_sys_prompt = get_ai_system_prompt();
             let effective_sys = if let Some(sys) = system_prompt {
                 if !sys.trim().is_empty() {
-                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                    format!("{}\n\n---\n\n{}", sys, base_sys_prompt)
                 } else {
-                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                    base_sys_prompt
                 }
             } else {
-                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                base_sys_prompt
             };
 
             let mut messages = Vec::new();
@@ -1050,14 +1316,15 @@ async fn execute_ai_prompt(
                 return Err("Anthropic API key not configured. Please set it in Settings.".to_string());
             }
 
+            let base_sys_prompt = get_ai_system_prompt();
             let effective_sys = if let Some(sys) = system_prompt {
                 if !sys.trim().is_empty() {
-                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                    format!("{}\n\n---\n\n{}", sys, base_sys_prompt)
                 } else {
-                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                    base_sys_prompt
                 }
             } else {
-                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                base_sys_prompt
             };
 
             let mut payload = serde_json::json!({
@@ -1102,14 +1369,15 @@ async fn execute_ai_prompt(
             
             let url = format!("{}/chat/completions", custom_base_url.trim_end_matches('/'));
 
+            let base_sys_prompt = get_ai_system_prompt();
             let effective_sys = if let Some(sys) = system_prompt {
                 if !sys.trim().is_empty() {
-                    format!("{}\n\n---\n\n{}", sys, DEFAULT_AI_SYSTEM_PROMPT)
+                    format!("{}\n\n---\n\n{}", sys, base_sys_prompt)
                 } else {
-                    DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                    base_sys_prompt
                 }
             } else {
-                DEFAULT_AI_SYSTEM_PROMPT.to_string()
+                base_sys_prompt
             };
 
             let mut messages = Vec::new();
@@ -1155,6 +1423,220 @@ async fn execute_ai_prompt(
         
         _ => Err(format!("Unknown AI provider: {}. Please configure AI settings.", provider))
     }
+}
+
+// ============= Tool Execution for AI Prompts =============
+
+// Wrapper for execute_ai_prompt that implements tool execution loop
+// Similar to how OpenCodeNotes handles it - execute tools and feed results back to AI
+async fn execute_ai_prompt_with_tools(
+    app: &AppHandle,
+    prompt: &str,
+    system_prompt: Option<&str>,
+    model_settings: Option<&ModelSettings>,
+) -> Result<String, String> {
+    const MAX_TOOL_ITERATIONS: usize = 5;
+    
+    let mut current_prompt = prompt.to_string();
+    let mut iteration = 0;
+    let mut final_response = String::new();
+    
+    loop {
+        iteration += 1;
+        println!("[scheduler::tools] Iteration {}/{}: Getting AI response for prompt ({} chars)...", 
+            iteration, MAX_TOOL_ITERATIONS, current_prompt.len());
+        
+        // Get AI response
+        let response = execute_ai_prompt(app, &current_prompt, system_prompt, model_settings).await?;
+        
+        println!("[scheduler::tools] AI response ({} chars): {}", 
+            response.len(), 
+            &response[..std::cmp::min(300, response.len())]);
+        
+        // Check if response contains tool calls
+        let has_tools = response.contains("<search_web") 
+            || response.contains("<fetch_url")
+            || response.contains("<get_stock_quote")
+            || response.contains("<get_market_movers");
+        
+        if !has_tools || iteration >= MAX_TOOL_ITERATIONS {
+            if iteration >= MAX_TOOL_ITERATIONS && has_tools {
+                println!("[scheduler::tools] Max iterations reached, returning response with unexecuted tools");
+            } else {
+                println!("[scheduler::tools] No tool calls detected, returning final response");
+            }
+            final_response = response;
+            break;
+        }
+        
+        println!("[scheduler::tools] AI response contains tool calls, executing and continuing...");
+        
+        // Execute tools and get results
+        let (response_with_markers, tool_results) = execute_tools_in_response_with_results(&response).await;
+        
+        if tool_results.is_empty() {
+            println!("[scheduler::tools] No tool results collected, returning response as-is");
+            final_response = response;
+            break;
+        }
+        
+        // Build continuation prompt with tool results
+        let tool_results_text = tool_results.join("\n\n");
+        current_prompt = format!(
+            r#"You previously requested to use tools. Here are the results:
+
+{}
+
+IMPORTANT: If the search results above only show links/titles but NOT the actual data you need (like specific player names, rankings, scores, numbers), you MUST use <fetch_url url="..." /> on the most relevant URL to get the actual content.
+
+If you have the actual data you need, provide a complete answer with a well-formatted table showing the specific information requested (names, rankings, points, etc.)."#,
+            tool_results_text
+        );
+        
+        println!("[scheduler::tools] Built continuation prompt with {} tool results", tool_results.len());
+    }
+    
+    Ok(final_response)
+}
+
+// Execute tools and return both the modified response and the collected tool results
+async fn execute_tools_in_response_with_results(response: &str) -> (String, Vec<String>) {
+    let mut result = response.to_string();
+    let mut tool_results = Vec::new();
+    
+    println!("[scheduler::tools] Processing AI response ({} chars) for tool calls...", response.len());
+    
+    // Parse search_web calls - flexible patterns for different AI output formats
+    let search_re = Regex::new(r#"<search_web\s+query\s*=\s*["']([^"']+)["']\s*/?>"#).unwrap();
+    for cap in search_re.captures_iter(response) {
+        let query = &cap[1];
+        let full_match = cap.get(0).unwrap().as_str();
+        
+        println!("[scheduler::tools] Executing search_web: query=\"{}\"", query);
+        match web::search_web(query.to_string(), Some(5)).await {
+            Ok(results) => {
+                println!("[scheduler::tools] search_web returned {} results", results.len());
+                let formatted = results.iter()
+                    .map(|r| format!("- **{}**\n  {}\n  URL: {}", r.title, r.snippet, r.url))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                tool_results.push(format!("[Search results for \"{}\"]\n{}", query, formatted));
+                result = result.replace(full_match, &format!("[Searched: \"{}\"]", query));
+            }
+            Err(e) => {
+                println!("[scheduler::tools] search_web failed: {}", e);
+                tool_results.push(format!("[Search failed for \"{}\"]: {}", query, e));
+                result = result.replace(full_match, &format!("[Search failed: {}]", e));
+            }
+        }
+    }
+    
+    // Parse fetch_url calls - flexible patterns
+    let fetch_re = Regex::new(r#"<fetch_url\s+url\s*=\s*["']([^"']+)["']\s*/?>"#).unwrap();
+    for cap in fetch_re.captures_iter(response) {
+        let url = &cap[1];
+        let full_match = cap.get(0).unwrap().as_str();
+        
+        println!("[scheduler::tools] Executing fetch_url: {}", url);
+        
+        // Try regular fetch first
+        let fetch_result = web::fetch_url(url.to_string()).await;
+        
+        // If content is empty or very short, try rendered fetch (headless browser)
+        // Each browser uses a unique profile so they can run in parallel
+        let web_content = match &fetch_result {
+            Ok(wc) if wc.content.len() < 100 => {
+                println!("[scheduler::tools] Regular fetch returned {} chars, trying headless browser...", wc.content.len());
+                match web::fetch_url_rendered(url.to_string()).await {
+                    Ok(rendered) => Ok(rendered),
+                    Err(e) => {
+                        println!("[scheduler::tools] Headless fetch failed: {}", e);
+                        fetch_result
+                    }
+                }
+            }
+            _ => fetch_result
+        };
+        
+        match web_content {
+            Ok(wc) => {
+                let content = &wc.content;
+                println!("[scheduler::tools] fetch_url got {} chars of content", content.len());
+                let truncated = if content.len() > 4000 {
+                    format!("{}... [truncated]", &content[..4000])
+                } else {
+                    content.clone()
+                };
+                tool_results.push(format!("[Fetched content from {}]\n{}", url, truncated));
+                result = result.replace(full_match, &format!("[Fetched: {}]", url));
+            }
+            Err(e) => {
+                println!("[scheduler::tools] fetch_url failed: {}", e);
+                tool_results.push(format!("[Fetch failed for {}]: {}", url, e));
+                result = result.replace(full_match, &format!("[Fetch failed: {}]", e));
+            }
+        }
+    }
+    
+    // Parse get_stock_quote calls - flexible pattern
+    let stock_re = Regex::new(r#"<get_stock_quote\s+symbol\s*=\s*["']([^"']+)["']\s*/?>"#).unwrap();
+    for cap in stock_re.captures_iter(response) {
+        let symbol = &cap[1];
+        let full_match = cap.get(0).unwrap().as_str();
+
+        println!("[scheduler::tools] Executing get_stock_quote: {}", symbol);
+        match web::get_stock_quote(symbol.to_string()).await {
+            Ok(quote) => {
+                let formatted = format!(
+                    "{} ({}): ${:.2} {} ({:.2}%)",
+                    quote.symbol, quote.name, quote.price, 
+                    if quote.change >= 0.0 { "▲" } else { "▼" },
+                    quote.change_percent
+                );
+                tool_results.push(format!("[Stock quote for {}]\n{}", symbol, formatted));
+                result = result.replace(full_match, &formatted);
+            }
+            Err(e) => {
+                println!("[scheduler::tools] get_stock_quote failed: {}", e);
+                tool_results.push(format!("[Stock quote failed for {}]: {}", symbol, e));
+                result = result.replace(full_match, &format!("[Quote failed: {}]", e));
+            }
+        }
+    }
+    
+    // Parse get_market_movers calls - flexible pattern
+    let movers_re = Regex::new(r#"<get_market_movers\s*/?>"#).unwrap();
+    for cap in movers_re.captures_iter(response) {
+        let full_match = cap.get(0).unwrap().as_str();
+        
+        println!("[scheduler::tools] Executing get_market_movers");
+        match web::get_market_movers().await {
+            Ok(movers) => {
+                let formatted = format!(
+                    "**Top Gainers:**\n{}\n\n**Top Losers:**\n{}\n\n**Most Active:**\n{}",
+                    movers.gainers.iter().take(5)
+                        .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
+                        .collect::<Vec<_>>().join("\n"),
+                    movers.losers.iter().take(5)
+                        .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
+                        .collect::<Vec<_>>().join("\n"),
+                    movers.most_active.iter().take(5)
+                        .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
+                        .collect::<Vec<_>>().join("\n")
+                );
+                tool_results.push(format!("[Market movers]\n{}", formatted));
+                result = result.replace(full_match, &formatted);
+            }
+            Err(e) => {
+                println!("[scheduler::tools] get_market_movers failed: {}", e);
+                tool_results.push(format!("[Market movers failed]: {}", e));
+                result = result.replace(full_match, &format!("[Market movers failed: {}]", e));
+            }
+        }
+    }
+    
+    println!("[scheduler::tools] Collected {} tool results", tool_results.len());
+    (result, tool_results)
 }
 
 // ============= Notification Executors =============
