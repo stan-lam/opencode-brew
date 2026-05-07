@@ -22,12 +22,27 @@ interface GitStatusResponse {
   untracked: GitFileStatus[];
 }
 
+export interface GitCommitInfo {
+  id: string;
+  message: string;
+  author: string;
+  email: string;
+  timestamp: string;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+}
+
 interface GitState {
   isRepo: boolean;
   currentBranch: string | null;
   branches: string[];
   stagedFiles: GitFile[];
   unstagedFiles: GitFile[];
+  commitHistory: GitCommitInfo[];
+  stashes: StashEntry[];
   isLoading: boolean;
   isPushing: boolean;
   isPulling: boolean;
@@ -48,6 +63,13 @@ interface GitState {
   pull: (remoteName?: string) => Promise<string>;
   push: (remoteName?: string, force?: boolean) => Promise<string>;
   createBranch: (branchName: string, checkout?: boolean) => Promise<void>;
+  deleteBranch: (branchName: string, force?: boolean) => Promise<void>;
+  discardChanges: (filePath: string) => Promise<void>;
+  fetchCommitHistory: (limit?: number) => Promise<void>;
+  stash: (message?: string) => Promise<void>;
+  stashPop: (index?: number) => Promise<void>;
+  fetchStashes: () => Promise<void>;
+  stashDrop: (index: number) => Promise<void>;
   startAutoFetch: () => void;
   stopAutoFetch: () => void;
   reset: () => void;
@@ -63,6 +85,8 @@ export const useGitStore = create<GitState>((set, get) => ({
   branches: [],
   stagedFiles: [],
   unstagedFiles: [],
+  commitHistory: [],
+  stashes: [],
   isLoading: false,
   isPushing: false,
   isPulling: false,
@@ -108,18 +132,27 @@ export const useGitStore = create<GitState>((set, get) => ({
       const isRepo = await invoke<boolean>('is_git_repo', { path });
       
       if (!isRepo) {
-        set({ 
-          isRepo: false, 
-          currentBranch: null, 
-          branches: [], 
-          stagedFiles: [], 
+        set({
+          isRepo: false,
+          currentBranch: null,
+          branches: [],
+          stagedFiles: [],
           unstagedFiles: [],
-          isLoading: false 
+          isLoading: false
         });
         return;
       }
 
+      // Clear existing data first to ensure fresh state
+      set({ stagedFiles: [], unstagedFiles: [] });
+
+      console.log('[Git] Refreshing status for:', path);
       const status = await invoke<GitStatusResponse>('git_status', { path });
+      console.log('[Git] Status result:', { 
+        staged: status.staged.length, 
+        unstaged: status.unstaged.length, 
+        untracked: status.untracked.length 
+      });
       
       const stagedFiles: GitFile[] = status.staged.map(f => ({
         path: f.path,
@@ -316,6 +349,116 @@ export const useGitStore = create<GitState>((set, get) => ({
     }
   },
 
+  deleteBranch: async (branchName: string, force?: boolean) => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    set({ isLoading: true, error: null });
+    try {
+      await invoke('git_delete_branch', { repoPath, branchName, force });
+      await get().refreshStatus();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      set({ error: errorMsg });
+      console.error('Failed to delete branch:', error);
+      throw error;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  discardChanges: async (filePath: string) => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    try {
+      await invoke('git_discard_changes', { repoPath, filePath });
+      await get().refreshStatus();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      set({ error: errorMsg });
+      console.error('Failed to discard changes:', error);
+      throw error;
+    }
+  },
+
+  fetchCommitHistory: async (limit?: number) => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    try {
+      const commits = await invoke<GitCommitInfo[]>('git_log', { repoPath, limit: limit || 50 });
+      set({ commitHistory: commits });
+    } catch (error) {
+      console.error('Failed to fetch commit history:', error);
+    }
+  },
+
+  stash: async (message?: string) => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    set({ isLoading: true, error: null });
+    try {
+      await invoke('git_stash', { repoPath, message });
+      await get().refreshStatus();
+      await get().fetchStashes();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      set({ error: errorMsg });
+      console.error('Failed to stash:', error);
+      throw error;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  stashPop: async (index?: number) => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    set({ isLoading: true, error: null });
+    try {
+      await invoke('git_stash_pop', { repoPath, index: index || 0 });
+      await get().refreshStatus();
+      await get().fetchStashes();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      set({ error: errorMsg });
+      console.error('Failed to pop stash:', error);
+      throw error;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  fetchStashes: async () => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    try {
+      const stashes = await invoke<StashEntry[]>('git_stash_list', { repoPath });
+      set({ stashes });
+    } catch (error) {
+      console.error('Failed to fetch stashes:', error);
+    }
+  },
+
+  stashDrop: async (index: number) => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) return;
+
+    try {
+      await invoke('git_stash_drop', { repoPath, index });
+      await get().fetchStashes();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      set({ error: errorMsg });
+      console.error('Failed to drop stash:', error);
+      throw error;
+    }
+  },
+
   startAutoFetch: () => {
     const { autoFetchInterval, isRepo } = get();
     const { autoFetch } = useSettingsStore.getState();
@@ -367,6 +510,8 @@ export const useGitStore = create<GitState>((set, get) => ({
       branches: [],
       stagedFiles: [],
       unstagedFiles: [],
+      commitHistory: [],
+      stashes: [],
       isLoading: false,
       isPushing: false,
       isPulling: false,

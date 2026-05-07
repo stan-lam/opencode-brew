@@ -16,6 +16,8 @@ interface AISettings {
   temperature: number;
   maxTokens: number;
   mcpServers?: MCPServerConfig[];
+  contextSummaryEnabled?: boolean;
+  contextTokenLimit?: number;
 }
 
 interface WebSearchResult {
@@ -88,6 +90,16 @@ interface MessageAttachment {
 
 // Global MCP server states for Notes app
 let mcpServerStates: MCPServerState[] = [];
+
+// Estimate token count from text (approximately 4 characters per token)
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// Estimate total tokens for an array of messages
+function estimateMessagesTokens(messages: Array<{ role: string; content: string }>): number {
+  return messages.reduce((total, msg) => total + estimateTokens(msg.content), 0);
+}
 
 function migrateMCPSettings(settings: AISettings): AISettings {
   if (!settings.mcpServers) return settings;
@@ -162,15 +174,16 @@ function getWebAccessSystemPrompt(): string {
 ## ABSOLUTE RULES - READ FIRST
 
 **NEVER output your thinking process, planning, analysis, or self-reflection to the user.**
-**NEVER say things like "Let me analyze...", "Here's my thinking...", "Plan:", "Strategy:", "Goal:", "Challenge:"**
+**NEVER say things like "Let me analyze...", "Here's my thinking...", "Thinking Process:", "Action Plan:", "Plan:", "Strategy:", "Goal:", "Challenge:", "Analyze the Request:", "Self-Correction"**
 **NEVER show numbered steps of your reasoning process.**
+**NEVER generate fake or hallucinated search results - only real data from executed tools.**
 
 If you need to think, put it ONLY inside <think>...</think> tags. Everything outside those tags goes directly to the user.
 
 **YOUR OUTPUT MUST BE:**
 - A direct answer (e.g., "The top 5 ATP players are: 1. Sinner 2. Alcaraz...")
-- OR an action suggestion (e.g., "[ACTION:search_web:top 5 ATP players:Search rankings]")
-- NOTHING ELSE
+- OR a brief acknowledgment + action suggestion (e.g., "I can search for that.\n\n[ACTION:search_web:query:Search]")
+- NOTHING ELSE - especially no fake results after an action tag
 
 ## CRITICAL OUTPUT FORMAT
 
@@ -183,12 +196,15 @@ When the user asks for data (stocks, sports, web search), DO NOT automatically f
 
 **SUGGESTING ACTIONS:**
 Use this format to suggest an action the user can approve:
-[ACTION:tool_name:description]
+- For tools without parameters: [ACTION:tool_name:Button Label]
+- For tools with parameters: [ACTION:tool_name:parameter:Button Label]
+
+**CRITICAL: After outputting an [ACTION:...] tag, STOP IMMEDIATELY. Do NOT generate any additional content, fake results, or explanations. The action will be executed when the user clicks the button.**
 
 Examples:
-- [ACTION:get_mlb_standings:Fetch current MLB standings]
-- [ACTION:get_stock_quote:AAPL:Get Apple stock price]
-- [ACTION:search_web:top tennis players 2026:Search for tennis rankings]
+- [ACTION:get_mlb_standings:Get MLB Standings]
+- [ACTION:get_stock_quote:AAPL:Get Apple Quote]
+- [ACTION:search_web:TRP EVOX brake price:Search for price]
 
 **Example - CORRECT:**
 User: "What are the MLB standings?"
@@ -201,6 +217,12 @@ User: "How's AMD doing?"
 Assistant: I can get the current AMD stock price.
 
 [ACTION:get_stock_quote:AMD:Get AMD Quote]
+
+**Example - CORRECT (web search for product):**
+User: "What's this brake and how much?"
+Assistant: I can search for this product's information and price.
+
+[ACTION:search_web:TRP REPO HD brake price:Search for price]
 
 **STOCK PRICE QUERIES - IMPORTANT:**
 When the user asks about a stock price (e.g., "himx price", "aapl stock", "what's msft at?"):
@@ -217,6 +239,19 @@ Here are the standings...
 
 **Example - WRONG (verbose reasoning):**
 The user is asking for MLB standings. This requires real-time data. I should use the get_mlb_standings tool...
+
+**Example - WRONG (continuing after action tag with fake results):**
+[ACTION:search_web:product name:Search]
+
+Here are the results...
+(NEVER do this - the action hasn't executed yet!)
+
+**Example - WRONG (planning before action):**
+Action Plan:
+1. Identify the product
+2. Search for price
+[ACTION:search_web:product:Search]
+(NEVER show planning - just offer to search and show the action button)
 
 CRITICAL: When searching for news or current events, ALWAYS include today's date "${shortDate}" or "today" in your search queries to get the most recent results. Do NOT rely on cached or outdated information.
 
@@ -353,13 +388,20 @@ Even if you already fetched data earlier, if the user asks another question abou
 function getSummarizationPrompt(): string {
   return `You are a helpful AI assistant. Summarize the following web search results or data concisely.
 
+## CRITICAL - OUTPUT RULES
+**NEVER show your thinking process, analysis steps, or planning.**
+**NEVER say "Thinking Process:", "Analyze the Request:", "Here's my thinking", "Self-Correction", or similar.**
+**NEVER use numbered analysis steps like "1. Analyze... 2. Determine..."**
+**Output ONLY the final summary - nothing else.**
+
 INSTRUCTIONS:
 1. Provide a clear, informative summary of the key information
 2. For news articles: summarize main points with source links
 3. For stock/market data: present in a clean table format
 4. For rankings/leaderboards (sports, players, teams): ALWAYS use a markdown table
-5. Keep the summary focused and easy to read
-6. Don't just list the results - synthesize them
+5. For product queries: provide product name, key features, and where to find pricing
+6. Keep the summary focused and easy to read
+7. Don't just list the results - synthesize them
 
 FORMAT FOR RANKINGS (ATP, NFL, NBA, etc.):
 Start with a brief intro sentence, then present a table:
@@ -372,7 +414,16 @@ As of [date], [context about the rankings]:
 | 2 | Name | Country/Points/Record |
 ...
 
-Sources: [links]`;
+Sources: [links]
+
+WRONG (Never do this):
+Thinking Process:
+1. Analyze the Request...
+2. Determine the Goal...
+Based on my analysis...
+
+CORRECT:
+[Just provide the summary directly without any preamble or analysis]`;
 }
 
 interface WebOperation {
@@ -883,15 +934,21 @@ function finalCleanupResponse(content: string): string {
   
   let cleaned = content;
   
+  // MOST AGGRESSIVE: If content contains "Thinking Process:", strip everything up to the actual summary
+  const thinkingProcessMatch = cleaned.match(/Thinking Process:[\s\S]*?\n\n((?:Based on|The (?:item|product|search|results)|#{1,3}\s*(?:Product|Summary|Key))[\s\S]*)/i);
+  if (thinkingProcessMatch) {
+    cleaned = thinkingProcessMatch[1];
+  }
+  
   // AGGRESSIVE: Strip everything from start if it begins with thinking patterns
-  if (/^The user (?:is asking|wants|asked|requested)/i.test(cleaned)) {
+  if (/^(?:The user (?:is asking|wants|asked|requested)|Thinking Process:|Here's a thinking|Action Plan:)/i.test(cleaned)) {
     // Find where actual answer starts
     const answerPatterns = [
-      /\n\n#{1,3}\s*(?:Summary|Key|Sources|Answer|Results)/i,
-      /\n\n\*\*(?:Summary|Key|Sources|Answer)/i,
+      /\n\n#{1,3}\s*(?:Product|Summary|Key|Sources|Answer|Results)/i,
+      /\n\n\*\*(?:Product|Summary|Key|Sources|Answer)/i,
       /\n\nIn (?:summary|conclusion)/i,
-      /\n\nThe (?:search results|top|best|current|answer)/i,
-      /\n\nBased on (?:the above|this|these|my)/i,
+      /\n\nThe (?:search results|item|product|top|best|current|answer)/i,
+      /\n\nBased on (?:the (?:search|above)|this|these|my)/i,
     ];
     
     for (const pattern of answerPatterns) {
@@ -903,11 +960,11 @@ function finalCleanupResponse(content: string): string {
     }
   }
   
-  // Remove "Here's a thinking process" sections entirely
-  cleaned = cleaned.replace(/Here's a thinking process[\s\S]*?(?=\n\n(?:#{1,3}|In summary|The (?:top|best|search|answer)|Based on|\*\*Summary))/gi, '');
+  // Remove "Here's a thinking process" or "Thinking Process:" sections entirely
+  cleaned = cleaned.replace(/(?:Here's a thinking process|Thinking Process:?)[\s\S]*?(?=\n\n(?:#{1,3}|In summary|The (?:item|product|top|best|search|answer)|Based on|\*\*(?:Product|Summary)))/gi, '');
   
   // Remove numbered analysis steps (1. **Analyze the Request:**)
-  cleaned = cleaned.replace(/^\s*\d+\.\s*\*?\*?(?:Analyze|Determine|Review|Synthesize|Draft|Final|Source|Data)[^*\n]*\*?\*?:?[^\n]*(?:\n(?!\n|\d+\.).*)*\n?/gim, '');
+  cleaned = cleaned.replace(/^\s*\d+\.\s*\*?\*?(?:Analyze|Determine|Review|Synthesize|Draft|Final|Source|Data|Identify|Address|Structure|Self-Correction)[^*\n]*\*?\*?:?[^\n]*(?:\n(?!\n|\d+\.).*)*\n?/gim, '');
   
   // Remove bullet points that are source analysis (* **Source 1 (sportsdunia):**)
   cleaned = cleaned.replace(/^\s*\*\s+\*\*Source \d+[^*]*\*\*:?[^\n]*\n?/gim, '');
@@ -1475,7 +1532,7 @@ export function ChatPanel() {
   useEffect(() => {
     const loadMessages = async () => {
       if (!activeConversationId) return;
-      
+
       try {
         const invoke = await getInvoke();
         const loadedMessages = await invoke('list_messages', { conversationId: activeConversationId });
@@ -1487,6 +1544,47 @@ export function ChatPanel() {
 
     loadMessages();
   }, [activeConversationId]);
+
+  // Listen for token usage events and record them
+  useEffect(() => {
+    let unlistenFn: (() => void) | null = null;
+    
+    const setupTokenUsageListener = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const invoke = await getInvoke();
+        
+        // Initialize usage database
+        await invoke('init_usage_db');
+        
+        unlistenFn = await listen('token-usage', async (event: any) => {
+          const { model, provider, prompt_tokens, completion_tokens } = event.payload;
+          console.log(`[Notes] Token usage: ${model} (${provider}) - prompt: ${prompt_tokens}, completion: ${completion_tokens}`);
+          
+          try {
+            await invoke('record_token_usage', {
+              model,
+              provider,
+              promptTokens: prompt_tokens,
+              completionTokens: completion_tokens,
+            });
+          } catch (error) {
+            console.error('[Notes] Failed to record token usage:', error);
+          }
+        });
+      } catch (error) {
+        console.error('[Notes] Failed to set up token usage listener:', error);
+      }
+    };
+    
+    setupTokenUsageListener();
+    
+    return () => {
+      if (unlistenFn) {
+        unlistenFn();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1736,10 +1834,6 @@ export function ChatPanel() {
       }
       
       // Build messages with system prompt for web access
-      // Limit conversation history to last 20 messages for faster responses
-      const MAX_HISTORY_MESSAGES = 20;
-      const recentMessages = messages.slice(-MAX_HISTORY_MESSAGES);
-      
       const systemMessage = { role: 'system', content: getWebAccessSystemPrompt() };
       
       // Build messages with attachments for the current user message
@@ -1754,14 +1848,142 @@ export function ChatPanel() {
         currentUserMessage.attachments = imageAttachments;
       }
       
+      // Context window management with summarization
+      const contextSummaryEnabled = settings.contextSummaryEnabled ?? true;
+      const contextTokenLimit = settings.contextTokenLimit ?? 8000;
+      
+      let conversationMessages: Array<{ role: string; content: string }> = [];
+      
+      // Check if we need to use context summarization
+      const allMessages = messages.map(m => ({ role: m.role, content: m.content }));
+      const totalTokens = estimateMessagesTokens(allMessages);
+      
+      if (contextSummaryEnabled && totalTokens > contextTokenLimit) {
+        // Get stored context summary
+        const storedSummary = await invoke<string | null>('get_conversation_summary', { id: conversationId });
+        
+        if (storedSummary) {
+          // Use summary + recent messages
+          console.log(`[Notes] Using context summary (total tokens: ${totalTokens}, limit: ${contextTokenLimit})`);
+          const summaryMessage = { role: 'system', content: `[Previous conversation summary]: ${storedSummary}` };
+          
+          // Take recent messages that fit within limit
+          const MAX_RECENT_MESSAGES = 6;
+          const recentMessages = messages.slice(-MAX_RECENT_MESSAGES);
+          conversationMessages = [
+            summaryMessage,
+            ...recentMessages.map(m => ({ role: m.role, content: m.content })),
+          ];
+        } else {
+          // Generate a new summary of old messages
+          console.log(`[Notes] Generating context summary (total tokens: ${totalTokens}, limit: ${contextTokenLimit})`);
+          setWebStatus('Summarizing conversation context...');
+          
+          // Keep last 6 messages separate, summarize the rest
+          const messagesToSummarize = messages.slice(0, -6);
+          const recentMessages = messages.slice(-6);
+          
+          if (messagesToSummarize.length > 2) {
+            // Generate summary using AI
+            const summaryPrompt = `Summarize the key points, decisions, and context from this conversation in a concise paragraph that can be used to continue the discussion:\n\n${messagesToSummarize.map(m => `${m.role}: ${m.content}`).join('\n\n')}`;
+            
+            const summaryConversationId = `summary-${Date.now()}`;
+            let summaryContent = '';
+            
+            const { listen: listenFn } = await import('@tauri-apps/api/event');
+            const summaryUnlisten = await listenFn(`ai-stream-${summaryConversationId}`, (event: any) => {
+              if (event.payload.content) {
+                summaryContent += event.payload.content;
+              }
+            });
+            
+            try {
+              if (settings.aiProvider === 'ollama') {
+                await invoke('chat_ollama', {
+                  baseUrl: settings.ollamaUrl || 'http://localhost:11434',
+                  model: settings.model || 'gemma4:latest',
+                  messages: [{ role: 'user', content: summaryPrompt }],
+                  temperature: 0.3,
+                  maxTokens: 1000,
+                  conversationId: summaryConversationId,
+                });
+              } else if (settings.aiProvider === 'copilot') {
+                await invoke('chat_copilot', {
+                  model: settings.model || 'gpt-4o',
+                  messages: [{ role: 'user', content: summaryPrompt }],
+                  temperature: 0.3,
+                  maxTokens: 1000,
+                  conversationId: summaryConversationId,
+                });
+              } else {
+                // Default to openai-compatible
+                const baseUrl = settings.aiProvider === 'openai' 
+                  ? 'https://api.openai.com/v1'
+                  : settings.aiProvider === 'anthropic'
+                  ? 'https://api.anthropic.com/v1'
+                  : settings.customBaseUrl;
+                const apiKey = settings.aiProvider === 'openai'
+                  ? settings.openaiKey
+                  : settings.aiProvider === 'anthropic'
+                  ? settings.anthropicKey
+                  : settings.customApiKey;
+                
+                await invoke('chat_openai', {
+                  baseUrl,
+                  apiKey,
+                  model: settings.model,
+                  messages: [{ role: 'user', content: summaryPrompt }],
+                  temperature: 0.3,
+                  maxTokens: 1000,
+                  conversationId: summaryConversationId,
+                });
+              }
+              
+              summaryUnlisten();
+              
+              // Store the summary
+              if (summaryContent) {
+                await invoke('update_conversation_summary', {
+                  id: conversationId,
+                  contextSummary: summaryContent,
+                });
+                console.log(`[Notes] Stored context summary (${summaryContent.length} chars)`);
+              }
+              
+              // Use summary + recent messages
+              const summaryMessage = { role: 'system', content: `[Previous conversation summary]: ${summaryContent}` };
+              conversationMessages = [
+                summaryMessage,
+                ...recentMessages.map(m => ({ role: m.role, content: m.content })),
+              ];
+            } catch (error) {
+              console.error('[Notes] Failed to generate context summary:', error);
+              // Fall back to using recent messages only
+              const MAX_HISTORY_MESSAGES = 20;
+              conversationMessages = messages.slice(-MAX_HISTORY_MESSAGES).map(m => ({ role: m.role, content: m.content }));
+            }
+          } else {
+            // Not enough messages to summarize, use all
+            conversationMessages = allMessages;
+          }
+          
+          setWebStatus(null);
+        }
+      } else {
+        // Within limit or summarization disabled, use recent messages
+        const MAX_HISTORY_MESSAGES = 20;
+        const recentMessages = messages.slice(-MAX_HISTORY_MESSAGES);
+        conversationMessages = recentMessages.map(m => ({ role: m.role, content: m.content }));
+      }
+      
       const messagesForAI = [
         systemMessage,
-        ...recentMessages.map(m => ({ role: m.role, content: m.content })),
+        ...conversationMessages,
         currentUserMessage,
       ];
       
-      console.log(`[Notes] Sending ${messagesForAI.length} messages (limited from ${messages.length + 1})${imageAttachments.length > 0 ? ` with ${imageAttachments.length} image(s)` : ''}`);
-
+      console.log(`[Notes] Sending ${messagesForAI.length} messages (from ${messages.length + 1}, estimated ${estimateMessagesTokens(messagesForAI)} tokens)${imageAttachments.length > 0 ? ` with ${imageAttachments.length} image(s)` : ''}`);
+      
       try {
         if (settings.aiProvider === 'ollama') {
           await invoke('chat_ollama', {
@@ -1852,8 +2074,10 @@ export function ChatPanel() {
             setRawThinkingContent(fullThinkingContent);
             
             // Extract ONLY the final answer for response panel AND for saving
-            const finalResponse = extractFinalResponse(summarizedContent);
-            const responseToShow = finalResponse || summarizedContent;
+            // Apply finalCleanupResponse to strip any thinking patterns
+            const cleanedSummary = finalCleanupResponse(summarizedContent);
+            const finalResponse = extractFinalResponse(cleanedSummary);
+            const responseToShow = finalResponse || cleanedSummary || summarizedContent;
             updateMessageContent(assistantPlaceholder.id, responseToShow);
             
             // Save ONLY the final response (not thinking)
@@ -1879,10 +2103,41 @@ export function ChatPanel() {
           // Check if there are action tags - if so, preserve them for later execution
           const actionTagMatch = cleanedContent.match(/\[ACTION:[^\]]+\]/g);
           if (actionTagMatch && actionTagMatch.length > 0) {
-            // Has action tags - keep the content WITH tags so buttons render on revisit
-            console.log('[Notes] Content has action tags, preserving them');
-            updateMessageContent(assistantPlaceholder.id, cleanedContent);
-            fullContent = cleanedContent;
+            // Has action tags - extract ONLY the intro + action tag, discard everything else
+            console.log('[Notes] v2: Content has action tags, extracting clean intro + action');
+            console.log('[Notes] v2: Raw content length:', cleanedContent.length);
+            console.log('[Notes] v2: First 200 chars:', cleanedContent.substring(0, 200));
+            
+            // Strategy: Find the user-facing intro sentence right before the ACTION tag
+            // Pattern: "I can/I'll/Let me..." followed by ACTION tag
+            const introActionPattern = /((?:I can|I'll|I will|Let me|Sure,?|Here's|Looking)[^\n]*?\.?\s*\n*\[ACTION:[^\]]+\])/i;
+            const introMatch = cleanedContent.match(introActionPattern);
+            
+            let contentWithAction: string;
+            if (introMatch) {
+              // Found clean intro + action
+              console.log('[Notes] v2: Found intro match, length:', introMatch[1].length);
+              contentWithAction = introMatch[1].trim();
+            } else {
+              console.log('[Notes] v2: No intro match, using fallback');
+              // Fallback: just extract the ACTION tag with one line before it
+              const actionOnly = cleanedContent.match(/([^\n]*\n?\[ACTION:[^\]]+\])/);
+              if (actionOnly) {
+                // Clean up any thinking prefixes from that line
+                contentWithAction = actionOnly[1]
+                  .replace(/^(?:Action Plan|Thinking Process|Here's a thinking|Goal|Strategy)[^\n]*\n*/gim, '')
+                  .trim();
+              } else {
+                // Last resort: just the action tag
+                const justAction = cleanedContent.match(/\[ACTION:[^\]]+\]/);
+                contentWithAction = justAction ? justAction[0] : cleanedContent;
+              }
+            }
+            
+            console.log('[Notes] v2: Final content length:', contentWithAction.length);
+            console.log('[Notes] v2: Final content:', contentWithAction.substring(0, 300));
+            updateMessageContent(assistantPlaceholder.id, contentWithAction);
+            fullContent = contentWithAction;
           } else {
             // No action tags - extract final response normally
             const finalResponse = extractFinalResponse(cleanedContent);
@@ -2270,8 +2525,10 @@ export function ChatPanel() {
           break;
         }
         case 'get_stock_quote': {
-          if (action.param) {
-            const quote = await getStockQuoteWithMCP(action.param);
+          // Use param if available, otherwise try to extract ticker from label
+          const symbol = action.param || action.label?.match(/\b([A-Z]{1,5})\b/)?.[1];
+          if (symbol) {
+            const quote = await getStockQuoteWithMCP(symbol);
             result = formatStockQuote(quote);
           }
           break;
@@ -2282,8 +2539,10 @@ export function ChatPanel() {
           break;
         }
         case 'search_web': {
-          if (action.param) {
-            const searchResults = await webSearchWithMCP(action.param);
+          // Use param if available, otherwise fall back to label as the search query
+          const query = action.param || action.label;
+          if (query) {
+            const searchResults = await webSearchWithMCP(query);
             result = await formatSearchResults(searchResults);
           }
           break;
@@ -2584,9 +2843,16 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse, thinki
     });
   }, [message.content, thinking, isUser]);
   
-  // Get content without action tags
+  // Get content without action tags and any remaining thinking patterns
   const displayContent = React.useMemo(() => {
-    return stripActionTags(message.content);
+    let content = stripActionTags(message.content);
+    // Safety net: strip any remaining thinking patterns that might have leaked through
+    content = content
+      .replace(/^.*?(?:Thinking Process|Here's a thinking|Action Plan)[^\n]*[\s\S]*?(?=\n\n|$)/gim, '')
+      .replace(/^\s*\d+\.\s*\*?\*?(?:Analyze|Determine|Review|Draft|Self-Correction)[^\n]*(?:\n(?!\n).*)*\n*/gim, '')
+      .replace(/^The user (?:is asking|wants|asked)[^\n]*\n*/i, '')
+      .trim();
+    return content;
   }, [message.content]);
 
   const handleCopy = async () => {

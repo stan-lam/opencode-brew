@@ -53,6 +53,7 @@ pdf-extract = "0.7"
 zip = "2.2"
 base64 = "0.22"
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+cron = "0.12"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"

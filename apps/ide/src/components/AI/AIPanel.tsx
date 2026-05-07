@@ -1441,6 +1441,14 @@ function MessageBubble({ message, onOperationsChange }: {
   const getCleanedContent = (content: string): string => {
     let cleaned = content;
     
+    // Remove "Thinking:" sections that some models output
+    // Match "Thinking:" followed by text until a double newline or end of string
+    cleaned = cleaned.replace(/^Thinking:[\s\S]*?(?=\n\n|$)/i, '');
+    // Also remove inline thinking patterns like "Thinking: ... I should"
+    cleaned = cleaned.replace(/Thinking:\s*[^.]*\.\s*/gi, '');
+    // Remove any remaining "Thinking:" at start of lines
+    cleaned = cleaned.replace(/^\s*Thinking:\s*/gim, '');
+    
     // In plan mode, remove code blocks (detection happens in useEffect, not here)
     if (agentMode === 'plan') {
       // Remove all code blocks except mermaid — use double newlines to preserve paragraph breaks
@@ -1877,6 +1885,237 @@ function MarkdownRenderer({ content }: { content: string }) {
             }
           }
           
+          // Check if content is markdown (has headers, bold, lists, tables, etc.) - render as markdown instead of code
+          const isMarkdownContent = (() => {
+            if (codeLines.length === 0) return false;
+            
+            const hasHeaders = codeLines.some(l => /^#{1,6}\s+\S/.test(l.trim()));
+            const hasBold = codeLines.some(l => /\*\*[^*]+\*\*/.test(l) || /\*\*\w/.test(l));
+            const hasLists = codeLines.some(l => /^[\s]*[-*+]\s\S/.test(l) || /^[\s]*\d+\.\s\S/.test(l));
+            const hasBlockquotes = codeLines.some(l => /^>\s/.test(l.trim()));
+            const hasTables = codeLines.some(l => (l.match(/\|/g) || []).length >= 2 && l.trim().startsWith('|'));
+            
+            // For text/plaintext blocks, prefer markdown rendering if markdown patterns found
+            const isTextLang = lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md';
+            if (isTextLang && (hasHeaders || hasBold || hasTables)) {
+              return true;
+            }
+            
+            // For other languages, be stricter - check for code patterns
+            const codeLineCount = codeLines.filter(l => 
+              /^(const|let|var|function|class|import|export|if|else|for|while|return|async|await)\s/.test(l.trim()) ||
+              /[{};]\s*$/.test(l.trim()) ||
+              /=>\s*[{(]/.test(l) ||
+              /\(\s*\)\s*=>/.test(l)
+            ).length;
+            
+            // If more than 30% of lines look like code, don't treat as markdown
+            if (codeLineCount > codeLines.length * 0.3) return false;
+            
+            return hasHeaders || hasBold || hasTables || hasLists || hasBlockquotes;
+          })();
+          
+          if (isMarkdownContent && (lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md')) {
+            const markdownContent = codeContent;
+            const mdLines = markdownContent.split('\n');
+            let mdIndex = 0;
+            
+            while (mdIndex < mdLines.length) {
+              const mdLine = mdLines[mdIndex];
+              
+              const mdHeadingMatch = mdLine.match(/^(#{1,6})\s*(.*)/);
+              if (mdHeadingMatch && mdHeadingMatch[2].trim().length > 0) {
+                const level = mdHeadingMatch[1].length;
+                const headingContent = renderInline(mdHeadingMatch[2].trim());
+                if (level === 1) elements.push(<h1 key={key++} className={styles.mdH1}>{headingContent}</h1>);
+                else if (level === 2) elements.push(<h2 key={key++} className={styles.mdH2}>{headingContent}</h2>);
+                else if (level === 3) elements.push(<h3 key={key++} className={styles.mdH3}>{headingContent}</h3>);
+                else elements.push(<h4 key={key++} className={styles.mdH4}>{headingContent}</h4>);
+                mdIndex++;
+                continue;
+              }
+              
+              if (mdLine.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
+                elements.push(<hr key={key++} className={styles.mdHr} />);
+                mdIndex++;
+                continue;
+              }
+              
+              if (mdLine.match(/^[\s]*[-*+]\s/)) {
+                const listItems: React.ReactNode[] = [];
+                while (mdIndex < mdLines.length && mdLines[mdIndex].match(/^[\s]*[-*+]\s/)) {
+                  const itemContent = mdLines[mdIndex].replace(/^[\s]*[-*+]\s/, '');
+                  listItems.push(<li key={key++}>{renderInline(itemContent)}</li>);
+                  mdIndex++;
+                }
+                elements.push(<ul key={key++} className={styles.mdList}>{listItems}</ul>);
+                continue;
+              }
+              
+              if (mdLine.match(/^[\s]*\d+\.\s/)) {
+                const listItems: React.ReactNode[] = [];
+                while (mdIndex < mdLines.length && mdLines[mdIndex].match(/^[\s]*\d+\.\s/)) {
+                  const itemContent = mdLines[mdIndex].replace(/^[\s]*\d+\.\s/, '');
+                  listItems.push(<li key={key++}>{renderInline(itemContent)}</li>);
+                  mdIndex++;
+                }
+                elements.push(<ol key={key++} className={styles.mdList}>{listItems}</ol>);
+                continue;
+              }
+              
+              if (mdLine.startsWith('> ')) {
+                const quoteLines: string[] = [];
+                while (mdIndex < mdLines.length && mdLines[mdIndex].startsWith('> ')) {
+                  quoteLines.push(mdLines[mdIndex].slice(2));
+                  mdIndex++;
+                }
+                elements.push(
+                  <blockquote key={key++} className={styles.mdBlockquote}>
+                    {quoteLines.map((l, idx) => <p key={idx}>{renderInline(l)}</p>)}
+                  </blockquote>
+                );
+                continue;
+              }
+              
+              if (mdLine.trim().length === 0) {
+                mdIndex++;
+                continue;
+              }
+              
+              // Table detection for markdown inside code blocks
+              const mdTrimmedLine = mdLine.trim();
+              const mdPipeCount = (mdLine.match(/\|/g) || []).length;
+              const mdLooksLikeTableRow = mdTrimmedLine.startsWith('|') || mdPipeCount >= 2;
+              const mdNextLine = mdIndex + 1 < mdLines.length ? mdLines[mdIndex + 1] : '';
+              
+              const mdIsSeparatorLine = (l: string): boolean => {
+                const trimmed = l.trim();
+                const withoutOuterPipes = trimmed.startsWith('|') && trimmed.endsWith('|') 
+                  ? trimmed.slice(1, -1) 
+                  : trimmed;
+                const cells = withoutOuterPipes.split('|');
+                return cells.length >= 1 && cells.every(cell => /^[\s:-]+$/.test(cell) && cell.includes('-'));
+              };
+              
+              const mdHasSeparatorCells = (l: string): boolean => {
+                const trimmed = l.trim();
+                if (!trimmed.includes('|')) return false;
+                const cells = trimmed.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+                return cells.some(cell => {
+                  const dashCount = (cell.match(/-/g) || []).length;
+                  return dashCount >= 3 && dashCount >= cell.length * 0.7;
+                });
+              };
+              
+              const mdIsSeparatorCell = (cell: string): boolean => {
+                const trimmed = cell.trim();
+                if (!trimmed) return false;
+                const dashCount = (trimmed.match(/-/g) || []).length;
+                return dashCount >= 2 && dashCount >= trimmed.length * 0.5;
+              };
+              
+              // Also check if next line is another pipe row
+              const mdNextLineIsPipeRow = mdNextLine.trim().startsWith('|') && (mdNextLine.match(/\|/g) || []).length >= 2;
+              
+              // Table starts if: current line has pipes AND (next line is separator OR next line has separator cells OR next line is pipe row)
+              const mdIsTableStart = mdLooksLikeTableRow && (
+                mdIsSeparatorLine(mdNextLine) || 
+                mdHasSeparatorCells(mdNextLine) ||
+                /\|[\s:-]*-{2,}[\s:-]*\|/.test(mdTrimmedLine) ||
+                mdNextLineIsPipeRow
+              );
+              
+              if (mdIsTableStart) {
+                const tableRows: string[][] = [];
+                let hasHeader = false;
+                
+                while (mdIndex < mdLines.length) {
+                  const row = mdLines[mdIndex];
+                  const rowTrimmed = row.trim();
+                  const rowPipeCount = (row.match(/\|/g) || []).length;
+                  
+                  if (!rowTrimmed.startsWith('|') && rowPipeCount < 2) break;
+                  
+                  if (mdIsSeparatorLine(row)) {
+                    hasHeader = tableRows.length > 0;
+                    mdIndex++;
+                    continue;
+                  }
+                  
+                  const rawCells = rowTrimmed.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+                  const dataCells = rawCells.filter(c => c.length > 0 && !mdIsSeparatorCell(c));
+                  
+                  if (dataCells.length > 0) {
+                    tableRows.push(dataCells);
+                  }
+                  
+                  if (rawCells.some(c => c.length > 0 && mdIsSeparatorCell(c)) && tableRows.length > 0) {
+                    hasHeader = true;
+                  }
+                  
+                  mdIndex++;
+                }
+                
+                if (tableRows.length > 0) {
+                  const headerRow = hasHeader ? tableRows[0] : null;
+                  const bodyRows = hasHeader ? tableRows.slice(1) : tableRows;
+                  
+                  elements.push(
+                    <div key={key++} className={styles.tableWrapper}>
+                      <table className={styles.mdTable}>
+                        {headerRow && (
+                          <thead>
+                            <tr>
+                              {headerRow.map((cell, idx) => (
+                                <th key={idx}>{renderInline(cell)}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                        )}
+                        <tbody>
+                          {bodyRows.map((row, rowIdx) => (
+                            <tr key={rowIdx}>
+                              {row.map((cell, cellIdx) => (
+                                <td key={cellIdx}>{renderInline(cell)}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                }
+                continue;
+              }
+              
+              // Check if this is a standalone pipe-delimited row (render as simple table row)
+              if (mdPipeCount >= 2 && mdTrimmedLine.startsWith('|') && mdTrimmedLine.endsWith('|')) {
+                const cells = mdTrimmedLine.slice(1, -1).split('|').map(c => c.trim()).filter(c => c.length > 0);
+                if (cells.length >= 2) {
+                  elements.push(
+                    <div key={key++} className={styles.tableWrapper}>
+                      <table className={styles.mdTable}>
+                        <tbody>
+                          <tr>
+                            {cells.map((cell, idx) => (
+                              <td key={idx}>{renderInline(cell)}</td>
+                            ))}
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                  mdIndex++;
+                  continue;
+                }
+              }
+              
+              elements.push(<p key={key++} className={styles.mdParagraph}>{renderInline(mdLine)}</p>);
+              mdIndex++;
+            }
+            continue;
+          }
+          
           // Check if this is a diff (has +/- lines)
           const isDiff = lang.toLowerCase() === 'diff' || 
             codeLines.some(l => l.startsWith('+') || l.startsWith('-')) &&
@@ -2017,41 +2256,48 @@ function MarkdownRenderer({ content }: { content: string }) {
       // Also check if line has a separator-like cell pattern (e.g., "|--------|" at end)
       const hasTrailingSeparator = /\|-{3,}\|?\s*$/.test(trimmedLine);
       
-      // Detect table: next line is separator OR current line has embedded separator followed by more table rows
+      // Check if next line has any separator cells (for malformed tables where sep is mixed with data)
+      const nextLineHasSeparatorCells = (() => {
+        const trimmed = nextLine.trim();
+        if (!trimmed.includes('|')) return false;
+        const cells = trimmed.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+        return cells.some(cell => {
+          const dashCount = (cell.match(/-/g) || []).length;
+          return dashCount >= 3 && dashCount >= cell.length * 0.7;
+        });
+      })();
+      
+      // Detect table: next line is separator OR has separator cells OR current line has embedded separator
+      // Also check if next line is another table row (consecutive pipes)
+      const nextLineIsPipeRow = nextLine.trim().startsWith('|') && (nextLine.match(/\|/g) || []).length >= 2;
+      
       const isTableStart = looksLikeTableRow && (
         isSeparatorLine(nextLine) || 
+        nextLineHasSeparatorCells ||
         (hasEmbeddedSeparator && pipeCount >= 3) ||
-        (hasTrailingSeparator && pipeCount >= 2)
+        (hasTrailingSeparator && pipeCount >= 2) ||
+        nextLineIsPipeRow
       );
       
-      // Log table detection for debugging
-      if (pipeCount >= 2) {
-        console.log('[MarkdownRenderer] Potential table line:', {
-          line: line.substring(0, 80),
-          pipeCount,
-          looksLikeTableRow,
-          hasEmbeddedSeparator,
-          hasTrailingSeparator,
-          nextLineIsSep: isSeparatorLine(nextLine),
-          isTableStart
-        });
-      }
-      
       if (isTableStart) {
-        console.log('[MarkdownRenderer] Table detected at line', i, ':', line);
         const tableRows: string[][] = [];
         let hasHeader = false;
         
-        // Helper to parse a table row - filters out separator cells (cells that are only dashes/colons)
+        // Helper to parse a table row - filters out separator cells (cells that are mostly dashes)
         const parseTableRow = (row: string): string[] => {
           let trimmed = row.trim();
           // Remove outer pipes if present
           if (trimmed.startsWith('|')) trimmed = trimmed.slice(1);
           if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1);
-          // Split and filter out separator-like cells (only contain -, :, or whitespace)
+          // Split and filter out separator-like cells
           return trimmed.split('|')
             .map(cell => cell.trim())
-            .filter(cell => !/^[\s:-]*-{2,}[\s:-]*$/.test(cell));
+            .filter(cell => {
+              if (!cell) return false;
+              const dashCount = (cell.match(/-/g) || []).length;
+              // Keep cell if it has actual content (less than 50% dashes)
+              return dashCount < cell.length * 0.5 || dashCount < 2;
+            });
         };
         
         // Helper to check if line is part of the table (starts with | or has 2+ pipes)
@@ -2060,8 +2306,14 @@ function MarkdownRenderer({ content }: { content: string }) {
           return t.startsWith('|') || (l.match(/\|/g) || []).length >= 2;
         };
         
-        // Helper to check if a cell looks like a separator
-        const isSeparatorCell = (cell: string): boolean => /^[\s:-]*-{2,}[\s:-]*$/.test(cell.trim());
+        // Helper to check if a cell looks like a separator (contains mostly dashes)
+        const isSeparatorCell = (cell: string): boolean => {
+          const trimmed = cell.trim();
+          if (!trimmed) return false;
+          // Cell is a separator if it's mostly dashes/colons/spaces
+          const dashCount = (trimmed.match(/-/g) || []).length;
+          return dashCount >= 2 && dashCount >= trimmed.length * 0.5;
+        };
         
         // Collect all table rows
         while (i < lines.length && isTableRow(lines[i])) {
@@ -2075,8 +2327,8 @@ function MarkdownRenderer({ content }: { content: string }) {
           
           // Check if row has embedded separator (malformed output) - extract only data cells
           const rawCells = row.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
-          const dataCells = rawCells.filter(c => !isSeparatorCell(c) && c.length > 0);
-          const hasSeparatorCells = rawCells.some(c => isSeparatorCell(c));
+          const dataCells = rawCells.filter(c => c.length > 0 && !isSeparatorCell(c));
+          const hasSeparatorCells = rawCells.some(c => c.length > 0 && isSeparatorCell(c));
           
           if (dataCells.length > 0) {
             tableRows.push(dataCells);
@@ -2093,7 +2345,6 @@ function MarkdownRenderer({ content }: { content: string }) {
         if (tableRows.length > 0) {
           const headerRow = hasHeader ? tableRows[0] : null;
           const bodyRows = hasHeader ? tableRows.slice(1) : tableRows;
-          console.log('[MarkdownRenderer] Rendering table:', { hasHeader, headerRow, bodyRowCount: bodyRows.length });
           
           elements.push(
             <div key={key++} className={styles.tableWrapper}>
@@ -2127,6 +2378,136 @@ function MarkdownRenderer({ content }: { content: string }) {
       if (line.trim() === '') {
         i++;
         continue;
+      }
+
+      // Check if this is a standalone pipe-delimited row (render as simple table - collect consecutive pipe rows)
+      const lineTrimmed = line.trim();
+      const linePipeCount = (line.match(/\|/g) || []).length;
+      if (linePipeCount >= 2 && lineTrimmed.startsWith('|')) {
+        const tableRows: string[][] = [];
+        
+        // Collect consecutive pipe rows
+        while (i < lines.length) {
+          const currentLine = lines[i];
+          const currentTrimmed = currentLine.trim();
+          const currentPipeCount = (currentLine.match(/\|/g) || []).length;
+          
+          if (currentPipeCount < 2 || !currentTrimmed.startsWith('|')) break;
+          
+          const cells = currentTrimmed.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(c => {
+            if (!c) return false;
+            const dashCount = (c.match(/-/g) || []).length;
+            return dashCount < c.length * 0.5 || dashCount < 2;
+          });
+          
+          if (cells.length >= 1) {
+            tableRows.push(cells);
+          }
+          i++;
+        }
+        
+        if (tableRows.length > 0) {
+          elements.push(
+            <div key={key++} className={styles.tableWrapper}>
+              <table className={styles.mdTable}>
+                <tbody>
+                  {tableRows.map((row, rowIdx) => (
+                    <tr key={rowIdx}>
+                      {row.map((cell, cellIdx) => (
+                        <td key={cellIdx}>{renderInline(cell)}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+          continue;
+        }
+      }
+
+      // Detect loose code (code without fences) - check if line looks like code
+      const looksLikeCodeLine = (l: string): boolean => {
+        const trimmed = l.trim();
+        // Skip very short lines or lines that look like prose
+        if (trimmed.length < 3) return false;
+        if (/^[A-Z][a-z].*[.!?]$/.test(trimmed)) return false; // Sentence
+        
+        return (
+          // Keywords at start of line
+          /^(const|let|var|function|class|import|export|if|else|for|while|return|async|await|try|catch|throw|switch|case|default|break|continue)\s/.test(trimmed) ||
+          /^(public|private|protected|static|readonly|interface|type|enum|namespace|module|declare)\s/.test(trimmed) ||
+          // Import statements
+          /^import\s*[{*]/.test(trimmed) ||
+          /^import\s+\w+/.test(trimmed) ||
+          /from\s+['"]/.test(trimmed) ||
+          // Lines ending with code characters
+          /[{};]\s*$/.test(trimmed) ||
+          /[)\]]\s*[;,]?\s*$/.test(trimmed) && /[({[]/.test(trimmed) ||
+          // Comments
+          /^\s*(\/\/|\/\*|\*)/.test(trimmed) ||
+          // Arrow functions
+          /=>\s*[{(]/.test(trimmed) ||
+          /\(\s*\)\s*=>/.test(trimmed) ||
+          /=>\s*\{?\s*$/.test(trimmed) ||
+          // Method chaining
+          /^\s*[.]\w+\(/.test(trimmed) ||
+          // Control flow continuations
+          /^\s*\}\s*(else|catch|finally)/.test(trimmed) ||
+          // Closing brackets
+          /^\s*[\])}]+[;,]?\s*$/.test(trimmed) ||
+          // Object properties with values
+          /^\s*\w+\s*:\s*['"\[\{]/.test(trimmed) ||
+          /^\s*\w+:\s*\[/.test(trimmed) ||
+          // Variable assignments
+          /^\s*\w+\s*=\s*[^=]/.test(trimmed) && !/^[A-Z]/.test(trimmed) ||
+          // Function calls
+          /^\s*\w+\(.*\)[;,]?\s*$/.test(trimmed) ||
+          // Type annotations
+          /:\s*(string|number|boolean|any|void|null|undefined)\s*[;,]?\s*$/.test(trimmed) ||
+          // JSX-like patterns
+          /^<\w+/.test(trimmed) || /^\s*<\/\w+>/.test(trimmed) ||
+          // Query patterns (react-query, etc)
+          /queryKey\s*:/.test(trimmed) ||
+          /queryFn\s*:/.test(trimmed) ||
+          // Response patterns
+          /response\.\w+/.test(trimmed) ||
+          // API/fetch patterns
+          /fetch\(/.test(trimmed) ||
+          /await\s+\w+/.test(trimmed)
+        );
+      };
+
+      if (looksLikeCodeLine(line)) {
+        const codeLines: string[] = [];
+        while (i < lines.length && (looksLikeCodeLine(lines[i]) || lines[i].trim() === '' || /^\s+/.test(lines[i]))) {
+          if (lines[i].trim() === '' && codeLines.length > 0 && i + 1 < lines.length && !looksLikeCodeLine(lines[i + 1]) && !/^\s+/.test(lines[i + 1])) {
+            break;
+          }
+          codeLines.push(lines[i]);
+          i++;
+        }
+        
+        if (codeLines.length > 0) {
+          const codeContent = codeLines.join('\n');
+          elements.push(
+            <div key={key++} className={styles.codeBlock}>
+              <div className={styles.codeBlockHeader}>
+                <span className={styles.codeBlockLang}>code</span>
+                <button 
+                  className={styles.copyButton}
+                  onClick={() => navigator.clipboard.writeText(codeContent)}
+                >
+                  Copy
+                </button>
+              </div>
+              <div className={styles.codeBlockContent}>
+                <pre><code>{codeContent}</code></pre>
+              </div>
+            </div>
+          );
+          continue;
+        }
       }
 
       // Regular paragraph
@@ -3366,6 +3747,40 @@ export function AIPanel() {
 
   return (
     <div className={styles.aiPanel}>
+      {/* Header with conversation title and actions */}
+      <div className={styles.panelHeader}>
+        <div className={styles.conversationTitle}>
+          {activeConversation ? (
+            <>
+              <MessageSquare size={14} />
+              <span>{activeConversation.title || 'New Chat'}</span>
+            </>
+          ) : (
+            <>
+              <Bot size={14} />
+              <span>AI Assistant</span>
+            </>
+          )}
+        </div>
+        <div className={styles.headerActions}>
+          <button
+            className={styles.newChatBtn}
+            onClick={createConversation}
+            title="New Chat"
+          >
+            <Plus size={14} />
+            <span>New Chat</span>
+          </button>
+          <button
+            className={`${styles.headerBtn} ${showHistory ? styles.active : ''}`}
+            onClick={() => setShowHistory(!showHistory)}
+            title="Chat History"
+          >
+            <History size={16} />
+          </button>
+        </div>
+      </div>
+
       <div className={styles.messages} ref={messagesContainerRef} onScroll={handleScroll}>
         {!activeConversation || activeConversation.messages.length === 0 ? (
           <div className={styles.empty}>
@@ -3374,7 +3789,7 @@ export function AIPanel() {
               {agentMode === 'plan' ? 'Plan Mode' : 'AI Assistant'}
             </h3>
             <p>
-              {agentMode === 'plan' 
+              {agentMode === 'plan'
                 ? 'Design solutions and explore approaches before implementation.'
                 : agentMode === 'agent'
                 ? 'Create, edit, and manage files in your workspace.'

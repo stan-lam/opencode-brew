@@ -1,9 +1,26 @@
-import { useState } from 'react';
-import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2 } from 'lucide-react';
 import { useSettingsStore, Settings as SettingsType } from '../../store/settingsStore';
 import styles from './SettingsPanel.module.css';
 
-type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'plugins';
+type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'plugins' | 'usage';
+
+interface UsageStats {
+  model: string;
+  provider: string;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  request_count: number;
+}
+
+interface OverallStats {
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_requests: number;
+  by_model: UsageStats[];
+}
 
 interface SettingItem {
   id: keyof SettingsType;
@@ -21,6 +38,7 @@ const categories = [
   { id: 'ai', label: 'AI Assistant', icon: Bot },
   { id: 'git', label: 'Git', icon: GitBranch },
   { id: 'plugins', label: 'Plugins', icon: Puzzle },
+  { id: 'usage', label: 'Usage', icon: BarChart3 },
 ] as const;
 
 const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
@@ -61,12 +79,52 @@ const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
   plugins: [
     { id: 'autoUpdatePlugins', label: 'Auto Update', description: 'Automatically update plugins', type: 'toggle' },
   ],
+  usage: [],
 };
 
 export function SettingsPanel() {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general');
   const settings = useSettingsStore();
   const { updateSetting } = settings;
+  const [usageStats, setUsageStats] = useState<OverallStats | null>(null);
+  const [loadingUsage, setLoadingUsage] = useState(false);
+
+  const fetchUsageStats = useCallback(async () => {
+    setLoadingUsage(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('init_usage_db');
+      const stats = await invoke<OverallStats>('get_usage_stats');
+      setUsageStats(stats);
+    } catch (error) {
+      console.error('Failed to fetch usage stats:', error);
+      setUsageStats(null);
+    } finally {
+      setLoadingUsage(false);
+    }
+  }, []);
+
+  const clearUsageHistory = useCallback(async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('clear_usage_history');
+      setUsageStats({
+        total_prompt_tokens: 0,
+        total_completion_tokens: 0,
+        total_tokens: 0,
+        total_requests: 0,
+        by_model: [],
+      });
+    } catch (error) {
+      console.error('Failed to clear usage history:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeCategory === 'usage') {
+      fetchUsageStats();
+    }
+  }, [activeCategory, fetchUsageStats]);
 
   return (
     <div className={styles.settingsPanel}>
@@ -87,55 +145,144 @@ export function SettingsPanel() {
         <h2 className={styles.title}>
           {categories.find((c) => c.id === activeCategory)?.label}
         </h2>
-        <div className={styles.settingsList}>
-          {settingsConfig[activeCategory].map((setting) => {
-            const value = settings[setting.id];
-            return (
-              <div key={setting.id} className={styles.settingItem}>
-                <div className={styles.settingInfo}>
-                  <label className={styles.settingLabel}>{setting.label}</label>
-                  <p className={styles.settingDescription}>{setting.description}</p>
-                </div>
-                <div className={styles.settingControl}>
-                  {setting.type === 'toggle' && (
-                    <button
-                      className={`${styles.toggle} ${value ? styles.on : ''}`}
-                      onClick={() => updateSetting(setting.id, !value)}
-                    >
-                      <span className={styles.toggleThumb} />
-                    </button>
-                  )}
-                  {setting.type === 'select' && (
-                    <select
-                      value={value as string}
-                      onChange={(e) => updateSetting(setting.id, e.target.value as any)}
-                    >
-                      {setting.options?.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  {setting.type === 'number' && (
-                    <input
-                      type="number"
-                      value={value as number}
-                      onChange={(e) => updateSetting(setting.id, parseInt(e.target.value) as any)}
-                    />
-                  )}
-                  {setting.type === 'input' && (
-                    <input
-                      type="text"
-                      value={value as string}
-                      onChange={(e) => updateSetting(setting.id, e.target.value as any)}
-                    />
-                  )}
-                </div>
+        
+        {activeCategory === 'usage' ? (
+          <div className={styles.usageContent}>
+            <div className={styles.usageHeader}>
+              <p className={styles.usageDesc}>Track your AI token usage across all conversations and models.</p>
+              <button 
+                className={styles.clearBtn}
+                onClick={clearUsageHistory}
+                disabled={loadingUsage || !usageStats?.total_requests}
+              >
+                <Trash2 size={14} />
+                <span>Clear History</span>
+              </button>
+            </div>
+
+            {loadingUsage ? (
+              <div className={styles.loadingState}>
+                <Loader2 size={24} className={styles.spinning} />
+                <span>Loading usage data...</span>
               </div>
-            );
-          })}
-        </div>
+            ) : usageStats ? (
+              <>
+                <div className={styles.usageSummary}>
+                  <div className={styles.usageCard}>
+                    <div className={styles.usageValue}>{usageStats.total_requests.toLocaleString()}</div>
+                    <div className={styles.usageLabel}>Total Requests</div>
+                  </div>
+                  <div className={styles.usageCard}>
+                    <div className={styles.usageValue}>{usageStats.total_tokens.toLocaleString()}</div>
+                    <div className={styles.usageLabel}>Total Tokens</div>
+                  </div>
+                  <div className={styles.usageCard}>
+                    <div className={styles.usageValue}>{usageStats.total_prompt_tokens.toLocaleString()}</div>
+                    <div className={styles.usageLabel}>Prompt Tokens</div>
+                  </div>
+                  <div className={styles.usageCard}>
+                    <div className={styles.usageValue}>{usageStats.total_completion_tokens.toLocaleString()}</div>
+                    <div className={styles.usageLabel}>Completion Tokens</div>
+                  </div>
+                </div>
+
+                {usageStats.by_model.length > 0 && (
+                  <div className={styles.usageTable}>
+                    <h4>Usage by Model</h4>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Model</th>
+                          <th>Provider</th>
+                          <th>Requests</th>
+                          <th>Prompt</th>
+                          <th>Completion</th>
+                          <th>Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {usageStats.by_model.map((stat, idx) => (
+                          <tr key={idx}>
+                            <td>{stat.model}</td>
+                            <td className={styles.providerCell}>{stat.provider}</td>
+                            <td>{stat.request_count.toLocaleString()}</td>
+                            <td>{stat.total_prompt_tokens.toLocaleString()}</td>
+                            <td>{stat.total_completion_tokens.toLocaleString()}</td>
+                            <td>{stat.total_tokens.toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {usageStats.by_model.length === 0 && (
+                  <div className={styles.emptyState}>
+                    <BarChart3 size={48} />
+                    <p>No usage data yet</p>
+                    <span>Token usage will appear here as you use the AI assistant.</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className={styles.emptyState}>
+                <BarChart3 size={48} />
+                <p>Unable to load usage data</p>
+                <span>There was an error loading usage statistics.</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className={styles.settingsList}>
+            {settingsConfig[activeCategory].map((setting) => {
+              const value = settings[setting.id];
+              return (
+                <div key={setting.id} className={styles.settingItem}>
+                  <div className={styles.settingInfo}>
+                    <label className={styles.settingLabel}>{setting.label}</label>
+                    <p className={styles.settingDescription}>{setting.description}</p>
+                  </div>
+                  <div className={styles.settingControl}>
+                    {setting.type === 'toggle' && (
+                      <button
+                        className={`${styles.toggle} ${value ? styles.on : ''}`}
+                        onClick={() => updateSetting(setting.id, !value)}
+                      >
+                        <span className={styles.toggleThumb} />
+                      </button>
+                    )}
+                    {setting.type === 'select' && (
+                      <select
+                        value={value as string}
+                        onChange={(e) => updateSetting(setting.id, e.target.value as any)}
+                      >
+                        {setting.options?.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {setting.type === 'number' && (
+                      <input
+                        type="number"
+                        value={value as number}
+                        onChange={(e) => updateSetting(setting.id, parseInt(e.target.value) as any)}
+                      />
+                    )}
+                    {setting.type === 'input' && (
+                      <input
+                        type="text"
+                        value={value as string}
+                        onChange={(e) => updateSetting(setting.id, e.target.value as any)}
+                      />
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

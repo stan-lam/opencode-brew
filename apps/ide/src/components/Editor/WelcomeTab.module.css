@@ -79,6 +79,13 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  margin-top: 12px;
+}
+
+.recentTitle {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-bottom: 4px;
 }
 
 .recentItem {

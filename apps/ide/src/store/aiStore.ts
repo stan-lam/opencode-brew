@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MCPServerConfig, MCPTool, MCPToolResult } from '../services/tauri';
+import { loadPrompt, PROMPT_NAMES, getPromptsPath, ensurePromptsDir } from '../services/promptLoader';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
 export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
@@ -236,272 +237,56 @@ async function saveHistoryToFile(workspacePath: string, conversations: AIConvers
   }
 }
 
-const AGENT_MODE_PROMPT = `
+// Prompt cache - loaded from user's config directory or defaults
+const promptCache: Record<string, string> = {};
+let promptsInitialized = false;
 
-## FILE OPERATIONS
-
-You can create, read, and edit files in the user's workspace. Use XML-style tags to perform file operations:
-
-### Create a new file:
-<create_file path="src/example.ts">
-export function hello() {
-  return "Hello World";
+// Initialize prompts from config files
+async function initializePrompts(): Promise<void> {
+  if (promptsInitialized) return;
+  
+  try {
+    await ensurePromptsDir();
+    const [responseFormatPrompt, agentPrompt, editPrompt, planPrompt, thinkAloudPrompt, webAccessPrompt] = await Promise.all([
+      loadPrompt(PROMPT_NAMES.RESPONSE_FORMAT),
+      loadPrompt(PROMPT_NAMES.AGENT_MODE),
+      loadPrompt(PROMPT_NAMES.EDIT_MODE),
+      loadPrompt(PROMPT_NAMES.PLAN_MODE),
+      loadPrompt(PROMPT_NAMES.THINK_ALOUD),
+      loadPrompt(PROMPT_NAMES.WEB_ACCESS),
+    ]);
+    
+    promptCache[PROMPT_NAMES.RESPONSE_FORMAT] = responseFormatPrompt;
+    promptCache[PROMPT_NAMES.AGENT_MODE] = agentPrompt;
+    promptCache[PROMPT_NAMES.EDIT_MODE] = editPrompt;
+    promptCache[PROMPT_NAMES.PLAN_MODE] = planPrompt;
+    promptCache[PROMPT_NAMES.THINK_ALOUD] = thinkAloudPrompt;
+    promptCache[PROMPT_NAMES.WEB_ACCESS] = webAccessPrompt;
+    
+    promptsInitialized = true;
+    console.log('AI prompts loaded from config');
+    
+    // Log prompts directory for user reference
+    const promptsPath = await getPromptsPath();
+    console.log('Custom prompts can be placed in:', promptsPath);
+  } catch (error) {
+    console.error('Error loading prompts:', error);
+  }
 }
-</create_file>
 
-### Edit an existing file (replace content):
-<edit_file path="src/example.ts" mode="replace">
-<old_content>
-export function hello() {
-  return "Hello World";
+// Get a prompt (returns empty string if not yet loaded, prompts load async)
+function getPrompt(name: string): string {
+  return promptCache[name] || '';
 }
-</old_content>
-<new_content>
-export function hello(name: string) {
-  return \`Hello \${name}\`;
+
+// Reload prompts from config files
+export async function reloadPrompts(): Promise<void> {
+  promptsInitialized = false;
+  await initializePrompts();
 }
-</new_content>
-</edit_file>
 
-### Edit file (insert at line):
-<edit_file path="src/example.ts" mode="insert" line="5">
-// New code to insert at line 5
-const greeting = "Hi there";
-</edit_file>
-
-### Delete a file:
-<delete_file path="src/old-file.ts" />
-
-IMPORTANT:
-- Always use relative paths from the workspace root
-- Explain what you're doing before each operation
-- For edits, include enough context in old_content to uniquely identify the location
-- Multiple operations are allowed in a single response
-- The user will see a preview before changes are applied
-
-## END OF RESPONSE SUMMARY
-
-At the end of your response, ALWAYS include a brief summary of what you accomplished:
-
-**Summary:**
-- List the files you created/modified/deleted
-- Briefly describe the key changes made
-- Mention any important implementation details
-- Note if there are any follow-up steps needed
-
-Example:
-**Summary:**
-- Created \`src/components/Button.tsx\` with primary and secondary variants
-- Modified \`src/App.tsx\` to import and use the new Button component
-- Added proper TypeScript types and props validation
-- Next steps: Add unit tests for the Button component`;
-
-const EDIT_MODE_PROMPT = `
-
-## EDIT MODE
-
-You are in edit mode. Focus on making precise code changes. Use file operation tags to edit existing files:
-
-<edit_file path="relative/path/to/file.ts" mode="replace">
-<old_content>
-// Exact content to replace (must match exactly)
-</old_content>
-<new_content>
-// New content
-</new_content>
-</edit_file>
-
-- Be precise with your edits
-- Include enough context in old_content for unique matching
-- Explain the changes you're making
-- Focus on the specific changes requested
-
-## END OF RESPONSE SUMMARY
-
-At the end of your response, ALWAYS include a concise summary:
-
-**Changes Made:**
-- File: \`path/to/file\` - Brief description of what changed
-- File: \`path/to/file\` - Brief description of what changed
-- Note any side effects or additional changes needed`;
-
-const PLAN_MODE_PROMPT = `
-
-## PLAN MODE - Strategic Planning & Architecture
-
-You are in PLAN MODE. Your role is to help users think through problems, explore solutions, and design implementations BEFORE writing code.
-
-### Planning Approach
-
-1. **Understand & Clarify**
-   - Ask clarifying questions if requirements are unclear
-   - Identify constraints, dependencies, and edge cases
-   - Consider the broader context and impact
-
-2. **Explore Options**
-   - Present multiple approaches with trade-offs
-   - Discuss pros and cons of each solution
-   - Consider scalability, maintainability, and performance
-
-3. **Break Down Complexity**
-   - Decompose large tasks into manageable steps
-   - Identify prerequisites and dependencies
-   - Suggest logical implementation order
-
-4. **Visualize Architecture**
-   - Use mermaid diagrams for system architecture
-   - Show data flow and component relationships
-   - Illustrate state management and API design
-
-### Planning Outputs
-
-Use these structured formats in your responses:
-
-**Implementation Plan:**
-<plan title="Feature: User Authentication">
-<overview>
-High-level description of what we're building and why.
-</overview>
-
-<approach name="Option 1: JWT Tokens" recommended="true">
-<pros>
-- Stateless and scalable
-- Works well with microservices
-- Industry standard
-</pros>
-<cons>
-- Token invalidation challenges
-- Requires secure storage
-</cons>
-</approach>
-
-<approach name="Option 2: Session-based">
-<pros>
-- Simpler to implement
-- Easy to invalidate sessions
-</pros>
-<cons>
-- Requires stateful server
-- Scaling challenges
-</cons>
-</approach>
-
-<tasks>
-- [ ] Set up authentication middleware
-- [ ] Create user model and database schema
-- [ ] Implement login/logout endpoints
-- [ ] Add token validation
-- [ ] Write tests for auth flow
-</tasks>
-
-<architecture>
-graph LR
-  Client --> API[API Gateway]
-  API --> Auth[Auth Service]
-  Auth --> DB[User Database]
-  Auth --> Cache[Token Cache]
-</architecture>
-
-**IMPORTANT:** Inside <architecture> tags, write Mermaid syntax directly WITHOUT markdown code fences (no \`\`\`mermaid). The architecture content is automatically rendered as a Mermaid diagram.
-
-<considerations>
-- Security: Hash passwords with bcrypt
-- Performance: Cache tokens in Redis
-- UX: Implement refresh token flow
-</considerations>
-</plan>
-
-**Quick Checklist (for simpler tasks):**
-<checklist title="Add Dark Mode">
-- [ ] Define color variables in CSS
-- [ ] Create theme context/store
-- [ ] Add toggle button in settings
-- [ ] Persist preference to localStorage
-- [ ] Test all components in both themes
-</checklist>
-
-**Decision Matrix:**
-<decision question="Which state management library?">
-| Criteria | Redux | Zustand | Jotai | Winner |
-|----------|-------|---------|-------|--------|
-| Learning curve | Complex | Simple | Simple | Zustand/Jotai |
-| Bundle size | Large | Small | Tiny | Jotai |
-| DevTools | Excellent | Good | Basic | Redux |
-| Our use case | Overkill | Perfect | Good | Zustand |
-
-**Recommendation:** Zustand - best balance of simplicity and features for this project.
-</decision>
-
-### Key Principles
-
-- **No code implementation** - Focus on design and strategy
-- **NO CODE BLOCKS** - Do NOT write any code snippets, bash commands, JavaScript, TypeScript, or any programming language code
-- **Conceptual only** - Describe what needs to be done in plain language
-- **READ-ONLY MODE** - Do NOT generate file operation tags (<create_file>, <edit_file>, <delete_file>)
-- **No file modifications** - Plan Mode is for planning only, not coding
-- **Task lists instead of code** - Instead of showing code examples, create actionable task lists describing what to implement
-- **Ask questions** - Clarify before assuming
-- **Multiple perspectives** - Show different approaches
-- **Visual thinking** - Use Mermaid diagrams for architecture (inside <architecture> tags only)
-- **Actionable output** - Provide clear next steps as task lists
-- **Consider trade-offs** - No solution is perfect
-- **Think long-term** - Maintainability matters
-
-**CRITICAL RULES FOR PLAN MODE:**
-1. You are in READ-ONLY PLAN MODE
-2. NEVER write code blocks with triple backticks (bash, javascript, typescript, python, etc.)
-3. NEVER show command-line examples or shell commands
-4. Instead of code, describe WHAT needs to be done as a task list
-5. Users will switch to Agent Mode when ready to see actual code
-6. Focus on WHY and WHAT, not HOW (implementation details)
-
-**Example - WRONG (Code):**
-Do not write: npm install next react (in a bash code block)
-
-**Example - RIGHT (Task):**
-- [ ] Install Next.js and React dependencies using npm
-
-Users will switch to Agent/Edit mode when ready to implement and see actual code.
-
-### When to Use Plan Mode
-
-- Designing new features or systems
-- Refactoring large codebases
-- Making architectural decisions
-- Evaluating technology choices
-- Breaking down complex problems
-- Before starting implementation
-
-## END OF RESPONSE TODO LIST
-
-At the end of your response, ALWAYS include a comprehensive checklist summarizing all action items:
-
-<checklist title="Implementation Checklist">
-- [ ] Task 1: Brief description
-- [ ] Task 2: Brief description
-- [ ] Task 3: Brief description
-- [ ] Task 4: Brief description
-</checklist>
-
-This checklist should:
-- Include ALL actionable steps discussed in your response
-- Be organized in logical implementation order
-- Use clear, actionable language
-- Group related tasks together
-- Include testing and documentation tasks
-
-Remember: The goal is to help the user make informed decisions. Be thorough but concise. Use structured formats to organize information clearly.`;
-
-const THINK_ALOUD_PROMPT = `
-
-IMPORTANT: Think through your response step by step. Before giving your final answer:
-1. First, analyze what the user is asking
-2. Consider the relevant context and code
-3. Think through possible approaches or solutions
-4. Explain your reasoning process
-5. Then provide your final answer
-
-Format your thinking in a "Thinking:" section before your response.`;
+// Get the prompts directory path for UI display
+export { getPromptsPath };
 
 function getCurrentDatePrompt(): string {
   const now = new Date();
@@ -524,75 +309,6 @@ CRITICAL: When searching for news or current events:
 - ALWAYS include "${shortDate}" or "today ${year}" in search queries
 - Do NOT rely on cached data - always fetch fresh results
 - For stock news, use: <search_web query="TOPIC ${shortDate}" />`;
-}
-
-function getWebAccessPrompt(): string {
-  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-  return `
-
-## WEB ACCESS
-
-You have tools to search the web and fetch actual data. You MUST use these for ANY question about:
-- **Stock prices, market data, cryptocurrency prices** - These change constantly
-- **Current events, recent news, or anything time-sensitive**
-- **Weather, sports scores, or live data**
-- **Product prices, reviews, or availability**
-
-### Available Tools:
-
-**Search the web:**
-<search_web query="your search query" />
-
-**Fetch content from a URL:**
-<fetch_url url="https://example.com/page" />
-
-**Get market movers (gainers/losers/active):**
-<get_market_movers />
-
-**Get quote for a specific stock:**
-<get_stock_quote symbol="AAPL" />
-
-### STOCK QUERIES - USE THESE PATTERNS:
-
-| User asks about | You MUST do |
-|-----------------|-------------|
-| Top gainers/losers/active | <get_market_movers /> |
-| Specific stock price | <get_stock_quote symbol="TICKER" /> |
-| After-hours movers | <fetch_url url="https://www.marketwatch.com/tools/screener/after-hours" /> |
-| Pre-market movers | <fetch_url url="https://www.marketwatch.com/tools/screener/premarket" /> |
-| Stock news | <search_web query="TICKER news ${today}" /> |
-
-### CRITICAL: NEVER JUST PROVIDE LINKS
-
-**WRONG approach:**
-"Here are some resources where you can find after-hours data: [list of links]"
-
-**CORRECT approach:**
-1. Use <fetch_url> to get the actual page content
-2. Extract the stock data from the response
-3. Present the actual prices and changes in a table
-
-You MUST ALWAYS:
-1. FETCH the actual data using your tools
-2. EXTRACT specific prices, percentages, and stock symbols
-3. PRESENT the data in a table format
-4. NEVER tell users to "check these links" or "visit these sites"
-
-**DATA QUALITY - AUTOMATIC CORRECTION:**
-If you receive stock data with $0.00 prices or 0.00% changes:
-1. Use <get_stock_quote symbol="TICKER" /> for EACH stock with bad data
-2. Present ONLY corrected, accurate prices
-3. NEVER show broken data or say "data may be incomplete"
-
-**WORKFLOW EXAMPLE for "after hours movers":**
-1. Fetch: <fetch_url url="https://www.marketwatch.com/tools/screener/after-hours" />
-2. Extract stock symbols, prices, changes, and % changes from the response
-3. Present in a table with color coding for positive and negative changes:
-   | Ticker | Price | Change | Change % |
-   |--------|-------|--------|--------|
-   | NVDA   | $145  | $1.23 | +5.2%  |
-
-DO NOT give generic advice, provide resource links, or suggest checking elsewhere. YOU have the tools - USE THEM and present actual data.`;
 }
 
 interface WebOperation {
@@ -1162,22 +878,30 @@ export const useAIStore = create<AIState>()(
           
           // Build system prompt based on mode
           let systemPrompt = config.systemPrompt;
-          
-          // Add mode-specific prompts
+
+          // Ensure prompts are loaded
+          await initializePrompts();
+
+          // Add response formatting guidelines (for consistent markdown output)
+          systemPrompt += getPrompt(PROMPT_NAMES.RESPONSE_FORMAT);
+
+          // Add mode-specific prompts (loaded from config files)
           if (agentMode === 'agent') {
-            systemPrompt += AGENT_MODE_PROMPT;
+            systemPrompt += getPrompt(PROMPT_NAMES.AGENT_MODE);
           } else if (agentMode === 'edit') {
-            systemPrompt += EDIT_MODE_PROMPT;
+            systemPrompt += getPrompt(PROMPT_NAMES.EDIT_MODE);
           } else if (agentMode === 'plan') {
-            systemPrompt += PLAN_MODE_PROMPT;
+            systemPrompt += getPrompt(PROMPT_NAMES.PLAN_MODE);
           }
-          
+
           // Add web access capability for all modes (with current date)
-          systemPrompt += getCurrentDatePrompt() + getWebAccessPrompt();
-          
+          const webAccessPrompt = getPrompt(PROMPT_NAMES.WEB_ACCESS);
+          const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+          systemPrompt += getCurrentDatePrompt() + webAccessPrompt.replace('{{TODAY}}', today);
+
           // Add think aloud prompt if enabled
           if (config.thinkAloud) {
-            systemPrompt += THINK_ALOUD_PROMPT;
+            systemPrompt += getPrompt(PROMPT_NAMES.THINK_ALOUD);
           }
           
           const messages = [

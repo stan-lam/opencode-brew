@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Edit, Trash2, Clock, FileText, Globe, Terminal, Loader2, CheckCircle, XCircle, History, Mail, MessageSquare, Layers, Zap } from 'lucide-react';
+import { Play, Edit, Trash2, Clock, FileText, Globe, Terminal, Loader2, CheckCircle, XCircle, History, Mail, MessageSquare, Layers, Zap, AlertTriangle } from 'lucide-react';
 import { useAssistantStore, ExecutionLog, getAgentStages } from '../store/assistantStore';
 import styles from './AgentDetail.module.css';
 
@@ -12,6 +12,8 @@ export function AgentDetail() {
   const { getSelectedAgent, setIsEditing, removeAgent, addExecution, setView } = useAssistantStore();
   const [isRunning, setIsRunning] = useState(false);
   const [lastResult, setLastResult] = useState<{ status: 'success' | 'failed' | 'error'; message: string; timestamp: Date } | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   
   const agent = getSelectedAgent();
   
@@ -56,22 +58,157 @@ export function AgentDetail() {
 
   const dismissResult = () => setLastResult(null);
 
-  const handleDelete = async () => {
-    if (!confirm(`Are you sure you want to delete "${agent.name}"?`)) return;
-    
+  const handleDeleteClick = () => {
+    setShowDeleteConfirm(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    setIsDeleting(true);
     try {
       const invoke = await getInvoke();
       await invoke('delete_agent', { id: agent.id });
       removeAgent(agent.id);
+      setShowDeleteConfirm(false);
     } catch (error) {
       console.error('Failed to delete agent:', error);
+    } finally {
+      setIsDeleting(false);
     }
+  };
+
+  const handleDeleteCancel = () => {
+    setShowDeleteConfirm(false);
+  };
+
+  const cronToHumanReadable = (expr: string): string => {
+    const parts = expr.trim().split(/\s+/);
+    if (parts.length !== 5) return expr;
+    
+    const [min, hour, dom, _month, dow] = parts;
+    
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    
+    const formatTime = (h: number, m: number): string => {
+      const period = h >= 12 ? 'PM' : 'AM';
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      return m === 0 ? `${hour12} ${period}` : `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
+    };
+
+    const formatHour = (h: number): string => {
+      const period = h >= 12 ? 'PM' : 'AM';
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      return `${hour12}${period}`;
+    };
+
+    // Helper to check if a field is a simple number (no ranges, lists, or wildcards)
+    const isSimpleNumber = (field: string): boolean => /^\d+$/.test(field);
+    
+    // Helper to format day of week ranges/lists
+    const formatDow = (d: string): string => {
+      if (d === '1-5') return 'weekdays';
+      if (d === '0,6' || d === '6,0') return 'weekends';
+      if (isSimpleNumber(d)) return dayNames[parseInt(d)] || d;
+      if (d.includes('-')) {
+        const [start, end] = d.split('-').map(Number);
+        return `${dayNames[start]}-${dayNames[end]}`;
+      }
+      return d;
+    };
+
+    // Helper to format hour ranges
+    const formatHourRange = (h: string): string => {
+      if (h.includes('-')) {
+        const [start, end] = h.split('-').map(Number);
+        return `${formatHour(start)}-${formatHour(end)}`;
+      }
+      return formatHour(parseInt(h));
+    };
+
+    // Every N minutes: */N * * * *
+    if (min.startsWith('*/') && hour === '*' && dom === '*' && dow === '*') {
+      const interval = parseInt(min.slice(2));
+      return interval === 1 ? 'Every minute' : `Every ${interval} minutes`;
+    }
+    
+    // Hourly with hour range and day range: M H-H * * D-D (e.g., 0 6-14 * * 1-5)
+    if (isSimpleNumber(min) && hour.includes('-') && dom === '*' && dow !== '*') {
+      const m = parseInt(min);
+      const minStr = m === 0 ? '' : ` at minute ${m}`;
+      return `Hourly ${formatHourRange(hour)}${minStr}, ${formatDow(dow)}`;
+    }
+    
+    // Hourly with hour range: M H-H * * *
+    if (isSimpleNumber(min) && hour.includes('-') && dom === '*' && dow === '*') {
+      const m = parseInt(min);
+      const minStr = m === 0 ? '' : ` at minute ${m}`;
+      return `Hourly ${formatHourRange(hour)}${minStr}`;
+    }
+    
+    // Hourly: M * * * * (specific minute, every hour)
+    if (isSimpleNumber(min) && hour === '*' && dom === '*' && dow === '*') {
+      const m = parseInt(min);
+      return m === 0 ? 'Every hour' : `Hourly at minute ${m}`;
+    }
+    
+    // Every N hours: M */N * * *
+    if (isSimpleNumber(min) && hour.startsWith('*/') && dom === '*' && dow === '*') {
+      const interval = parseInt(hour.slice(2));
+      return `Every ${interval} hours at minute ${min}`;
+    }
+    
+    // Weekly: M H * * D (specific single day of week, specific single hour)
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && isSimpleNumber(dow)) {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      const d = parseInt(dow);
+      const dayName = dayNames[d] || `day ${d}`;
+      return `Every ${dayName} at ${formatTime(h, m)}`;
+    }
+    
+    // Weekdays/specific days at specific time: M H * * D-D or D,D
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && dow !== '*' && !isSimpleNumber(dow)) {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      return `${formatDow(dow)} at ${formatTime(h, m)}`;
+    }
+    
+    // Monthly: M H D * *
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && isSimpleNumber(dom) && dow === '*') {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      const d = parseInt(dom);
+      const suffix = d === 1 ? 'st' : d === 2 ? 'nd' : d === 3 ? 'rd' : 'th';
+      return `Monthly on the ${d}${suffix} at ${formatTime(h, m)}`;
+    }
+    
+    // Daily: M H * * *
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && dow === '*') {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      if (h === 0 && m === 0) return 'Daily at midnight';
+      if (h === 12 && m === 0) return 'Daily at noon';
+      return `Daily at ${formatTime(h, m)}`;
+    }
+    
+    // Every N days: M H */N * *
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom.startsWith('*/') && dow === '*') {
+      const interval = parseInt(dom.slice(2));
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      return `Every ${interval} days at ${formatTime(h, m)}`;
+    }
+    
+    return expr;
   };
 
   const getTriggerDescription = () => {
     switch (agent.trigger.type) {
       case 'cron':
-        return `Runs on schedule: ${agent.trigger.expression}`;
+        const humanReadable = cronToHumanReadable(agent.trigger.expression || '');
+        const isCustom = humanReadable === agent.trigger.expression;
+        return isCustom 
+          ? `Runs on schedule: ${agent.trigger.expression}`
+          : `${humanReadable} (${agent.trigger.expression})`;
       case 'file_watch':
         return `Watches: ${agent.trigger.path}`;
       case 'webhook':
@@ -117,7 +254,7 @@ export function AgentDetail() {
           <button className={styles.editBtn} onClick={() => setIsEditing(true)}>
             <Edit size={18} />
           </button>
-          <button className={styles.deleteBtn} onClick={handleDelete}>
+          <button className={styles.deleteBtn} onClick={handleDeleteClick}>
             <Trash2 size={18} />
           </button>
         </div>
@@ -212,6 +349,48 @@ export function AgentDetail() {
           </div>
         </section>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div className={styles.modalOverlay} onClick={handleDeleteCancel}>
+          <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div className={styles.modalIcon}>
+              <AlertTriangle size={32} />
+            </div>
+            <h3>Delete Agent</h3>
+            <p>Are you sure you want to delete <strong>"{agent.name}"</strong>?</p>
+            <p className={styles.modalWarning}>
+              This will also delete all execution history for this agent. This action cannot be undone.
+            </p>
+            <div className={styles.modalActions}>
+              <button 
+                className={styles.cancelBtn} 
+                onClick={handleDeleteCancel}
+                disabled={isDeleting}
+              >
+                Cancel
+              </button>
+              <button 
+                className={styles.confirmDeleteBtn} 
+                onClick={handleDeleteConfirm}
+                disabled={isDeleting}
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader2 size={16} className={styles.spinner} />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    Delete Agent
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

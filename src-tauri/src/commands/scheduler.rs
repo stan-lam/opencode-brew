@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Manager};
-use chrono::Utc;
+use chrono::{Utc, Timelike, Datelike};
 use uuid::Uuid;
 use regex::Regex;
 
 use crate::commands::web;
+use crate::commands::usage;
 
 // ============= Default AI System Prompt (with web access capabilities) =============
 
@@ -630,8 +631,19 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
                     output_parts.push(format!("  [{}] Success: {}", action_name, output));
                     stage_outputs.push((action_name.clone(), output.clone()));
                     
-                    // Store individual action output
+                    // Store individual action output by name
                     context.insert(format!("{}_output", action_name), output.clone());
+                    
+                    // Also store by action ID for template compatibility
+                    // Find the action ID from the stage actions
+                    for action in &stage.actions {
+                        if action.name == *action_name {
+                            context.insert(format!("{}_output", action.id), output.clone());
+                            // Also store with hyphens replaced by underscores for easier template use
+                            context.insert(format!("{}_output", action.id.replace("-", "_")), output.clone());
+                            break;
+                        }
+                    }
                 }
                 Err(err) => {
                     output_parts.push(format!("  [{}] Error: {}", action_name, err));
@@ -1113,6 +1125,25 @@ async fn execute_mcp_tool(
     Ok(output.join("\n"))
 }
 
+/// Record token usage for scheduler AI prompts
+async fn record_scheduler_token_usage(app: &AppHandle, model: &str, provider: &str, prompt_content: &str, completion_content: &str) {
+    let prompt_tokens = (prompt_content.len() as f64 / 4.0).ceil() as i64;
+    let completion_tokens = (completion_content.len() as f64 / 4.0).ceil() as i64;
+    
+    println!("[scheduler] Recording token usage: model={}, provider={}, prompt={}, completion={}", 
+             model, provider, prompt_tokens, completion_tokens);
+    
+    if let Err(e) = usage::record_token_usage(
+        app.clone(),
+        model.to_string(),
+        provider.to_string(),
+        prompt_tokens,
+        completion_tokens,
+    ).await {
+        println!("[scheduler] Failed to record token usage: {}", e);
+    }
+}
+
 async fn execute_ai_prompt(
     app: &AppHandle,
     prompt: &str,
@@ -1134,6 +1165,12 @@ async fn execute_ai_prompt(
     let anthropic_key = if let Some(ref key) = model_settings.anthropic_key { key } else { &global.anthropic_key };
     let custom_base_url = if let Some(ref url) = model_settings.custom_base_url { url } else { &global.custom_base_url };
     let custom_api_key = if let Some(ref key) = model_settings.custom_api_key { key } else { &global.custom_api_key };
+    
+    // Clone values needed for token usage recording
+    let model_for_usage = model.clone();
+    let provider_for_usage = provider.clone();
+    let prompt_for_usage = prompt.to_string();
+    let system_prompt_for_usage = system_prompt.map(|s| s.to_string()).unwrap_or_default();
 
     // Use a long timeout for AI generation - large models can take several minutes
     let client = reqwest::Client::builder()
@@ -1247,12 +1284,18 @@ async fn execute_ai_prompt(
                     if let Some(retry_result) = retry_json.get("response").and_then(|r| r.as_str()) {
                         if !retry_result.is_empty() {
                             println!("[scheduler] Ollama retry succeeded with {} chars", retry_result.len());
+                            let full_prompt_content = format!("{}\n{}", system_prompt_for_usage, prompt_for_usage);
+                            record_scheduler_token_usage(app, &model_for_usage, &provider_for_usage, &full_prompt_content, retry_result).await;
                             return Ok(retry_result.to_string());
                         }
                     }
                 }
                 println!("[scheduler] Ollama retry also returned empty");
             }
+            
+            // Record token usage before returning
+            let full_prompt_content = format!("{}\n{}", system_prompt_for_usage, prompt_for_usage);
+            record_scheduler_token_usage(app, &model_for_usage, &provider_for_usage, &full_prompt_content, &result).await;
             
             Ok(result)
         }
@@ -1302,13 +1345,19 @@ async fn execute_ai_prompt(
             let json: serde_json::Value = response.json().await
                 .map_err(|e| format!("Failed to parse OpenAI response: {}", e))?;
             
-            json.get("choices")
+            let result = json.get("choices")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("message"))
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_str())
                 .map(|s| s.to_string())
-                .ok_or_else(|| "Invalid response format from OpenAI".to_string())
+                .ok_or_else(|| "Invalid response format from OpenAI".to_string())?;
+            
+            // Record token usage
+            let full_prompt_content = format!("{}\n{}", system_prompt_for_usage, prompt_for_usage);
+            record_scheduler_token_usage(app, &model_for_usage, &provider_for_usage, &full_prompt_content, &result).await;
+            
+            Ok(result)
         }
         
         "anthropic" => {
@@ -1354,12 +1403,18 @@ async fn execute_ai_prompt(
             let json: serde_json::Value = response.json().await
                 .map_err(|e| format!("Failed to parse Anthropic response: {}", e))?;
             
-            json.get("content")
+            let result = json.get("content")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("text"))
                 .and_then(|t| t.as_str())
                 .map(|s| s.to_string())
-                .ok_or_else(|| "Invalid response format from Anthropic".to_string())
+                .ok_or_else(|| "Invalid response format from Anthropic".to_string())?;
+            
+            // Record token usage
+            let full_prompt_content = format!("{}\n{}", system_prompt_for_usage, prompt_for_usage);
+            record_scheduler_token_usage(app, &model_for_usage, &provider_for_usage, &full_prompt_content, &result).await;
+            
+            Ok(result)
         }
         
         "custom" => {
@@ -1412,13 +1467,19 @@ async fn execute_ai_prompt(
             let json: serde_json::Value = response.json().await
                 .map_err(|e| format!("Failed to parse response: {}", e))?;
             
-            json.get("choices")
+            let result = json.get("choices")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("message"))
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_str())
                 .map(|s| s.to_string())
-                .ok_or_else(|| "Invalid response format from custom API".to_string())
+                .ok_or_else(|| "Invalid response format from custom API".to_string())?;
+            
+            // Record token usage
+            let full_prompt_content = format!("{}\n{}", system_prompt_for_usage, prompt_for_usage);
+            record_scheduler_token_usage(app, &model_for_usage, &provider_for_usage, &full_prompt_content, &result).await;
+            
+            Ok(result)
         }
         
         _ => Err(format!("Unknown AI provider: {}. Please configure AI settings.", provider))
@@ -1693,35 +1754,218 @@ async fn execute_send_slack(
     username: Option<&str>,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
-
-    let payload = if let Some(user) = username {
-        serde_json::json!({
-            "channel": channel,
-            "username": user,
-            "text": message
-        })
+    
+    // Slack has a ~4000 character limit for text
+    const SLACK_MAX_LENGTH: usize = 3900; // Leave buffer
+    
+    let messages: Vec<String> = if message.len() <= SLACK_MAX_LENGTH {
+        vec![message.to_string()]
     } else {
-        serde_json::json!({
-            "channel": channel,
-            "text": message
-        })
+        // Split long content into chunks
+        let mut chunks = Vec::new();
+        let mut remaining = message;
+        
+        while !remaining.is_empty() {
+            if remaining.len() <= SLACK_MAX_LENGTH {
+                chunks.push(remaining.to_string());
+                break;
+            }
+            
+            let chunk_end = remaining[..SLACK_MAX_LENGTH]
+                .rfind('\n')
+                .unwrap_or(SLACK_MAX_LENGTH);
+            
+            let (chunk, rest) = remaining.split_at(chunk_end);
+            chunks.push(chunk.to_string());
+            remaining = rest.trim_start_matches('\n');
+        }
+        
+        let total = chunks.len();
+        chunks.iter().enumerate().map(|(i, chunk)| {
+            if total > 1 {
+                format!("*[Part {}/{}]*\n{}", i + 1, total, chunk)
+            } else {
+                chunk.clone()
+            }
+        }).collect()
     };
+    
+    let mut sent_count = 0;
+    for (i, msg_content) in messages.iter().enumerate() {
+        let payload = if let Some(user) = username {
+            serde_json::json!({
+                "channel": channel,
+                "username": user,
+                "text": msg_content
+            })
+        } else {
+            serde_json::json!({
+                "channel": channel,
+                "text": msg_content
+            })
+        };
 
-    let response = client
-        .post(webhook_url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Slack webhook request failed: {}", e))?;
+        let response = client
+            .post(webhook_url)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Slack webhook request failed: {}", e))?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Slack webhook error {}: {}", status, text));
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Slack webhook error {}: {}", status, text));
+        }
+        
+        sent_count += 1;
+        
+        // Add delay between messages to avoid rate limiting
+        if i < messages.len() - 1 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
     }
 
-    Ok(format!("Slack message sent to channel: {}", channel))
+    Ok(format!("Slack message sent to channel: {} ({} part{})", channel, sent_count, if sent_count > 1 { "s" } else { "" }))
+}
+
+// Format a table row for Discord
+fn format_table_row_for_discord(cells: &[&str]) -> String {
+    if cells.len() < 2 {
+        return cells.join(" ");
+    }
+    
+    // Try to identify column types and format accordingly
+    // Common patterns: Ticker, Name/Company, Price, Change, % Change, Trend/Note
+    let mut formatted_parts: Vec<String> = Vec::new();
+    
+    for (i, cell) in cells.iter().enumerate() {
+        let cell = cell.trim();
+        if cell.is_empty() {
+            continue;
+        }
+        
+        // First cell (usually ticker) - make it bold
+        if i == 0 {
+            formatted_parts.push(format!("**{}**", cell));
+        }
+        // Price cells (contain $)
+        else if cell.contains('$') {
+            formatted_parts.push(cell.to_string());
+        }
+        // Percentage cells
+        else if cell.contains('%') {
+            formatted_parts.push(format!("({})", cell));
+        }
+        // Trend indicators (arrows, up/down)
+        else if cell == "▲" || cell == "▼" || cell.to_lowercase() == "up" || cell.to_lowercase() == "down" {
+            formatted_parts.push(cell.to_string());
+        }
+        // Other cells (name, notes, etc.)
+        else {
+            formatted_parts.push(cell.to_string());
+        }
+    }
+    
+    formatted_parts.join(" ")
+}
+
+// Convert markdown to Discord-friendly format (tables, headers, etc.)
+fn convert_markdown_for_discord(content: &str) -> String {
+    let mut result = String::new();
+    let mut in_pipe_table = false;
+    let mut in_tab_table = false;
+    let mut is_header_row = true;
+    let mut consecutive_tab_lines = 0;
+    
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+        
+        // Convert markdown headers (# ## ### ####) to bold text
+        if trimmed.starts_with('#') {
+            let header_text = trimmed.trim_start_matches('#').trim();
+            if !header_text.is_empty() {
+                result.push_str(&format!("**{}**\n", header_text));
+                i += 1;
+                continue;
+            }
+        }
+        
+        // Check if this is a pipe-delimited table row (starts and ends with |)
+        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            // Check if it's a separator row (contains only |, -, :, and spaces)
+            let is_separator = trimmed.chars().all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
+            
+            if is_separator {
+                in_pipe_table = true;
+                is_header_row = false;
+                i += 1;
+                continue;
+            }
+            
+            // Parse table cells
+            let cells: Vec<&str> = trimmed
+                .trim_matches('|')
+                .split('|')
+                .map(|s| s.trim())
+                .collect();
+            
+            if !in_pipe_table || is_header_row {
+                // This is the header row - skip it
+                in_pipe_table = true;
+                i += 1;
+                continue;
+            }
+            
+            // Format data row
+            result.push_str(&format_table_row_for_discord(&cells));
+            result.push('\n');
+            i += 1;
+            continue;
+        }
+        
+        // Check if this is a tab-separated table row
+        let tab_count = trimmed.matches('\t').count();
+        if tab_count >= 2 {
+            let cells: Vec<&str> = trimmed.split('\t').map(|s| s.trim()).collect();
+            
+            // First row with tabs is likely the header
+            if !in_tab_table {
+                in_tab_table = true;
+                is_header_row = true;
+                consecutive_tab_lines = 1;
+                i += 1;
+                continue;
+            }
+            
+            consecutive_tab_lines += 1;
+            
+            // Format data row
+            result.push_str(&format_table_row_for_discord(&cells));
+            result.push('\n');
+            i += 1;
+            continue;
+        }
+        
+        // Not a table row - reset table state
+        if in_pipe_table || in_tab_table {
+            in_pipe_table = false;
+            in_tab_table = false;
+            is_header_row = true;
+            consecutive_tab_lines = 0;
+        }
+        
+        result.push_str(line);
+        result.push('\n');
+        i += 1;
+    }
+    
+    result
 }
 
 async fn execute_send_discord(
@@ -1731,33 +1975,92 @@ async fn execute_send_discord(
     avatar_url: Option<&str>,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
+    
+    // Convert markdown to Discord-friendly format (headers, tables, etc.)
+    let content = convert_markdown_for_discord(content);
+    
+    // Discord has a 2000 character limit for message content
+    // For long messages, we'll split into multiple messages
+    const DISCORD_MAX_LENGTH: usize = 1950; // Leave some buffer
+    
+    let messages: Vec<String> = if content.len() <= DISCORD_MAX_LENGTH {
+        vec![content.clone()]
+    } else {
+        // Split long content into chunks, trying to break at newlines
+        let mut chunks = Vec::new();
+        let mut remaining = content.as_str();
+        
+        while !remaining.is_empty() {
+            if remaining.len() <= DISCORD_MAX_LENGTH {
+                chunks.push(remaining.to_string());
+                break;
+            }
+            
+            // Find a good break point (newline) near the limit
+            let chunk_end = remaining[..DISCORD_MAX_LENGTH]
+                .rfind('\n')
+                .unwrap_or(DISCORD_MAX_LENGTH);
+            
+            let (chunk, rest) = remaining.split_at(chunk_end);
+            chunks.push(chunk.to_string());
+            remaining = rest.trim_start_matches('\n');
+        }
+        
+        // Add part indicators
+        let total = chunks.len();
+        chunks.iter().enumerate().map(|(i, chunk)| {
+            if total > 1 {
+                format!("**[Part {}/{}]**\n{}", i + 1, total, chunk)
+            } else {
+                chunk.clone()
+            }
+        }).collect()
+    };
+    
+    let mut sent_count = 0;
+    for (i, msg_content) in messages.iter().enumerate() {
+        let mut payload = serde_json::json!({
+            "content": msg_content
+        });
 
-    let mut payload = serde_json::json!({
-        "content": content
-    });
+        // Only include username if it's not empty (Discord rejects empty usernames)
+        if let Some(user) = username {
+            let user = user.trim();
+            if !user.is_empty() && user.len() <= 80 {
+                payload["username"] = serde_json::json!(user);
+            }
+        }
+        // Only include avatar_url if it's not empty
+        if let Some(avatar) = avatar_url {
+            let avatar = avatar.trim();
+            if !avatar.is_empty() {
+                payload["avatar_url"] = serde_json::json!(avatar);
+            }
+        }
 
-    if let Some(user) = username {
-        payload["username"] = serde_json::json!(user);
+        let response = client
+            .post(webhook_url)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Discord webhook request failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Discord webhook error {}: {}", status, text));
+        }
+        
+        sent_count += 1;
+        
+        // Add delay between messages to avoid rate limiting
+        if i < messages.len() - 1 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
     }
-    if let Some(avatar) = avatar_url {
-        payload["avatar_url"] = serde_json::json!(avatar);
-    }
 
-    let response = client
-        .post(webhook_url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Discord webhook request failed: {}", e))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Discord webhook error {}: {}", status, text));
-    }
-
-    Ok("Discord message sent via webhook".to_string())
+    Ok(format!("Discord message sent via webhook ({} part{})", sent_count, if sent_count > 1 { "s" } else { "" }))
 }
 
 // ============= Execution History =============
@@ -1886,4 +2189,272 @@ pub async fn clear_execution_history(app: AppHandle, agentId: Option<String>) ->
     }
     
     Ok(())
+}
+
+// ============= Background Cron Scheduler =============
+
+pub async fn start_cron_scheduler(app: AppHandle) {
+    println!("[cron] Starting background cron scheduler...");
+    
+    // Track last run times to avoid duplicate executions within the same minute
+    let mut last_runs: HashMap<String, chrono::DateTime<chrono::Local>> = HashMap::new();
+    
+    loop {
+        // Check every 30 seconds
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        
+        let now = chrono::Local::now();
+        println!("[cron] Checking scheduled agents at {}", now.format("%Y-%m-%d %H:%M:%S"));
+        
+        // Get all enabled agents with cron triggers
+        let agents = match get_cron_agents(&app).await {
+            Ok(agents) => agents,
+            Err(e) => {
+                println!("[cron] Error fetching agents: {}", e);
+                continue;
+            }
+        };
+        
+        if agents.is_empty() {
+            // Only log this occasionally to avoid spam
+            if now.second() < 30 {
+                println!("[cron] No enabled cron agents found");
+            }
+        } else {
+            println!("[cron] Found {} cron agent(s)", agents.len());
+        }
+        
+        for (agent_id, agent_name, cron_expression) in agents {
+            // Check if current LOCAL time matches the cron expression
+            // We do this manually because the cron crate interprets hours as UTC
+            let matches = match cron_matches_local(&cron_expression, &now) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("[cron] Invalid cron expression '{}' for agent '{}': {}", 
+                        cron_expression, agent_name, e);
+                    continue;
+                }
+            };
+            
+            // Calculate next scheduled time for logging (approximate)
+            let next_scheduled = get_next_cron_time_local(&cron_expression, &now);
+            let diff = if let Some(next) = &next_scheduled {
+                (now - *next).num_seconds()
+            } else {
+                0
+            };
+            
+            println!("[cron] Agent '{}' (cron: {}) - next scheduled: {}, diff: {}s, matches: {}", 
+                agent_name, cron_expression, 
+                next_scheduled.map(|n| n.format("%H:%M:%S").to_string()).unwrap_or_else(|| "unknown".to_string()),
+                diff, matches);
+            
+            // Only trigger if current time matches the cron expression
+            // Check within a small window (first 45 seconds of the minute)
+            if matches && now.second() < 45 {
+                // Use the current minute for deduplication
+                // This prevents duplicate runs within the same minute
+                let current_minute = now.format("%Y-%m-%d %H:%M").to_string();
+                let last_run_key = format!("{}_{}", agent_id, current_minute);
+                
+                if last_runs.contains_key(&last_run_key) {
+                    continue; // Already ran for this scheduled time
+                }
+                
+                println!("[cron] Triggering agent '{}' (id: {}) - cron: {} (scheduled: {})", 
+                    agent_name, agent_id, cron_expression, current_minute);
+                
+                // Mark as run for this scheduled time
+                last_runs.insert(last_run_key, now);
+                
+                // Clean up old entries (keep only last 100)
+                if last_runs.len() > 100 {
+                    let oldest: Vec<String> = last_runs.keys()
+                        .take(last_runs.len() - 100)
+                        .cloned()
+                        .collect();
+                    for key in oldest {
+                        last_runs.remove(&key);
+                    }
+                }
+                
+                // Execute the agent in a separate task
+                let app_clone = app.clone();
+                let agent_id_clone = agent_id.clone();
+                let agent_name_clone = agent_name.clone();
+                tokio::spawn(async move {
+                    match execute_agent(app_clone, agent_id_clone.clone()).await {
+                        Ok(execution) => {
+                            println!("[cron] Agent '{}' execution completed with status: {}", 
+                                agent_name_clone, execution.status);
+                        }
+                        Err(e) => {
+                            println!("[cron] Agent '{}' execution failed: {}", agent_name_clone, e);
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+// Parse a cron field (e.g., "6-14", "0", "*", "1,2,3", "*/5")
+fn parse_cron_field(field: &str, min: u32, max: u32) -> Result<Vec<u32>, String> {
+    let mut values = Vec::new();
+    
+    for part in field.split(',') {
+        let part = part.trim();
+        
+        if part == "*" {
+            // All values
+            values.extend(min..=max);
+        } else if part.starts_with("*/") {
+            // Step values (e.g., */5)
+            let step: u32 = part[2..].parse().map_err(|_| format!("Invalid step: {}", part))?;
+            if step == 0 {
+                return Err("Step cannot be 0".to_string());
+            }
+            values.extend((min..=max).step_by(step as usize));
+        } else if part.contains('-') {
+            // Range (e.g., 6-14)
+            let range_parts: Vec<&str> = part.split('-').collect();
+            if range_parts.len() != 2 {
+                return Err(format!("Invalid range: {}", part));
+            }
+            let start: u32 = range_parts[0].parse().map_err(|_| format!("Invalid range start: {}", part))?;
+            let end: u32 = range_parts[1].parse().map_err(|_| format!("Invalid range end: {}", part))?;
+            if start > end || start < min || end > max {
+                return Err(format!("Range out of bounds: {}", part));
+            }
+            values.extend(start..=end);
+        } else {
+            // Single value
+            let val: u32 = part.parse().map_err(|_| format!("Invalid value: {}", part))?;
+            if val < min || val > max {
+                return Err(format!("Value out of bounds: {}", part));
+            }
+            values.push(val);
+        }
+    }
+    
+    Ok(values)
+}
+
+// Check if a local DateTime matches a cron expression
+// Cron format: "minute hour day month weekday"
+fn cron_matches_local(cron_expr: &str, local_time: &chrono::DateTime<chrono::Local>) -> Result<bool, String> {
+    let parts: Vec<&str> = cron_expr.split_whitespace().collect();
+    if parts.len() != 5 {
+        return Err(format!("Invalid cron expression (expected 5 fields): {}", cron_expr));
+    }
+    
+    let minute = local_time.minute();
+    let hour = local_time.hour();
+    let day = local_time.day();
+    let month = local_time.month();
+    let weekday = local_time.weekday().num_days_from_sunday(); // 0 = Sunday, 6 = Saturday
+    
+    // Parse each field and check if current time matches
+    let minutes = parse_cron_field(parts[0], 0, 59)?;
+    let hours = parse_cron_field(parts[1], 0, 23)?;
+    let days = parse_cron_field(parts[2], 1, 31)?;
+    let months = parse_cron_field(parts[3], 1, 12)?;
+    let weekdays = parse_cron_field(parts[4], 0, 7)?; // 0 and 7 both mean Sunday
+    
+    // Check if all fields match
+    let minute_match = minutes.contains(&minute);
+    let hour_match = hours.contains(&hour);
+    let day_match = days.contains(&day);
+    let month_match = months.contains(&month);
+    // For weekday, both 0 and 7 mean Sunday
+    let weekday_match = weekdays.contains(&weekday) || (weekday == 0 && weekdays.contains(&7));
+    
+    Ok(minute_match && hour_match && day_match && month_match && weekday_match)
+}
+
+// Get the next scheduled time for a cron expression in local time (approximate)
+fn get_next_cron_time_local(cron_expr: &str, from: &chrono::DateTime<chrono::Local>) -> Option<chrono::DateTime<chrono::Local>> {
+    let parts: Vec<&str> = cron_expr.split_whitespace().collect();
+    if parts.len() != 5 {
+        return None;
+    }
+    
+    let minutes = parse_cron_field(parts[0], 0, 59).ok()?;
+    let hours = parse_cron_field(parts[1], 0, 23).ok()?;
+    
+    // Find the next matching minute/hour combination
+    let current_hour = from.hour();
+    let current_minute = from.minute();
+    
+    // First, check if there's a match later today
+    for &hour in &hours {
+        for &minute in &minutes {
+            if hour > current_hour || (hour == current_hour && minute > current_minute) {
+                // Found a future time today
+                return from
+                    .with_hour(hour)
+                    .and_then(|t| t.with_minute(minute))
+                    .and_then(|t| t.with_second(0));
+            }
+        }
+    }
+    
+    // Otherwise, it's the first matching time tomorrow
+    if let (Some(&first_hour), Some(&first_minute)) = (hours.first(), minutes.first()) {
+        let tomorrow = *from + chrono::Duration::days(1);
+        return tomorrow
+            .with_hour(first_hour)
+            .and_then(|t| t.with_minute(first_minute))
+            .and_then(|t| t.with_second(0));
+    }
+    
+    None
+}
+
+async fn get_cron_agents(app: &AppHandle) -> Result<Vec<(String, String, String)>, String> {
+    let conn = get_connection(app).await?;
+    
+    let mut stmt = conn
+        .prepare("SELECT id, name, trigger_json FROM agents WHERE enabled = 1")
+        .map_err(|e| e.to_string())?;
+    
+    let all_agents: Vec<(String, String, String)> = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let trigger_json: String = row.get(2)?;
+            Ok((id, name, trigger_json))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    
+    println!("[cron] Found {} enabled agents total", all_agents.len());
+    
+    let agents: Vec<(String, String, String)> = all_agents
+        .into_iter()
+        .filter_map(|(id, name, trigger_json)| {
+            // Parse trigger and check if it's a cron trigger
+            match serde_json::from_str::<TriggerType>(&trigger_json) {
+                Ok(trigger) => {
+                    match trigger {
+                        TriggerType::Cron { expression } => {
+                            println!("[cron] Agent '{}' has cron trigger: {}", name, expression);
+                            Some((id, name, expression))
+                        }
+                        _ => {
+                            println!("[cron] Agent '{}' has non-cron trigger: {:?}", name, trigger);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("[cron] Agent '{}' trigger parse error: {} (json: {})", name, e, trigger_json);
+                    None
+                }
+            }
+        })
+        .collect();
+    
+    Ok(agents)
 }

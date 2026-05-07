@@ -251,6 +251,40 @@ pub struct StreamChunk {
     pub done: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageEvent {
+    pub model: String,
+    pub provider: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// Estimate token count from text (approximately 4 characters per token)
+fn estimate_tokens(text: &str) -> i64 {
+    (text.len() as f64 / 4.0).ceil() as i64
+}
+
+/// Emit token usage event for tracking
+fn emit_token_usage(app: &AppHandle, model: &str, provider: &str, prompt_content: &str, completion_content: &str) {
+    let prompt_tokens = estimate_tokens(prompt_content);
+    let completion_tokens = estimate_tokens(completion_content);
+    let total_tokens = prompt_tokens + completion_tokens;
+    
+    let usage = TokenUsageEvent {
+        model: model.to_string(),
+        provider: provider.to_string(),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    };
+    
+    println!("[ai.rs] Token usage: model={}, provider={}, prompt={}, completion={}, total={}", 
+             model, provider, prompt_tokens, completion_tokens, total_tokens);
+    
+    let _ = app.emit("token-usage", usage);
+}
+
 #[command]
 pub async fn check_ollama_status(base_url: Option<String>) -> Result<bool, String> {
     let url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
@@ -615,6 +649,10 @@ pub async fn chat_ollama(
     let url = raw_url.replace("localhost", "127.0.0.1");
     println!("[ai.rs] Using Ollama URL: {}", url);
     
+    // Calculate prompt content for token usage tracking (before messages are consumed)
+    let prompt_content: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+    let model_clone = model.clone();
+    
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .build()
@@ -760,6 +798,8 @@ pub async fn chat_ollama(
                                 }
                                 
                                 if response.done {
+                                    // Emit token usage event
+                                    emit_token_usage(&app, &model_clone, "ollama", &prompt_content, &full_content);
                                     // Clean up on completion
                                     let mut streams = ACTIVE_STREAMS.write().await;
                                     streams.remove(&conversation_id);
@@ -784,6 +824,9 @@ pub async fn chat_ollama(
         }
     }
     
+    // Emit token usage event
+    emit_token_usage(&app, &model_clone, "ollama", &prompt_content, &full_content);
+    
     Ok(full_content)
 }
 
@@ -799,6 +842,19 @@ pub async fn chat_openai(
     conversation_id: String,
 ) -> Result<String, String> {
     let client = Client::new();
+    
+    // Calculate prompt content for token usage tracking (before messages are consumed)
+    let prompt_content: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+    let model_clone = model.clone();
+    
+    // Determine provider based on base_url
+    let provider = if base_url.contains("anthropic") {
+        "anthropic"
+    } else if base_url.contains("openai") {
+        "openai"
+    } else {
+        "custom"
+    };
     
     // Create cancellation channel for this conversation
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
@@ -908,6 +964,8 @@ pub async fn chat_openai(
                                     content: String::new(),
                                     done: true,
                                 });
+                                // Emit token usage event
+                                emit_token_usage(&app, &model_clone, provider, &prompt_content, &full_content);
                                 // Clean up on completion
                                 let mut streams = ACTIVE_STREAMS.write().await;
                                 streams.remove(&conversation_id);
@@ -942,6 +1000,9 @@ pub async fn chat_openai(
         }
     }
     
+    // Emit token usage event
+    emit_token_usage(&app, &model_clone, provider, &prompt_content, &full_content);
+    
     Ok(full_content)
 }
 
@@ -957,6 +1018,11 @@ pub async fn chat_copilot(
     let client = Client::new();
     let github_token = load_copilot_token()?;
     let copilot_token = fetch_copilot_api_token(&client, &github_token).await?;
+    
+    // Calculate prompt content for token usage tracking (before messages are consumed)
+    let prompt_content: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+    let model_clone = model.clone();
+    
     // Create cancellation channel for this conversation
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
 
@@ -1101,6 +1167,8 @@ pub async fn chat_copilot(
                                     content: String::new(),
                                     done: true,
                                 });
+                                // Emit token usage event
+                                emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
                                 // Clean up on completion
                                 let mut streams = ACTIVE_STREAMS.write().await;
                                 streams.remove(&conversation_id);
@@ -1134,6 +1202,9 @@ pub async fn chat_copilot(
             }
         }
     }
+
+    // Emit token usage event
+    emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
 
     Ok(full_content)
 }

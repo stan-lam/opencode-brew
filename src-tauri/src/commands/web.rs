@@ -8,6 +8,9 @@ use chromiumoxide::{Browser, BrowserConfig};
 use futures::StreamExt;
 use tokio::time::timeout;
 
+const BROWSER_ERROR_MSG: &str = "Please ensure Chrome, Edge, or Chromium is installed. \
+On Windows, Edge is usually pre-installed. On macOS/Linux, install Chrome or Chromium.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub title: String,
@@ -355,7 +358,7 @@ async fn search_with_headless_browser(query: &str, max: usize) -> Result<Vec<Sea
     
     let (mut browser, mut handler) = Browser::launch(config)
         .await
-        .map_err(|e| format!("Browser launch error: {}", e))?;
+        .map_err(|e| format!("Browser launch error: {}. {}", e, BROWSER_ERROR_MSG))?;
     
     // Spawn the browser handler
     let handle = tokio::spawn(async move {
@@ -1029,7 +1032,7 @@ pub async fn fetch_url_rendered(url: String) -> Result<WebContent, String> {
     
     let (mut browser, mut handler) = Browser::launch(config)
         .await
-        .map_err(|e| format!("Browser launch error: {}", e))?;
+        .map_err(|e| format!("Browser launch error: {}. {}", e, BROWSER_ERROR_MSG))?;
     
     let handle = tokio::spawn(async move {
         while let Some(_) = handler.next().await {}
@@ -2006,28 +2009,35 @@ pub async fn get_market_movers() -> Result<MarketMovers, String> {
         }
     }
     
-    // Enrich stocks with missing prices from Google Finance
-    async fn enrich_with_google(client: &Client, stocks: &mut Vec<StockQuote>) {
+    // Enrich ALL stocks with accurate quotes using multi-source approach
+    // The scraped percentage data from MarketWatch is often wrong
+    async fn enrich_stocks(stocks: &mut Vec<StockQuote>) {
         for stock in stocks.iter_mut() {
-            // If price or change percent is 0, fetch from Google Finance
-            if stock.price == 0.0 || (stock.change_percent == 0.0 && stock.change == 0.0) {
-                println!("[web::enrich] Fetching real price for {} from Google Finance", stock.symbol);
-                if let Ok(quote) = fetch_google_finance_quote(client, &stock.symbol).await {
-                    stock.price = quote.price;
-                    stock.change = quote.change;
-                    stock.change_percent = quote.change_percent;
+            // Always fetch fresh quote data - scraped percentages are unreliable
+            println!("[web::enrich] Fetching accurate quote for {} from multiple sources", stock.symbol);
+            // Use the main get_stock_quote which tries Yahoo, Google, StockTwits, MarketWatch in parallel
+            if let Ok(quote) = get_stock_quote(stock.symbol.clone()).await {
+                println!("[web::enrich] Got accurate quote for {}: ${:.2} ({:+.2}%)", 
+                    stock.symbol, quote.price, quote.change_percent);
+                stock.price = quote.price;
+                stock.change = quote.change;
+                stock.change_percent = quote.change_percent;
+                if !quote.name.is_empty() {
                     stock.name = quote.name;
                 }
-                tokio::time::sleep(Duration::from_millis(150)).await;
+            } else {
+                println!("[web::enrich] Failed to get quote for {}", stock.symbol);
             }
+            // Small delay to avoid overwhelming sources
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
     
-    // Enrich any stocks with missing data
-    println!("[web::get_market_movers] Enriching stocks with Google Finance prices...");
-    enrich_with_google(&client, &mut gainers).await;
-    enrich_with_google(&client, &mut losers).await;
-    enrich_with_google(&client, &mut most_active).await;
+    // Enrich ALL stocks with accurate data from multiple sources
+    println!("[web::get_market_movers] Enriching stocks with accurate quotes...");
+    enrich_stocks(&mut gainers).await;
+    enrich_stocks(&mut losers).await;
+    enrich_stocks(&mut most_active).await;
     
     // Remove any stocks that still have no valid price
     gainers.retain(|s| s.price > 0.0);

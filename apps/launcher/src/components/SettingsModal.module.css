@@ -520,3 +520,128 @@
 .saveBtn:hover {
   background: var(--accent-blue-hover, #0077ee);
 }
+
+/* Usage Tab Styles */
+.loadingState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 20px;
+  color: var(--text-secondary, #888);
+}
+
+.usageSummary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.usageCard {
+  background: var(--bg-tertiary, #252525);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.usageValue {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--accent-blue, #0066cc);
+  margin-bottom: 4px;
+}
+
+.usageLabel {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.usageTable {
+  background: var(--bg-tertiary, #252525);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.usageTable h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color, #333);
+  margin: 0;
+}
+
+.usageTable table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.usageTable th,
+.usageTable td {
+  padding: 10px 16px;
+  text-align: left;
+  font-size: 13px;
+}
+
+.usageTable th {
+  color: var(--text-secondary, #888);
+  font-weight: 500;
+  background: var(--bg-secondary, #1e1e1e);
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.usageTable td {
+  color: var(--text-primary, #fff);
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.usageTable tr:last-child td {
+  border-bottom: none;
+}
+
+.usageTable tr:hover td {
+  background: var(--bg-hover, #2a2a2a);
+}
+
+.providerCell {
+  color: var(--text-secondary, #888);
+  text-transform: capitalize;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 20px;
+  color: var(--text-muted, #666);
+  text-align: center;
+}
+
+.emptyState p {
+  font-size: 16px;
+  color: var(--text-secondary, #888);
+  margin: 0;
+}
+
+.emptyState span {
+  font-size: 13px;
+}
+
+.addBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 600px) {
+  .usageSummary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

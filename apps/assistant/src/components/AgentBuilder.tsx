@@ -1,7 +1,10 @@
 import { useState, useCallback, useEffect } from 'react';
-import { X, X as XIcon, Plus, Trash2, ChevronDown, ChevronRight, RefreshCw, Layers } from 'lucide-react';
+import { X, X as XIcon, Plus, Trash2, ChevronDown, ChevronRight, RefreshCw, Layers, Sparkles } from 'lucide-react';
 import { useAssistantStore, Agent, Action, TriggerType, ActionType, WorkflowStage, CombineStrategy, getAgentStages } from '../store/assistantStore';
 import { WorkflowStageEditor } from './WorkflowStageEditor';
+import { TemplateGallery } from './TemplateGallery';
+import { TemplateWizard } from './TemplateWizard';
+import { AgentTemplate } from '../types/AgentTemplate';
 import styles from './AgentBuilder.module.css';
 
 async function getInvoke() {
@@ -48,6 +51,11 @@ export function AgentBuilder() {
   
   const existingAgent = isEditing ? getSelectedAgent() : null;
   
+  // Template wizard state
+  const [showTemplateGallery, setShowTemplateGallery] = useState(false);
+  const [showTemplateWizard, setShowTemplateWizard] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<AgentTemplate | null>(null);
+  
   const [name, setName] = useState(existingAgent?.name || '');
   const [description, setDescription] = useState(existingAgent?.description || '');
   const [triggerType, setTriggerType] = useState<string>(existingAgent?.trigger.type || 'manual');
@@ -82,41 +90,174 @@ export function AgentBuilder() {
     }
   }, []);
 
+  // Convert cron expression to human-readable format
+  const cronToHumanReadable = useCallback((expr: string): string => {
+    const parts = expr.trim().split(/\s+/);
+    if (parts.length !== 5) return expr;
+    
+    const [min, hour, dom, _month, dow] = parts;
+    
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    
+    const formatTime = (h: number, m: number): string => {
+      const period = h >= 12 ? 'PM' : 'AM';
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      return m === 0 ? `${hour12} ${period}` : `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
+    };
+
+    const formatHour = (h: number): string => {
+      const period = h >= 12 ? 'PM' : 'AM';
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      return `${hour12}${period}`;
+    };
+
+    const isSimpleNumber = (field: string): boolean => /^\d+$/.test(field);
+    
+    const formatDow = (d: string): string => {
+      if (d === '1-5') return 'weekdays';
+      if (d === '0,6' || d === '6,0') return 'weekends';
+      if (isSimpleNumber(d)) return dayNames[parseInt(d)] || d;
+      if (d.includes('-')) {
+        const [start, end] = d.split('-').map(Number);
+        return `${dayNames[start]}-${dayNames[end]}`;
+      }
+      return d;
+    };
+
+    const formatHourRange = (h: string): string => {
+      if (h.includes('-')) {
+        const [start, end] = h.split('-').map(Number);
+        return `${formatHour(start)}-${formatHour(end)}`;
+      }
+      return formatHour(parseInt(h));
+    };
+
+    // Every N minutes: */N * * * *
+    if (min.startsWith('*/') && hour === '*' && dom === '*' && dow === '*') {
+      const interval = parseInt(min.slice(2));
+      return interval === 1 ? 'Every minute' : `Every ${interval} minutes`;
+    }
+    
+    // Hourly with hour range and day range: M H-H * * D-D
+    if (isSimpleNumber(min) && hour.includes('-') && dom === '*' && dow !== '*') {
+      const m = parseInt(min);
+      const minStr = m === 0 ? '' : ` at minute ${m}`;
+      return `Hourly ${formatHourRange(hour)}${minStr}, ${formatDow(dow)}`;
+    }
+    
+    // Hourly with hour range: M H-H * * *
+    if (isSimpleNumber(min) && hour.includes('-') && dom === '*' && dow === '*') {
+      const m = parseInt(min);
+      const minStr = m === 0 ? '' : ` at minute ${m}`;
+      return `Hourly ${formatHourRange(hour)}${minStr}`;
+    }
+    
+    // Hourly: M * * * *
+    if (isSimpleNumber(min) && hour === '*' && dom === '*' && dow === '*') {
+      const m = parseInt(min);
+      return m === 0 ? 'Every hour' : `Hourly at minute ${m}`;
+    }
+    
+    // Every N hours: M */N * * *
+    if (isSimpleNumber(min) && hour.startsWith('*/') && dom === '*' && dow === '*') {
+      const interval = parseInt(hour.slice(2));
+      return `Every ${interval} hours at minute ${min}`;
+    }
+    
+    // Weekly: M H * * D (single day)
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && isSimpleNumber(dow)) {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      const d = parseInt(dow);
+      const dayName = dayNames[d] || `day ${d}`;
+      return `Every ${dayName} at ${formatTime(h, m)}`;
+    }
+    
+    // Weekdays/specific days at specific time
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && dow !== '*' && !isSimpleNumber(dow)) {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      return `${formatDow(dow)} at ${formatTime(h, m)}`;
+    }
+    
+    // Monthly: M H D * *
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && isSimpleNumber(dom) && dow === '*') {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      const d = parseInt(dom);
+      const suffix = d === 1 ? 'st' : d === 2 ? 'nd' : d === 3 ? 'rd' : 'th';
+      return `Monthly on the ${d}${suffix} at ${formatTime(h, m)}`;
+    }
+    
+    // Daily: M H * * *
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && dow === '*') {
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      if (h === 0 && m === 0) return 'Daily at midnight';
+      if (h === 12 && m === 0) return 'Daily at noon';
+      return `Daily at ${formatTime(h, m)}`;
+    }
+    
+    // Every N days: M H */N * *
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom.startsWith('*/') && dow === '*') {
+      const interval = parseInt(dom.slice(2));
+      const h = parseInt(hour);
+      const m = parseInt(min);
+      return `Every ${interval} days at ${formatTime(h, m)}`;
+    }
+    
+    return expr;
+  }, []);
+
   // Convert an existing cron expression to frequency settings for UI display
   const cronToFrequency = useCallback((expr: string): { frequency: string; hour: number; minute: number; dayOfWeek: number; dayOfMonth: number; interval: number; intervalSeconds: number; intervalMinutes: number } => {
     const parts = expr.trim().split(/\s+/);
-    if (parts.length !== 5) return { frequency: 'custom', hour: 0, minute: 0, dayOfWeek: 0, dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    const defaultCustom = { frequency: 'custom', hour: 0, minute: 0, dayOfWeek: 0, dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    
+    if (parts.length !== 5) return defaultCustom;
     const [min, hour, dom, month, dow] = parts;
 
+    // Helper to check if a field is a simple number (no ranges, lists, steps, or wildcards)
+    const isSimpleNumber = (field: string): boolean => /^\d+$/.test(field);
+    
+    // If any field contains complex patterns (ranges like 6-14, lists like 1,3,5, etc.), use custom
+    const hasComplexPattern = (field: string): boolean => 
+      field.includes('-') || field.includes(',') || (field.includes('/') && !field.startsWith('*/'));
+
+    // Check for complex patterns in hour or dow that we can't represent in simple UI
+    if (hasComplexPattern(hour) || hasComplexPattern(dow) || hasComplexPattern(dom)) {
+      return defaultCustom;
+    }
+
     // Detect every N minutes: */N in minute field (e.g., */5 * * * *)
-    if (min.startsWith('*/')) {
+    if (min.startsWith('*/') && hour === '*' && dom === '*' && dow === '*') {
       return { frequency: 'every_n_minutes', hour: 0, minute: 0, dayOfWeek: 0, dayOfMonth: 1, interval: parseInt(min.slice(2)) || 1, intervalSeconds: 10, intervalMinutes: parseInt(min.slice(2)) || 1 };
     }
-    // Detect hourly pattern: minute < 59, * */* in hour, */1 in dom/dow
-    if (min !== '59' && hour === '*' && dom === '*' && dow === '*') {
+    // Detect hourly pattern: specific minute, * in all other fields
+    if (isSimpleNumber(min) && hour === '*' && dom === '*' && dow === '*') {
       return { frequency: 'hourly', hour: 0, minute: parseInt(min), dayOfWeek: 0, dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
     }
-    // Detect every N hours: minute < 59, */N in hour
-    if (min !== '59' && hour.startsWith('*/')) {
+    // Detect every N hours: specific minute, */N in hour
+    if (isSimpleNumber(min) && hour.startsWith('*/') && dom === '*' && dow === '*') {
       return { frequency: 'every_n_hours', hour: 0, minute: parseInt(min), dayOfWeek: 0, dayOfMonth: 1, interval: parseInt(hour.slice(2)) || 1, intervalSeconds: 10, intervalMinutes: 1 };
     }
-    // Detect daily: specific hour, * in dom/dow
-    if (dom === '*' && dow === '*') {
-      return { frequency: 'daily', hour: parseInt(hour) || 0, minute: parseInt(min), dayOfWeek: 0, dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    // Detect daily: specific hour and minute, * in dom/dow
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && dow === '*') {
+      return { frequency: 'daily', hour: parseInt(hour), minute: parseInt(min), dayOfWeek: 0, dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
     }
-    // Detect every N days: specific hour, */N in dom
-    if (dom.startsWith('*/') && dow === '*') {
-      return { frequency: 'every_n_days', hour: parseInt(hour) || 0, minute: parseInt(min), dayOfWeek: 0, dayOfMonth: parseInt(dom.slice(2)) || 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    // Detect every N days: specific hour/minute, */N in dom
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom.startsWith('*/') && dow === '*') {
+      return { frequency: 'every_n_days', hour: parseInt(hour), minute: parseInt(min), dayOfWeek: 0, dayOfMonth: parseInt(dom.slice(2)) || 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
     }
-    // Detect weekly: specific hour, * */* in month/dom, specific day of week
-    if (month === '*' && dom === '*') {
-      return { frequency: 'weekly', hour: parseInt(hour) || 0, minute: parseInt(min), dayOfWeek: parseInt(dow), dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    // Detect weekly: specific hour/minute/dow, * in dom/month
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && dom === '*' && month === '*' && isSimpleNumber(dow)) {
+      return { frequency: 'weekly', hour: parseInt(hour), minute: parseInt(min), dayOfWeek: parseInt(dow), dayOfMonth: 1, interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
     }
-    // Detect monthly: specific hour, specific dom
-    if (dom !== '*' && month !== '*') {
-      return { frequency: 'monthly', hour: parseInt(hour) || 0, minute: parseInt(min), dayOfWeek: 0, dayOfMonth: parseInt(dom), interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    // Detect monthly: specific hour/minute/dom, * in dow
+    if (isSimpleNumber(min) && isSimpleNumber(hour) && isSimpleNumber(dom) && dow === '*') {
+      return { frequency: 'monthly', hour: parseInt(hour), minute: parseInt(min), dayOfWeek: 0, dayOfMonth: parseInt(dom), interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
     }
-    return { frequency: 'custom', hour: parseInt(hour) || 0, minute: parseInt(min), dayOfWeek: parseInt(dow), dayOfMonth: parseInt(dom), interval: 1, intervalSeconds: 10, intervalMinutes: 1 };
+    return defaultCustom;
   }, []);
 
   // Sync frequency settings from existing cron expression
@@ -365,8 +506,68 @@ export function AgentBuilder() {
     }
   };
 
+  // Template handlers
+  const handleSelectTemplate = (template: AgentTemplate) => {
+    setSelectedTemplate(template);
+    setShowTemplateGallery(false);
+    setShowTemplateWizard(true);
+  };
+
+  const handleTemplateComplete = async (agentData: Omit<Agent, 'id' | 'created_at' | 'updated_at'>) => {
+    try {
+      const invoke = await getInvoke();
+      
+      // Prepare stages for backend
+      const backendStages = agentData.stages.map(stage => ({
+        ...stage,
+        combine_strategy: stage.combineStrategy,
+      }));
+      
+      // Flatten actions for the legacy API
+      const flatActions = agentData.stages.flatMap(stage => stage.actions);
+      
+      const newAgent = await invoke('create_agent', {
+        name: agentData.name,
+        description: agentData.description || null,
+        trigger: agentData.trigger,
+        actions: flatActions,
+        stages: backendStages,
+      }) as Agent;
+      
+      // Add the agent with stages
+      addAgent({ ...newAgent, stages: agentData.stages });
+      
+      setShowTemplateWizard(false);
+      setSelectedTemplate(null);
+      setIsCreating(false);
+    } catch (error) {
+      console.error('Failed to create agent from template:', error);
+      alert('Failed to create agent. Please try again.');
+    }
+  };
+
   return (
     <div className={styles.container}>
+      {/* Template Gallery Modal */}
+      {showTemplateGallery && (
+        <TemplateGallery
+          onClose={() => setShowTemplateGallery(false)}
+          onSelectTemplate={handleSelectTemplate}
+        />
+      )}
+      
+      {/* Template Wizard Modal */}
+      {showTemplateWizard && selectedTemplate && (
+        <TemplateWizard
+          template={selectedTemplate}
+          onClose={() => {
+            setShowTemplateWizard(false);
+            setSelectedTemplate(null);
+          }}
+          onComplete={handleTemplateComplete}
+        />
+      )}
+      
       <div className={styles.header}>
         <h2>{isEditing ? 'Edit Agent' : 'Create Agent'}</h2>
         <button onClick={handleClose} className={styles.closeBtn}>
@@ -375,6 +576,17 @@ export function AgentBuilder() {
       </div>
 
       <div className={styles.content}>
+        {/* Template shortcut for new agents */}
+        {!isEditing && (
+          <button
+            className={styles.templateBtn}
+            onClick={() => setShowTemplateGallery(true)}
+          >
+            <Sparkles size={18} />
+            Create from Template
+          </button>
+        )}
+        
         <div className={styles.field}>
           <label>Name</label>
           <input
@@ -434,17 +646,28 @@ export function AgentBuilder() {
                 ))}
               </select>
 
-              {/* Preview of the generated cron expression */}
-              <div style={{
-                padding: '6px 10px',
-                background: 'var(--bg-tertiary)',
-                borderRadius: '4px',
-                fontFamily: 'var(--font-mono)',
-                fontSize: '13px',
-                color: 'var(--text-secondary)',
-              }}>
-                Cron: <span style={{ color: 'var(--text-primary)' }}>{frequencyToCron(cronFrequency, cronHour, cronMinute, cronDayOfWeek, cronDayOfMonth, cronInterval, cronIntervalSeconds, cronIntervalMinutes)}</span>
-              </div>
+              {/* Preview of the generated cron expression with human-readable format */}
+              {(() => {
+                const cronExpr = cronFrequency === 'custom' 
+                  ? customCronExpression 
+                  : frequencyToCron(cronFrequency, cronHour, cronMinute, cronDayOfWeek, cronDayOfMonth, cronInterval, cronIntervalSeconds, cronIntervalMinutes);
+                const humanReadable = cronToHumanReadable(cronExpr);
+                return (
+                  <div style={{
+                    padding: '8px 12px',
+                    background: 'var(--bg-tertiary)',
+                    borderRadius: '4px',
+                    fontSize: '13px',
+                  }}>
+                    <div style={{ color: 'var(--text-primary)', fontWeight: 500, marginBottom: '4px' }}>
+                      {humanReadable}
+                    </div>
+                    <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontSize: '12px' }}>
+                      {cronExpr}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Dynamic form fields based on frequency type */}
 

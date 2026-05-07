@@ -60,6 +60,10 @@
   overflow: auto;
 }
 
+.diffContentInner {
+  min-width: max-content;
+}
+
 .hunk {
   border-bottom: 1px solid var(--border-color);
 }
@@ -156,7 +160,7 @@
   padding: 0 8px;
   margin: 0;
   white-space: pre;
-  overflow-x: auto;
+  overflow-x: visible;
   font-family: inherit;
   font-size: inherit;
 }

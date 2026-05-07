@@ -126,3 +126,172 @@
 .toggle.on .toggleThumb {
   transform: translateX(18px);
 }
+
+/* Usage Section Styles */
+.usageContent {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.usageHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.usageDesc {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.clearBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--error-color, #dc3545);
+  border-radius: var(--radius-sm);
+  color: var(--error-color, #dc3545);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.clearBtn:hover:not(:disabled) {
+  background: var(--error-color, #dc3545);
+  color: white;
+}
+
+.clearBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.loadingState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.usageSummary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.usageCard {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  text-align: center;
+}
+
+.usageValue {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--accent-blue);
+  margin-bottom: 4px;
+}
+
+.usageLabel {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.usageTable {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.usageTable h4 {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  margin: 0;
+}
+
+.usageTable table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.usageTable th,
+.usageTable td {
+  padding: 10px 16px;
+  text-align: left;
+  font-size: var(--font-size-sm);
+}
+
+.usageTable th {
+  color: var(--text-secondary);
+  font-weight: 500;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.usageTable td {
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.usageTable tr:last-child td {
+  border-bottom: none;
+}
+
+.usageTable tr:hover td {
+  background: var(--bg-hover);
+}
+
+.providerCell {
+  color: var(--text-secondary);
+  text-transform: capitalize;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 20px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.emptyState p {
+  font-size: var(--font-size-base);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.emptyState span {
+  font-size: var(--font-size-sm);
+}
+
+@media (max-width: 600px) {
+  .usageSummary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

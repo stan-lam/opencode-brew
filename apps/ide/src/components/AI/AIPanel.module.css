@@ -4,6 +4,82 @@
   flex-direction: column;
 }
 
+/* Panel Header */
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.conversationTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.conversationTitle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversationTitle svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.newChatBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background-color: var(--accent-blue);
+  color: white;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  transition: background-color var(--transition-fast);
+}
+
+.newChatBtn:hover {
+  background-color: #005a9e;
+}
+
+.headerBtn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.headerBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.headerBtn.active {
+  background-color: var(--bg-tertiary);
+  color: var(--accent-blue);
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -1653,7 +1729,8 @@
 
 .codeBlockContent {
   max-height: 200px;
-  overflow: auto;
+  overflow-y: hidden;
+  overflow-x: auto;
   position: relative;
 }
 
@@ -1671,6 +1748,8 @@
 
 .codeBlockWrapper .codeBlock code {
   display: block;
+  width: max-content;
+  min-width: 100%;
 }
 
 /* Code line with line numbers */
@@ -1695,7 +1774,6 @@
   flex: 1;
   padding: 0 12px;
   white-space: pre;
-  overflow-x: auto;
   color: var(--text-primary);
 }
 
@@ -1842,7 +1920,6 @@
   padding: 10px 14px;
   text-align: left;
   border-bottom: 1px solid var(--border-color, #3c3c3c);
-  white-space: nowrap;
 }
 
 .mdTable th {

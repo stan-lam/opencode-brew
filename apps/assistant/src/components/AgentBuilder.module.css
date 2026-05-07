@@ -41,6 +41,33 @@
   padding: 24px;
 }
 
+.templateBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 16px;
+  margin-bottom: 24px;
+  background: linear-gradient(135deg, var(--accent-purple) 0%, #9333ea 100%);
+  border: none;
+  border-radius: var(--radius-md);
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.templateBtn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(147, 51, 234, 0.3);
+}
+
+.templateBtn:active {
+  transform: translateY(0);
+}
+
 .field {
   margin-bottom: 20px;
 }

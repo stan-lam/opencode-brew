@@ -51,7 +51,11 @@ pub async fn git_status(path: String) -> Result<GitStatus, String> {
     
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true);
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .include_unmodified(false)
+        .update_index(true)  // Force refresh of the index
+        .no_refresh(false);  // Allow refresh
     
     let statuses = repo
         .statuses(Some(&mut opts))
@@ -683,4 +687,149 @@ pub async fn git_remotes(repo_path: String) -> Result<Vec<RemoteInfo>, String> {
     }
     
     Ok(result)
+}
+
+#[command]
+pub async fn git_delete_branch(repo_path: String, branch_name: String, force: Option<bool>) -> Result<(), String> {
+    let repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    let force = force.unwrap_or(false);
+    
+    // Get current branch to prevent deleting it
+    let head = repo.head()
+        .map_err(|e| format!("Failed to get HEAD: {}", e))?;
+    let current_branch = head.shorthand().unwrap_or("");
+    
+    if current_branch == branch_name {
+        return Err("Cannot delete the currently checked out branch".to_string());
+    }
+    
+    let mut branch = repo.find_branch(&branch_name, BranchType::Local)
+        .map_err(|e| format!("Failed to find branch '{}': {}", branch_name, e))?;
+    
+    if force {
+        branch.delete()
+            .map_err(|e| format!("Failed to delete branch: {}", e))?;
+    } else {
+        // Check if branch is merged before deleting
+        let head_commit = head.peel_to_commit()
+            .map_err(|e| format!("Failed to get HEAD commit: {}", e))?;
+        let branch_commit = branch.get().peel_to_commit()
+            .map_err(|e| format!("Failed to get branch commit: {}", e))?;
+        
+        let merge_base = repo.merge_base(head_commit.id(), branch_commit.id());
+        if merge_base.is_err() || merge_base.unwrap() != branch_commit.id() {
+            return Err("Branch is not fully merged. Use force delete to remove anyway.".to_string());
+        }
+        
+        branch.delete()
+            .map_err(|e| format!("Failed to delete branch: {}", e))?;
+    }
+    
+    Ok(())
+}
+
+#[command]
+pub async fn git_discard_changes(repo_path: String, file_path: String) -> Result<(), String> {
+    let repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    let path = std::path::Path::new(&file_path);
+    
+    // Check if file is untracked
+    let mut status_opts = StatusOptions::new();
+    status_opts.pathspec(&file_path);
+    let statuses = repo.statuses(Some(&mut status_opts))
+        .map_err(|e| format!("Failed to get status: {}", e))?;
+    
+    if let Some(entry) = statuses.iter().next() {
+        if entry.status().is_wt_new() {
+            // Untracked file - delete it
+            let full_path = std::path::Path::new(&repo_path).join(&file_path);
+            std::fs::remove_file(&full_path)
+                .map_err(|e| format!("Failed to delete untracked file: {}", e))?;
+            return Ok(());
+        }
+    }
+    
+    // Restore from HEAD
+    let head = repo.head()
+        .map_err(|e| format!("Failed to get HEAD: {}", e))?;
+    let tree = head.peel_to_tree()
+        .map_err(|e| format!("Failed to get tree: {}", e))?;
+    
+    let mut checkout_builder = git2::build::CheckoutBuilder::new();
+    checkout_builder.path(path);
+    checkout_builder.force();
+    
+    repo.checkout_tree(tree.as_object(), Some(&mut checkout_builder))
+        .map_err(|e| format!("Failed to discard changes: {}", e))?;
+    
+    Ok(())
+}
+
+#[command]
+pub async fn git_stash(repo_path: String, message: Option<String>) -> Result<String, String> {
+    let mut repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    let signature = repo.signature()
+        .or_else(|_| Signature::now("OpenIDE User", "user@openide.local"))
+        .map_err(|e| format!("Failed to create signature: {}", e))?;
+    
+    let message = message.as_deref();
+    
+    let stash_id = repo.stash_save(&signature, message.unwrap_or("WIP"), None)
+        .map_err(|e| format!("Failed to stash changes: {}", e))?;
+    
+    Ok(stash_id.to_string())
+}
+
+#[command]
+pub async fn git_stash_pop(repo_path: String, index: Option<usize>) -> Result<(), String> {
+    let mut repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    let index = index.unwrap_or(0);
+    
+    repo.stash_pop(index, None)
+        .map_err(|e| format!("Failed to pop stash: {}", e))?;
+    
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StashEntry {
+    pub index: usize,
+    pub message: String,
+}
+
+#[command]
+pub async fn git_stash_list(repo_path: String) -> Result<Vec<StashEntry>, String> {
+    let mut repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    let mut stashes = Vec::new();
+    
+    repo.stash_foreach(|index, message, _oid| {
+        stashes.push(StashEntry {
+            index,
+            message: message.to_string(),
+        });
+        true
+    }).map_err(|e| format!("Failed to list stashes: {}", e))?;
+    
+    Ok(stashes)
+}
+
+#[command]
+pub async fn git_stash_drop(repo_path: String, index: usize) -> Result<(), String> {
+    let mut repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    repo.stash_drop(index)
+        .map_err(|e| format!("Failed to drop stash: {}", e))?;
+    
+    Ok(())
 }

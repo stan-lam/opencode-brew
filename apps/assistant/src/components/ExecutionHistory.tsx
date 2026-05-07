@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle, XCircle, Loader2, Clock, ChevronRight, RefreshCw, Layers, Zap } from 'lucide-react';
+import { CheckCircle, XCircle, Loader2, Clock, ChevronRight, ChevronDown, RefreshCw, Layers, Zap } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAssistantStore, ExecutionLog, ActionLog } from '../store/assistantStore';
 import styles from './ExecutionHistory.module.css';
 
@@ -81,6 +83,25 @@ function groupActionsByStage(actions: ActionLog[], output?: string | null): Grou
   return groups;
 }
 
+// Convert scheduler output format to markdown for better rendering
+function formatOutputAsMarkdown(output: string): string {
+  let result = output;
+  
+  // Convert stage headers: === Stage N: Name === -> ## Stage N: Name
+  result = result.replace(/=== Stage (\d+): (.+?) ===/g, '\n## Stage $1: $2\n');
+  
+  // Convert action success markers: [Action Name] Success: -> **Action Name** ✓
+  result = result.replace(/\[([^\]]+)\] Success:/g, '\n**$1** ✓\n');
+  
+  // Convert action error markers: [Action Name] Error: -> **Action Name** ✗
+  result = result.replace(/\[([^\]]+)\] Error:/g, '\n**$1** ✗\n');
+  
+  // Clean up multiple newlines
+  result = result.replace(/\n{3,}/g, '\n\n');
+  
+  return result.trim();
+}
+
 async function getInvoke() {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke;
@@ -95,6 +116,24 @@ export function ExecutionHistory() {
     execution: ExecutionLog;
     actions: ActionLog[];
   } | null>(null);
+  const [expandedStages, setExpandedStages] = useState<Set<number>>(new Set([0]));
+  const [fullOutputExpanded, setFullOutputExpanded] = useState(true);
+
+  const toggleStage = (index: number) => {
+    setExpandedStages(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  const expandAllStages = (groups: GroupedActions[]) => {
+    setExpandedStages(new Set(groups.map((_, i) => i)));
+  };
 
   const loadExecutions = async () => {
     try {
@@ -221,52 +260,80 @@ export function ExecutionHistory() {
               </div>
             </div>
 
-            <div className={styles.actionLogs}>
-              <h4>
-                <Layers size={16} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
-                Workflow Stages
-              </h4>
-              {groupActionsByStage(executionDetails.actions, executionDetails.execution.output).map((group) => (
-                <div key={`stage-${group.stageIndex}`} className={styles.stageGroup}>
-                  <div className={styles.stageGroupHeader}>
-                    <span className={styles.stageNumber}>{group.stageIndex + 1}</span>
-                    <span className={styles.stageName}>{group.stageName}</span>
-                    {group.isParallel && (
-                      <span className={styles.parallelBadge}>
-                        <Zap size={12} />
-                        {group.actions.length} parallel
-                      </span>
-                    )}
-                  </div>
-                  <div className={group.isParallel ? styles.parallelActionsContainer : styles.sequentialActionsContainer}>
-                    {group.actions.map((action) => (
-                      <div key={`act-${action.id}`} className={`${styles.actionLog} ${styles[action.status]}`}>
-                        <div className={styles.actionLogHeader}>
-                          {getStatusIcon(action.status)}
-                          <span className={styles.actionName}>{action.action_name}</span>
-                          <span className={styles.actionDuration}>
-                            {formatDuration(action.started_at, action.finished_at)}
+            <div className={styles.detailContent}>
+              <div className={styles.actionLogs}>
+                <h4>
+                  <Layers size={16} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+                  Workflow Stages
+                </h4>
+                {(() => {
+                  const groups = groupActionsByStage(executionDetails.actions, executionDetails.execution.output);
+                  return groups.map((group) => (
+                    <div key={`stage-${group.stageIndex}`} className={styles.stageGroup}>
+                      <div 
+                        className={styles.stageGroupHeader}
+                        onClick={() => toggleStage(group.stageIndex)}
+                      >
+                        <ChevronRight 
+                          size={14} 
+                          className={`${styles.stageExpandIcon} ${expandedStages.has(group.stageIndex) ? styles.expanded : ''}`}
+                        />
+                        <span className={styles.stageNumber}>{group.stageIndex + 1}</span>
+                        <span className={styles.stageName}>{group.stageName}</span>
+                        {group.isParallel && (
+                          <span className={styles.parallelBadge}>
+                            <Zap size={12} />
+                            {group.actions.length} parallel
                           </span>
-                        </div>
-                        {action.output && (
-                          <pre className={styles.output}>{action.output}</pre>
-                        )}
-                        {action.error && (
-                          <pre className={styles.error}>{action.error}</pre>
                         )}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {executionDetails.execution.output && (
-              <div className={styles.fullOutput}>
-                <h4>Full Output</h4>
-                <pre>{executionDetails.execution.output}</pre>
+                      <div className={`${styles.stageContent} ${expandedStages.has(group.stageIndex) ? styles.expanded : styles.collapsed}`}>
+                        <div className={group.isParallel ? styles.parallelActionsContainer : styles.sequentialActionsContainer}>
+                          {group.actions.map((action) => (
+                            <div key={`act-${action.id}`} className={`${styles.actionLog} ${styles[action.status]}`}>
+                              <div className={styles.actionLogHeader}>
+                                {getStatusIcon(action.status)}
+                                <span className={styles.actionName}>{action.action_name}</span>
+                                <span className={styles.actionDuration}>
+                                  {formatDuration(action.started_at, action.finished_at)}
+                                </span>
+                              </div>
+                              {action.output && (
+                                <div className={styles.output}>
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{action.output}</ReactMarkdown>
+                                </div>
+                              )}
+                              {action.error && (
+                                <pre className={styles.error}>{action.error}</pre>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ));
+                })()}
               </div>
-            )}
+
+              {executionDetails.execution.output && (
+                <div className={styles.fullOutput}>
+                  <h4 onClick={() => setFullOutputExpanded(!fullOutputExpanded)}>
+                    <ChevronRight 
+                      size={14} 
+                      className={`${styles.stageExpandIcon} ${fullOutputExpanded ? styles.expanded : ''}`}
+                    />
+                    Full Output
+                  </h4>
+                  {fullOutputExpanded && (
+                    <div className={styles.fullOutputContent}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {formatOutputAsMarkdown(executionDetails.execution.output)}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </>
         ) : (
           <div className={styles.emptyDetail}>

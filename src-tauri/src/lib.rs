@@ -190,6 +190,18 @@ pub fn run() {
                 let window = app.get_webview_window("main").unwrap();
                 window.open_devtools();
             }
+            
+            // Start the background cron scheduler in a separate thread with its own runtime
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for cron scheduler");
+                rt.block_on(async move {
+                    // Small delay to let the app fully initialize
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    commands::scheduler::start_cron_scheduler(app_handle).await;
+                });
+            });
+            
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -314,6 +326,12 @@ pub fn run() {
             commands::git::git_push,
             commands::git::git_create_branch,
             commands::git::git_remotes,
+            commands::git::git_delete_branch,
+            commands::git::git_discard_changes,
+            commands::git::git_stash,
+            commands::git::git_stash_pop,
+            commands::git::git_stash_list,
+            commands::git::git_stash_drop,
             commands::ai::chat_ollama,
             commands::ai::chat_openai,
             commands::ai::chat_copilot,
@@ -378,6 +396,8 @@ pub fn run() {
             commands::notes::get_conversation_tags,
             commands::notes::search_conversations,
             commands::notes::export_conversation,
+            commands::notes::update_conversation_summary,
+            commands::notes::get_conversation_summary,
             // Scheduler commands
             commands::scheduler::init_scheduler_db,
             commands::scheduler::list_agents,
@@ -396,6 +416,13 @@ pub fn run() {
             commands::files::read_file_base64,
             commands::files::extract_pdf_text,
             commands::files::extract_docx_text,
+            // Usage tracking
+            commands::usage::init_usage_db,
+            commands::usage::record_token_usage,
+            commands::usage::get_usage_stats,
+            commands::usage::get_usage_by_date_range,
+            commands::usage::clear_usage_history,
+            commands::usage::get_recent_usage,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {

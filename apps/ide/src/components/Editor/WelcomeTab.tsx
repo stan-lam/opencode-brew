@@ -1,7 +1,8 @@
-import { FolderOpen, FileText, GitBranch, MessageSquare, Clock, Zap, Search, Folder } from 'lucide-react';
+import { FolderOpen, FileText, GitBranch, MessageSquare, Clock, Zap, Search, Folder, ExternalLink, RefreshCw } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
-import { dialog } from '../../services/tauri';
+import { dialog, appWindow } from '../../services/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import styles from './WelcomeTab.module.css';
 
 export function WelcomeTab() {
@@ -27,8 +28,24 @@ export function WelcomeTab() {
     await openFolder(path);
   };
 
+  const handleOpenInNewWindow = async (path?: string) => {
+    try {
+      const label = `ide-${Date.now()}`;
+      await invoke('open_tool_window', { 
+        tool: 'ide', 
+        label, 
+        title: path ? path.split('/').pop() || 'OpenCodeBrew' : 'OpenCodeBrew' 
+      });
+    } catch (error) {
+      console.error('Error opening new window:', error);
+    }
+  };
+
   // If workspace is open, show workspace-specific welcome
   if (currentWorkspace) {
+    // Filter out current workspace from recent
+    const otherWorkspaces = recentWorkspaces.filter(w => w.rootPath !== currentWorkspace.rootPath);
+
     return (
       <div className={styles.welcome}>
         <div className={styles.content}>
@@ -62,6 +79,38 @@ export function WelcomeTab() {
             </section>
 
             <section className={styles.section}>
+              <h2 className={styles.sectionTitle}>Switch Project</h2>
+              <div className={styles.actions}>
+                <button className={styles.action} onClick={handleOpenFolder}>
+                  <FolderOpen size={18} />
+                  <span>Open Folder...</span>
+                </button>
+                <button className={styles.action} onClick={() => handleOpenInNewWindow()}>
+                  <ExternalLink size={18} />
+                  <span>New Window</span>
+                </button>
+              </div>
+              {otherWorkspaces.length > 0 && (
+                <div className={styles.recentList}>
+                  <h3 className={styles.recentTitle}>Recent Projects</h3>
+                  {otherWorkspaces.slice(0, 5).map((workspace) => (
+                    <button
+                      key={workspace.id}
+                      className={styles.recentItem}
+                      onClick={() => handleOpenRecent(workspace.rootPath)}
+                    >
+                      <FileText size={16} />
+                      <div className={styles.recentInfo}>
+                        <span className={styles.recentName}>{workspace.name}</span>
+                        <span className={styles.recentPath}>{workspace.rootPath}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className={styles.section}>
               <h2 className={styles.sectionTitle}>Getting Started</h2>
               <div className={styles.features}>
                 <div className={styles.feature}>
@@ -90,9 +139,9 @@ export function WelcomeTab() {
           </div>
 
           <div className={styles.shortcuts}>
+            <span><kbd>⌘</kbd><kbd>O</kbd> Open Folder</span>
             <span><kbd>⌘</kbd><kbd>P</kbd> Quick Open</span>
             <span><kbd>⌘</kbd><kbd>⇧</kbd><kbd>F</kbd> Search Files</span>
-            <span><kbd>⌘</kbd><kbd>B</kbd> Toggle Sidebar</span>
             <span><kbd>F5</kbd> Run Project</span>
           </div>
         </div>

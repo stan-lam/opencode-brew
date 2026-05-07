@@ -278,3 +278,233 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Branch Dropdown */
+.branchSelectorWrapper {
+  position: relative;
+}
+
+.branchDropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 220px;
+  max-height: 300px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.branchDropdownHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.newBranchBtn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.newBranchBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.newBranchInput {
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.newBranchInput input {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: var(--font-size-sm);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.newBranchInput button {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--accent-blue);
+  color: white;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.newBranchInput button:disabled {
+  background-color: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.branchList {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.branchItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.branchItem:hover {
+  background-color: var(--bg-hover);
+}
+
+.activeBranch {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: default;
+}
+
+.deleteBranchBtn {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+
+.branchItem:hover .deleteBranchBtn {
+  opacity: 1;
+}
+
+.deleteBranchBtn:hover {
+  background-color: rgba(255, 85, 85, 0.2);
+  color: var(--accent-red);
+}
+
+/* File Actions */
+.fileActions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Stash Section */
+.stashList {
+  padding: 4px 8px 8px;
+}
+
+.stashItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.stashItem:hover {
+  background-color: var(--bg-hover);
+}
+
+.stashMessage {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stashAction {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+
+.stashItem:hover .stashAction {
+  opacity: 1;
+}
+
+.stashAction:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--accent-green);
+}
+
+/* Commit History */
+.historyList {
+  padding: 4px 8px 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.historyItem {
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.historyItem:last-child {
+  border-bottom: none;
+}
+
+.commitHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.commitId {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--accent-blue);
+}
+
+.commitDate {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.commitMessage {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commitAuthor {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}

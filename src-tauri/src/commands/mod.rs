@@ -11,3 +11,4 @@ pub mod notes;
 pub mod scheduler;
 pub mod settings;
 pub mod files;
+pub mod usage;

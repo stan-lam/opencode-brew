@@ -145,44 +145,46 @@ export function DiffEditor({ repoPath, filePath, staged }: DiffEditorProps) {
       </div>
 
       <div className={styles.diffContent}>
-        {diff.hunks.map((hunk, hunkIndex) => (
-          <div key={hunkIndex} className={styles.hunk}>
-            <div 
-              className={styles.hunkHeader}
-              onClick={() => toggleHunk(hunkIndex)}
-            >
-              {expandedHunks.has(hunkIndex) ? (
-                <ChevronDown size={14} />
-              ) : (
-                <ChevronRight size={14} />
-              )}
-              <span className={styles.hunkInfo}>{hunk.header}</span>
-            </div>
-            {expandedHunks.has(hunkIndex) && (
-              <div className={styles.hunkLines}>
-                {hunk.lines.map((line, lineIndex) => (
-                  <div
-                    key={lineIndex}
-                    className={`${styles.line} ${styles[line.line_type]}`}
-                  >
-                    <span className={styles.lineNumber}>
-                      {line.old_lineno || ''}
-                    </span>
-                    <span className={styles.lineNumber}>
-                      {line.new_lineno || ''}
-                    </span>
-                    <span className={styles.lineSign}>
-                      {line.line_type === 'addition' && '+'}
-                      {line.line_type === 'deletion' && '-'}
-                      {line.line_type === 'context' && ' '}
-                    </span>
-                    <pre className={styles.lineContent}>{line.content}</pre>
-                  </div>
-                ))}
+        <div className={styles.diffContentInner}>
+          {diff.hunks.map((hunk, hunkIndex) => (
+            <div key={hunkIndex} className={styles.hunk}>
+              <div 
+                className={styles.hunkHeader}
+                onClick={() => toggleHunk(hunkIndex)}
+              >
+                {expandedHunks.has(hunkIndex) ? (
+                  <ChevronDown size={14} />
+                ) : (
+                  <ChevronRight size={14} />
+                )}
+                <span className={styles.hunkInfo}>{hunk.header}</span>
               </div>
-            )}
-          </div>
-        ))}
+              {expandedHunks.has(hunkIndex) && (
+                <div className={styles.hunkLines}>
+                  {hunk.lines.map((line, lineIndex) => (
+                    <div
+                      key={lineIndex}
+                      className={`${styles.line} ${styles[line.line_type]}`}
+                    >
+                      <span className={styles.lineNumber}>
+                        {line.old_lineno || ''}
+                      </span>
+                      <span className={styles.lineNumber}>
+                        {line.new_lineno || ''}
+                      </span>
+                      <span className={styles.lineSign}>
+                        {line.line_type === 'addition' && '+'}
+                        {line.line_type === 'deletion' && '-'}
+                        {line.line_type === 'context' && ' '}
+                      </span>
+                      <pre className={styles.lineContent}>{line.content}</pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

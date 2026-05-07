@@ -1,10 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useAssistantStore, Agent, ExecutionLog } from './store/assistantStore';
 import { AgentList } from './components/AgentList';
 import { AgentDetail } from './components/AgentDetail';
 import { AgentBuilder } from './components/AgentBuilder';
 import { ExecutionHistory } from './components/ExecutionHistory';
-import { Bot, History, Plus } from 'lucide-react';
+import { SettingsModal } from './components/SettingsModal';
+import { Bot, History, Plus, Settings } from 'lucide-react';
 import styles from './App.module.css';
 
 async function getInvoke() {
@@ -23,6 +24,7 @@ function App() {
     setView,
     setIsCreating,
   } = useAssistantStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     const initDatabase = async () => {
@@ -68,6 +70,13 @@ function App() {
         </nav>
         <div className={styles.actions}>
           <button 
+            className={styles.settingsBtn}
+            onClick={() => setSettingsOpen(true)}
+            title="Settings"
+          >
+            <Settings size={18} />
+          </button>
+          <button 
             className={styles.newAgentBtn}
             onClick={() => setIsCreating(true)}
           >
@@ -76,6 +85,8 @@ function App() {
           </button>
         </div>
       </header>
+      
+      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       <main className={styles.main}>
         {view === 'agents' ? (

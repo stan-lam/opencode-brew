@@ -39,6 +39,8 @@ pub struct Conversation {
     pub archived: bool,
     pub created_at: String,
     pub updated_at: String,
+    pub context_summary: Option<String>,
+    pub summary_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +164,24 @@ pub async fn init_notes_db(app: AppHandle) -> Result<(), String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
+    
+    // Migration: Add context_summary columns if they don't exist
+    let has_context_summary: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='context_summary'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    
+    if !has_context_summary {
+        println!("[notes] Migrating: Adding context_summary columns to conversations table");
+        conn.execute("ALTER TABLE conversations ADD COLUMN context_summary TEXT", [])
+            .map_err(|e| format!("Migration failed: {}", e))?;
+        conn.execute("ALTER TABLE conversations ADD COLUMN summary_updated_at TEXT", [])
+            .map_err(|e| format!("Migration failed: {}", e))?;
+    }
     
     // Create default workspace if none exists
     let count: i32 = conn
@@ -349,11 +369,11 @@ pub async fn list_conversations(
     let conn = get_connection(&app).await?;
     
     let sql = if folder_id.is_some() {
-        "SELECT id, workspace_id, folder_id, title, pinned, archived, created_at, updated_at 
+        "SELECT id, workspace_id, folder_id, title, pinned, archived, created_at, updated_at, context_summary, summary_updated_at 
          FROM conversations WHERE workspace_id = ?1 AND folder_id = ?2 AND archived = ?3
          ORDER BY pinned DESC, updated_at DESC"
     } else {
-        "SELECT id, workspace_id, folder_id, title, pinned, archived, created_at, updated_at 
+        "SELECT id, workspace_id, folder_id, title, pinned, archived, created_at, updated_at, context_summary, summary_updated_at 
          FROM conversations WHERE workspace_id = ?1 AND folder_id IS NULL AND archived = ?2
          ORDER BY pinned DESC, updated_at DESC"
     };
@@ -371,6 +391,8 @@ pub async fn list_conversations(
                 archived: row.get::<_, i32>(5)? != 0,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                context_summary: row.get(8)?,
+                summary_updated_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -387,6 +409,8 @@ pub async fn list_conversations(
                 archived: row.get::<_, i32>(5)? != 0,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                context_summary: row.get(8)?,
+                summary_updated_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -424,6 +448,8 @@ pub async fn create_conversation(
         archived: false,
         created_at: now.clone(),
         updated_at: now,
+        context_summary: None,
+        summary_updated_at: None,
     })
 }
 
@@ -470,6 +496,41 @@ pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), Strin
         .map_err(|e| e.to_string())?;
     
     Ok(())
+}
+
+#[command]
+pub async fn update_conversation_summary(
+    app: AppHandle,
+    id: String,
+    context_summary: String,
+) -> Result<(), String> {
+    let conn = get_connection(&app).await?;
+    let now = Utc::now().to_rfc3339();
+    
+    conn.execute(
+        "UPDATE conversations SET context_summary = ?1, summary_updated_at = ?2, updated_at = ?3 WHERE id = ?4",
+        params![&context_summary, &now, &now, &id],
+    )
+    .map_err(|e| e.to_string())?;
+    
+    println!("[notes] Updated context summary for conversation {}", id);
+    
+    Ok(())
+}
+
+#[command]
+pub async fn get_conversation_summary(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    let conn = get_connection(&app).await?;
+    
+    let summary: Option<String> = conn
+        .query_row(
+            "SELECT context_summary FROM conversations WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    
+    Ok(summary)
 }
 
 // ============= Message Commands =============
@@ -679,7 +740,7 @@ pub async fn search_conversations(
     
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT c.id, c.workspace_id, c.folder_id, c.title, c.pinned, c.archived, c.created_at, c.updated_at 
+            "SELECT DISTINCT c.id, c.workspace_id, c.folder_id, c.title, c.pinned, c.archived, c.created_at, c.updated_at, c.context_summary, c.summary_updated_at 
              FROM conversations c
              LEFT JOIN messages m ON c.id = m.conversation_id
              WHERE c.workspace_id = ?1 AND (c.title LIKE ?2 OR m.content LIKE ?2)
@@ -698,6 +759,8 @@ pub async fn search_conversations(
                 archived: row.get::<_, i32>(5)? != 0,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                context_summary: row.get(8)?,
+                summary_updated_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -723,7 +786,7 @@ pub async fn export_conversation(app: AppHandle, conversation_id: String) -> Res
     // Get conversation
     let conversation: Conversation = conn
         .query_row(
-            "SELECT id, workspace_id, folder_id, title, pinned, archived, created_at, updated_at 
+            "SELECT id, workspace_id, folder_id, title, pinned, archived, created_at, updated_at, context_summary, summary_updated_at 
              FROM conversations WHERE id = ?1",
             [&conversation_id],
             |row| {
@@ -736,6 +799,8 @@ pub async fn export_conversation(app: AppHandle, conversation_id: String) -> Res
                     archived: row.get::<_, i32>(5)? != 0,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    context_summary: row.get(8)?,
+                    summary_updated_at: row.get(9)?,
                 })
             },
         )
