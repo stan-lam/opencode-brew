@@ -771,3 +771,42 @@ export const mcp = {
     return invoke('mcp_get_running_servers');
   },
 };
+
+// Vector Database for Semantic Code Search
+export interface SearchResult {
+  file_path: string;
+  content: string;
+  start_line: number;
+  end_line: number;
+  chunk_type: string;
+  score: number;
+}
+
+export interface IndexStatus {
+  is_indexed: boolean;
+  file_count: number;
+  last_indexed: string | null;
+  db_path: string;
+}
+
+export const vectordb = {
+  indexWorkspace: async (workspacePath: string, ollamaUrl?: string): Promise<IndexStatus> => {
+    const invoke = await getInvoke();
+    return invoke('index_workspace', { workspacePath, ollamaUrl });
+  },
+
+  searchCodebase: async (workspacePath: string, query: string, limit?: number, ollamaUrl?: string): Promise<SearchResult[]> => {
+    const invoke = await getInvoke();
+    return invoke('search_codebase', { workspacePath, query, limit, ollamaUrl });
+  },
+
+  getIndexStatus: async (workspacePath: string): Promise<IndexStatus> => {
+    const invoke = await getInvoke();
+    return invoke('get_index_status', { workspacePath });
+  },
+
+  deleteIndex: async (workspacePath: string): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('delete_index', { workspacePath });
+  },
+};

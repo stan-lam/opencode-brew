@@ -1673,24 +1673,43 @@ async fn execute_tools_in_response_with_results(response: &str) -> (String, Vec<
         println!("[scheduler::tools] Executing get_market_movers");
         match web::get_market_movers().await {
             Ok(movers) => {
+                // Collect all valid symbols for explicit listing
+                let all_symbols: Vec<&str> = movers.gainers.iter()
+                    .chain(movers.losers.iter())
+                    .chain(movers.most_active.iter())
+                    .map(|q| q.symbol.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                
                 let formatted = format!(
-                    "**Top Gainers:**\n{}\n\n**Top Losers:**\n{}\n\n**Most Active:**\n{}",
-                    movers.gainers.iter().take(5)
-                        .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
-                        .collect::<Vec<_>>().join("\n"),
-                    movers.losers.iter().take(5)
-                        .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
-                        .collect::<Vec<_>>().join("\n"),
-                    movers.most_active.iter().take(5)
-                        .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
-                        .collect::<Vec<_>>().join("\n")
+                    "**VALID STOCK SYMBOLS (only these may appear in your report):** {}\n\n**Top Gainers ({} stocks):**\n{}\n\n**Top Losers ({} stocks):**\n{}\n\n**Most Active ({} stocks):**\n{}\n\n**REMINDER:** Only include stocks listed above. Do NOT add any other stocks.",
+                    all_symbols.join(", "),
+                    movers.gainers.len(),
+                    if movers.gainers.is_empty() { "No data available".to_string() } else {
+                        movers.gainers.iter().take(5)
+                            .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
+                            .collect::<Vec<_>>().join("\n")
+                    },
+                    movers.losers.len(),
+                    if movers.losers.is_empty() { "No data available".to_string() } else {
+                        movers.losers.iter().take(5)
+                            .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
+                            .collect::<Vec<_>>().join("\n")
+                    },
+                    movers.most_active.len(),
+                    if movers.most_active.is_empty() { "No data available".to_string() } else {
+                        movers.most_active.iter().take(5)
+                            .map(|q| format!("- {} ${:.2} ({:+.2}%)", q.symbol, q.price, q.change_percent))
+                            .collect::<Vec<_>>().join("\n")
+                    }
                 );
                 tool_results.push(format!("[Market movers]\n{}", formatted));
                 result = result.replace(full_match, &formatted);
             }
             Err(e) => {
                 println!("[scheduler::tools] get_market_movers failed: {}", e);
-                tool_results.push(format!("[Market movers failed]: {}", e));
+                tool_results.push(format!("[Market movers failed - do not invent data]: {}", e));
                 result = result.replace(full_match, &format!("[Market movers failed: {}]", e));
             }
         }

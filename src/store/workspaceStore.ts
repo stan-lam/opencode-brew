@@ -123,6 +123,24 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           } catch (projectError) {
             console.log('Could not detect project type:', projectError);
           }
+
+          // Auto-index workspace for semantic search (in background)
+          (async () => {
+            try {
+              const { vectordb } = await import('../services/tauri');
+              const status = await vectordb.getIndexStatus(folderPath);
+              
+              if (!status.is_indexed) {
+                console.log('Starting vector index for workspace (background)...');
+                const result = await vectordb.indexWorkspace(folderPath);
+                console.log(`Vector index complete: ${result.file_count} files indexed`);
+              } else {
+                console.log('Workspace already indexed for semantic search');
+              }
+            } catch (indexError) {
+              console.log('Vector indexing not available:', indexError);
+            }
+          })();
         } catch (error) {
           console.error('Failed to open folder:', error);
         }

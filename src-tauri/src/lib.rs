@@ -423,6 +423,11 @@ pub fn run() {
             commands::usage::get_usage_by_date_range,
             commands::usage::clear_usage_history,
             commands::usage::get_recent_usage,
+            // Vector database for semantic code search
+            commands::vectordb::index_workspace,
+            commands::vectordb::search_codebase,
+            commands::vectordb::get_index_status,
+            commands::vectordb::delete_index,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {

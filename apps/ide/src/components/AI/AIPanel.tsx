@@ -3046,7 +3046,9 @@ export function AIPanel() {
              modelLower.includes('qwenvl') ||
              modelLower.includes('vision') ||
              modelLower.includes('minicpm-v') ||
-             modelLower.includes('paligemma');
+             modelLower.includes('paligemma') ||
+             modelLower.includes('deepseek-vl') ||
+             modelLower.includes('moondream');
     }
     return false;
   }, [config.provider, config.model]);

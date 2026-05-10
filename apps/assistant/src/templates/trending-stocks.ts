@@ -368,23 +368,30 @@ Collect relevant headlines and brief summaries for the Market News section.`;
 
   const reportPrompt = `Compile a comprehensive Trending Stocks Report.
 
-Use the data from previous stages to create a well-organized report.
+Use ONLY the data from previous stages to create a well-organized report.
+
+**CRITICAL: ANTI-HALLUCINATION VALIDATION**
+Before including ANY stock in this report, verify:
+- The stock symbol is a valid 1-5 letter ticker (e.g., NVDA, AAPL, META)
+- The stock was returned by a tool in a previous stage
+- NEVER include generic names like "XYZ CORP", "TECH INNOVATORS", or any company description
+- If tool results contain fewer stocks than expected, report ONLY those stocks - do not fill gaps with invented data
+- If a section has no valid data, write "No data available for this section"
 
 **Report Structure:**
 1. **Market Summary** - Brief market overview (2-3 sentences)
-2. **Top Gainers** - Stocks with biggest price increases
-3. **Top Losers** - Stocks with biggest price decreases  
-4. **Most Active** - Highest volume stocks
-${trackSentiment ? '5. **Sentiment Trending** - Stocks trending on social media' : ''}
+2. **Top Gainers** - Stocks with biggest price increases (only from tool results)
+3. **Top Losers** - Stocks with biggest price decreases (only from tool results)
+4. **Most Active** - Highest volume stocks (only from tool results)
+${trackSentiment ? '5. **Sentiment Trending** - Stocks trending on social media (only from tool results)' : ''}
 6. **📋 Watchlist Summary** (REQUIRED) - Complete price list of ALL stocks mentioned in this report:
-   - Include EVERY stock from gainers, losers, and most active sections
+   - Include ONLY stocks that appeared in tool results above
    ${watchlist.length > 0 ? `- Plus your custom watchlist: ${watchlist.join(', ')}` : ''}
    - For each stock show: Symbol, Current Price, Change %, Today's High/Low if available
    - This section is MANDATORY and must appear in every report
 7. **📰 Latest News** (REQUIRED) - Recent market news and headlines:
-   - Include 5-8 relevant news headlines
-   - Focus on stocks mentioned in this report
-   - Include brief summary for each headline
+   - Include 5-8 relevant news headlines from search results
+   - If no news was fetched, write "News unavailable - search did not return results"
    - This section is MANDATORY and must appear in every report
 
 **Formatting:**
@@ -398,7 +405,7 @@ ${includeChartLinks ? '- Add TradingView links for each stock' : ''}
 - Min stock price: $${minPrice}
 - Max stocks per category: ${maxStocksPerCategory}
 
-**IMPORTANT:** The Watchlist Summary and Latest News sections are REQUIRED and must ALWAYS be included in the final report.`;
+**FINAL CHECK:** Review your report - if any stock symbol is longer than 5 characters or contains spaces/lowercase/numbers, REMOVE IT. Only real ticker symbols allowed.`;
 
   return {
     marketMovers: marketMoversPrompt,
@@ -416,7 +423,18 @@ function createAiAction(id: string, name: string, prompt: string, order: number)
     action_type: {
       type: 'ai_prompt',
       prompt,
-      system_prompt: 'You are a professional stock market analyst. Provide accurate, data-driven analysis. Always use the tools provided to fetch real-time data. Never make up stock prices or data.',
+      system_prompt: `You are a professional stock market analyst. Provide accurate, data-driven analysis.
+
+CRITICAL ANTI-HALLUCINATION RULES:
+1. ONLY include stocks that were EXPLICITLY returned by the tools (get_market_movers, get_stock_quote)
+2. NEVER invent, fabricate, or generate fictional stock symbols or prices
+3. NEVER use company names instead of ticker symbols (e.g., never write "XYZ CORP" or "TECH INNOVATORS")
+4. All valid stock symbols are 1-5 uppercase letters (e.g., NVDA, AAPL, META, GOOGL)
+5. If a tool returns fewer stocks than expected, report only what you received - do not fill in gaps
+6. If a tool fails or returns no data, explicitly state "Data unavailable" for that section
+7. Every stock in your report MUST have come from a tool result in this conversation
+
+If you cannot verify a stock came from tool output, DO NOT include it.`,
     },
     order,
     on_error: 'continue',

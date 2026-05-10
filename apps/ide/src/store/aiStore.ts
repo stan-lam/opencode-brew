@@ -608,12 +608,24 @@ const defaultConfig: AIProviderConfig = {
   copilotUsageOrg: '',
   temperature: 0.7,
   maxTokens: 4096,
-  systemPrompt: `You are an expert coding assistant integrated into the OpenCodeBrew code editor. You have access to the user's currently open files and project context.
+  systemPrompt: `You are an expert coding assistant integrated into the OpenCodeBrew code editor.
+
+**IMPORTANT: YOU HAVE FULL CODEBASE ACCESS**
+The user's project context is included directly in their messages under "[Context from IDE]":
+- **REPOSITORY STRUCTURE** - Full directory tree of the project
+- **OPEN FILES** - Complete content of files open in the editor  
+- **RELEVANT CODE** - Semantically searched code snippets most relevant to the user's question (with relevance scores)
+
+You DO have access to this information - it is embedded in the message via semantic vector search.
+- Do NOT claim you cannot access files or the repository - the code is RIGHT THERE
+- The "RELEVANT CODE" section contains code automatically found based on the user's question
+- Use these results to give accurate, specific answers about their codebase
 
 When the user asks about code:
-- Reference the specific file content provided in the context
+- Reference the specific file content and line numbers provided
+- Use semantic search results - they are the most relevant to the question
 - Give concrete suggestions based on their actual code
-- Point to specific line numbers or sections when relevant
+- If you need more context, ask the user to open specific files
 
 When explaining code:
 - Break down the logic step by step
@@ -811,6 +823,7 @@ export const useAIStore = create<AIState>()(
         // Get context from editor store
         const { useEditorStore } = await import('./editorStore');
         const { useWorkspaceStore } = await import('./workspaceStore');
+        const { fs } = await import('../services/tauri');
         const editorState = useEditorStore.getState();
         const workspaceState = useWorkspaceStore.getState();
         
@@ -818,22 +831,121 @@ export const useAIStore = create<AIState>()(
         let contextInfo = '';
         
         if (workspaceState.currentWorkspace) {
-          contextInfo += `\n\nProject: ${workspaceState.currentWorkspace.name}\nPath: ${workspaceState.currentWorkspace.rootPath}\n`;
+          contextInfo += `\n\n**PROJECT:** ${workspaceState.currentWorkspace.name}\n**ROOT PATH:** ${workspaceState.currentWorkspace.rootPath}\n`;
+          
+          // Include full directory structure for repo understanding
+          try {
+            let totalEntries = 0;
+            const MAX_ENTRIES = 500; // Total file/folder limit to avoid token overflow
+            
+            const IGNORE_DIRS = new Set([
+              'node_modules', '.git', 'target', 'dist', 'build', '.next', '__pycache__', 
+              '.venv', 'venv', '.idea', '.vscode', 'coverage', '.cache', '.turbo',
+              '.nuxt', '.output', 'out', '.svelte-kit', '.parcel-cache', '.webpack',
+              'vendor', 'packages', '.pnpm', '.yarn', 'bower_components', '.gradle',
+              '.m2', 'bin', 'obj', 'debug', 'release', '.pytest_cache', '.mypy_cache',
+              'htmlcov', '.tox', 'eggs', '*.egg-info', '__snapshots__', '.nyc_output'
+            ]);
+            
+            const buildTree = async (dirPath: string, depth: number = 0): Promise<string> => {
+              if (totalEntries >= MAX_ENTRIES) return depth === 0 ? '' : '  '.repeat(depth) + '... (truncated)\n';
+              
+              let entries;
+              try {
+                entries = await fs.readDirectory(dirPath);
+              } catch {
+                return ''; // Skip unreadable directories
+              }
+              
+              let tree = '';
+              const indent = '  '.repeat(depth);
+              
+              // Sort: directories first, then files
+              const sorted = entries.sort((a, b) => {
+                if (a.is_directory && !b.is_directory) return -1;
+                if (!a.is_directory && b.is_directory) return 1;
+                return a.name.localeCompare(b.name);
+              });
+              
+              // Filter out noise directories and hidden files (except important ones)
+              const filtered = sorted.filter(e => {
+                if (IGNORE_DIRS.has(e.name)) return false;
+                if (e.name.startsWith('.') && !['src', '.env.example', '.gitignore', '.eslintrc', '.prettierrc'].some(k => e.name.includes(k))) {
+                  // Keep some important dotfiles
+                  if (!e.is_directory && ['.env.example', '.gitignore', '.eslintrc.js', '.prettierrc'].includes(e.name)) return true;
+                  return false;
+                }
+                return true;
+              });
+              
+              for (const entry of filtered) {
+                if (totalEntries >= MAX_ENTRIES) {
+                  tree += `${indent}... (${filtered.length - filtered.indexOf(entry)} more items)\n`;
+                  break;
+                }
+                
+                totalEntries++;
+                tree += `${indent}${entry.is_directory ? '📁' : '📄'} ${entry.name}\n`;
+                
+                if (entry.is_directory) {
+                  tree += await buildTree(entry.path, depth + 1);
+                }
+              }
+              return tree;
+            };
+            
+            const tree = await buildTree(workspaceState.currentWorkspace.rootPath);
+            if (tree) {
+              contextInfo += `\n**REPOSITORY STRUCTURE (${totalEntries} items):**\n\`\`\`\n${tree}\`\`\`\n`;
+            }
+          } catch (treeError) {
+            console.log('Could not build directory tree:', treeError);
+          }
         }
         
-        if (editorState.activeFile) {
-          contextInfo += `\n\nCurrently open file: ${editorState.activeFile.path}\n`;
-          contextInfo += `Language: ${editorState.activeFile.language}\n`;
-          contextInfo += `\n--- File Content ---\n${editorState.activeFile.content}\n--- End of File ---\n`;
-        }
+        // Include ALL open files, not just the active one
+        const filesToInclude = editorState.openFiles.slice(0, 5); // Limit to 5 files to avoid token overflow
         
-        if (editorState.openFiles.length > 1) {
-          contextInfo += `\nOther open files:\n`;
-          editorState.openFiles
-            .filter(f => f.path !== editorState.activeFile?.path)
-            .forEach(f => {
-              contextInfo += `- ${f.name} (${f.language})\n`;
-            });
+        if (filesToInclude.length > 0) {
+          contextInfo += `\n**OPEN FILES (${filesToInclude.length}):**\n`;
+          
+          for (const file of filesToInclude) {
+            const isActive = file.path === editorState.activeFile?.path;
+            const truncatedContent = file.content.length > 8000 
+              ? file.content.slice(0, 8000) + '\n... [truncated, file continues]'
+              : file.content;
+            
+            contextInfo += `\n### ${isActive ? '[ACTIVE] ' : ''}${file.path}\n`;
+            contextInfo += `\`\`\`${file.language || ''}\n${truncatedContent}\n\`\`\`\n`;
+          }
+        } else {
+          contextInfo += `\n**NOTE:** No files are currently open in the editor. Open files to get their content in context.\n`;
+        }
+
+        // Semantic search: find relevant code based on the user's question
+        if (workspaceState.currentWorkspace) {
+          try {
+            const { vectordb } = await import('../services/tauri');
+            const searchResults = await vectordb.searchCodebase(
+              workspaceState.currentWorkspace.rootPath,
+              content, // Search using the user's question
+              5, // Top 5 results
+              config.baseUrl // Use configured Ollama URL
+            );
+            
+            if (searchResults.length > 0) {
+              contextInfo += `\n**RELEVANT CODE (semantic search results):**\n`;
+              for (const result of searchResults) {
+                const truncated = result.content.length > 2000 
+                  ? result.content.slice(0, 2000) + '\n... [truncated]'
+                  : result.content;
+                contextInfo += `\n### ${result.file_path} (lines ${result.start_line}-${result.end_line}, relevance: ${(result.score * 100).toFixed(0)}%)\n`;
+                contextInfo += `\`\`\`\n${truncated}\n\`\`\`\n`;
+              }
+            }
+          } catch (searchError) {
+            console.log('Semantic search not available:', searchError);
+          }
         }
 
         // Enhance the user message with context if it seems like a code question
