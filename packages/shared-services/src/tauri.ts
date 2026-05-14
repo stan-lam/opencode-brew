@@ -75,6 +75,51 @@ export interface GitCommitInfo {
   timestamp: string;
 }
 
+export interface DiffLine {
+  line_type: string;
+  old_lineno: number | null;
+  new_lineno: number | null;
+  content: string;
+}
+
+export interface DiffHunk {
+  header: string;
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  lines: DiffLine[];
+}
+
+export interface FileDiff {
+  old_path: string | null;
+  new_path: string | null;
+  status: string;
+  hunks: DiffHunk[];
+  additions: number;
+  deletions: number;
+}
+
+export interface CommitDiff {
+  commit_id: string;
+  message: string;
+  author: string;
+  email: string;
+  timestamp: string;
+  files: FileDiff[];
+  total_additions: number;
+  total_deletions: number;
+}
+
+export interface DiffSinceResult {
+  from_commit: string;
+  to_commit: string;
+  commit_count: number;
+  files: FileDiff[];
+  total_additions: number;
+  total_deletions: number;
+}
+
 export interface MessageAttachment {
   id: string;
   type: 'image' | 'file';
@@ -365,6 +410,16 @@ export const git = {
   log: async (repoPath: string, limit?: number): Promise<GitCommitInfo[]> => {
     const invoke = await getInvoke();
     return invoke('git_log', { repoPath, limit });
+  },
+  
+  showCommit: async (repoPath: string, commitId: string): Promise<CommitDiff> => {
+    const invoke = await getInvoke();
+    return invoke('git_show_commit', { repoPath, commitId });
+  },
+  
+  diffSince: async (repoPath: string, commitId: string): Promise<DiffSinceResult> => {
+    const invoke = await getInvoke();
+    return invoke('git_diff_since', { repoPath, commitId });
   },
   
   fetch: async (repoPath: string, remoteName?: string): Promise<void> => {

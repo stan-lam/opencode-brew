@@ -27,7 +27,7 @@ import {
   Globe,
   Clock,
 } from 'lucide-react';
-import { ai, appEvents, dialog, fs, history, shell } from '../../services/tauri';
+import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage } from '../../services/tauri';
 import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
@@ -1639,6 +1639,25 @@ function MessageBubble({ message, onOperationsChange }: {
           onSwitchToAgent={() => handleImplementInAgent(actionableTasks)} 
         />
       )}
+      {!isUser && message.usage && (
+        <div className={styles.messageUsage}>
+          <span className={styles.messageUsageTokens}>
+            {message.usage.totalTokens.toLocaleString()} tokens
+          </span>
+          {message.usage.estimatedCostUsd > 0 && (
+            <span className={styles.messageUsageCost}>
+              ${message.usage.estimatedCostUsd.toFixed(4)}
+            </span>
+          )}
+          {(message.usage.cacheCreationTokens > 0 || message.usage.cacheReadTokens > 0) && (
+            <span className={styles.messageUsageCache}>
+              cache: {message.usage.cacheReadTokens > 0 
+                ? `${Math.round((message.usage.cacheReadTokens / (message.usage.promptTokens + message.usage.cacheReadTokens)) * 100)}% hit`
+                : 'miss'}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2909,6 +2928,8 @@ export function AIPanel() {
     agentTasks,
     webAccessStatus,
     webAccessTraces,
+    sessionUsage,
+    lastMessageUsage,
     toggleWebAccessTraceExpanded,
     createConversation,
     setActiveConversation,
@@ -2919,6 +2940,8 @@ export function AIPanel() {
     stopStreaming,
     refreshAvailableModels,
     clearAgentTasks,
+    updateSessionUsage,
+    resetSessionUsage,
   } = useAIStore();
 
   const { currentWorkspace } = useWorkspaceStore();
@@ -3028,6 +3051,48 @@ export function AIPanel() {
       refreshAvailableModels();
     }
   }, [config.provider, refreshAvailableModels]);
+
+  // Listen for token usage events and update session tracking
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    
+    const setupListener = async () => {
+      await usage.initDb();
+      unlisten = await listenForTokenUsage((event) => {
+        const messageUsage = {
+          promptTokens: event.prompt_tokens,
+          completionTokens: event.completion_tokens,
+          totalTokens: event.total_tokens,
+          cacheCreationTokens: event.cache_creation_tokens,
+          cacheReadTokens: event.cache_read_tokens,
+          estimatedCostUsd: event.estimated_cost_usd,
+        };
+        updateSessionUsage(messageUsage);
+        
+        // Record to persistent storage
+        usage.recordUsage(
+          event.model,
+          event.provider,
+          event.prompt_tokens,
+          event.completion_tokens,
+          event.cache_creation_tokens,
+          event.cache_read_tokens,
+          event.estimated_cost_usd
+        );
+      });
+    };
+    
+    setupListener();
+    
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [updateSessionUsage]);
+
+  // Reset session usage when conversation changes
+  useEffect(() => {
+    resetSessionUsage();
+  }, [activeConversation?.id, resetSessionUsage]);
 
   const isVisionModel = useCallback(() => {
     if (config.provider === 'openai' || config.provider === 'claude') {
@@ -3895,6 +3960,37 @@ export function AIPanel() {
           </div>
         ) : (
           <>
+            {sessionUsage.turnCount > 0 && (
+              <div className={styles.sessionCostTracker}>
+                <div className={styles.sessionCostStats}>
+                  <span className={styles.sessionCostTokens}>
+                    {sessionUsage.totalTokens.toLocaleString()} tokens
+                  </span>
+                  <span className={styles.sessionCostSeparator}>•</span>
+                  <span className={styles.sessionCostTurns}>
+                    {sessionUsage.turnCount} {sessionUsage.turnCount === 1 ? 'turn' : 'turns'}
+                  </span>
+                  {sessionUsage.totalCostUsd > 0 && (
+                    <>
+                      <span className={styles.sessionCostSeparator}>•</span>
+                      <span className={styles.sessionCostAmount}>
+                        ${sessionUsage.totalCostUsd.toFixed(4)}
+                      </span>
+                    </>
+                  )}
+                  {(sessionUsage.totalCacheCreation > 0 || sessionUsage.totalCacheRead > 0) && (
+                    <>
+                      <span className={styles.sessionCostSeparator}>•</span>
+                      <span className={styles.sessionCostCache}>
+                        cache: {sessionUsage.totalCacheRead > 0 
+                          ? `${Math.round((sessionUsage.totalCacheRead / (sessionUsage.totalPromptTokens + sessionUsage.totalCacheRead)) * 100)}%`
+                          : '0%'} hit
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
             {(agentMode === 'agent' || agentMode === 'edit' || agentMode === 'plan') && (
               <div className={styles.modeBanner}>
                 <div className={styles.modeBannerIcon}>
@@ -4853,6 +4949,78 @@ function AISettings({ onClose }: { onClose: () => void }) {
             max="100000"
           />
         </div>
+
+        {(config.provider === 'ollama' || config.provider === 'custom') && (
+          <>
+            <div className={styles.settingsDivider}>
+              <span>Cost Tracking</span>
+            </div>
+            
+            <div className={styles.settingGroup}>
+              <div className={styles.settingToggleRow}>
+                <div>
+                  <label>Custom Pricing</label>
+                  <p className={styles.settingHint}>
+                    Set custom token rates for cost estimation (e.g., for Ollama Cloud or custom providers)
+                  </p>
+                </div>
+                <button
+                  className={`${styles.toggleSwitch} ${config.customPricing?.enabled ? styles.on : ''}`}
+                  onClick={() => setConfig({ 
+                    customPricing: { 
+                      enabled: !config.customPricing?.enabled,
+                      inputPerMillion: config.customPricing?.inputPerMillion || 0,
+                      outputPerMillion: config.customPricing?.outputPerMillion || 0,
+                    } 
+                  })}
+                >
+                  <span className={styles.toggleKnob} />
+                </button>
+              </div>
+            </div>
+
+            {config.customPricing?.enabled && (
+              <div className={styles.customPricingFields}>
+                <div className={styles.settingGroup}>
+                  <label>Input Price ($ per 1M tokens)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={config.customPricing?.inputPerMillion || 0}
+                    onChange={(e) => setConfig({ 
+                      customPricing: { 
+                        ...config.customPricing,
+                        enabled: true,
+                        inputPerMillion: parseFloat(e.target.value) || 0,
+                        outputPerMillion: config.customPricing?.outputPerMillion || 0,
+                      } 
+                    })}
+                    placeholder="0.00"
+                  />
+                </div>
+                <div className={styles.settingGroup}>
+                  <label>Output Price ($ per 1M tokens)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={config.customPricing?.outputPerMillion || 0}
+                    onChange={(e) => setConfig({ 
+                      customPricing: { 
+                        ...config.customPricing,
+                        enabled: true,
+                        inputPerMillion: config.customPricing?.inputPerMillion || 0,
+                        outputPerMillion: parseFloat(e.target.value) || 0,
+                      } 
+                    })}
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+            )}
+          </>
+        )}
 
         <div className={styles.settingsDivider}>
           <span>Reasoning Options</span>

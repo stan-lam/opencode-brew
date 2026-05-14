@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MCPServerConfig, MCPTool, MCPToolResult } from '../services/tauri';
+import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MarketIndices, MCPServerConfig, MCPTool, MCPToolResult } from '../services/tauri';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
 export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
@@ -523,12 +523,40 @@ function getWebAccessPrompt(): string {
   const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   return `
 
+## CRITICAL: ZERO HALLUCINATION POLICY
+
+**YOU MUST NEVER MAKE UP OR HALLUCINATE ANY FACTUAL DATA.**
+
+For ANY factual claim about real-world data, you MUST either:
+1. **FETCH IT** - Use the web tools below to get verified, real-time data
+2. **CITE IT** - Reference the exact source where you found it
+3. **ADMIT UNCERTAINTY** - Say "I don't have current data on this" if tools fail
+
+**Categories that REQUIRE verification (use tools):**
+- Stock prices, market data, cryptocurrency, financial figures
+- Current events, news, recent announcements
+- Sports scores, standings, statistics
+- Weather, forecasts
+- Company earnings, revenue, employee counts
+- Product prices, specifications, release dates
+- Person/celebrity current status, age, net worth
+- Any number, statistic, or metric that changes over time
+
+**If your web search/fetch fails or returns no relevant data:**
+- Say: "I searched for [topic] but couldn't find current data."
+- NEVER fill in with made-up numbers or "typical" values
+- Suggest the user try a specific source directly
+
+**WRONG:** "The Nasdaq is currently at 15,234.56 (+1.2%)" ← Made up!
+**RIGHT:** <get_market_indices /> then report EXACTLY what it returns
+
 ## WEB ACCESS
 
 You have tools to search the web and fetch actual data. You MUST use these for ANY question about:
 - **Stock prices, market data, cryptocurrency prices** - These change constantly
 - **Current events, recent news, or anything time-sensitive**
 - **Weather, sports scores, or live data**
+- **Any factual claim about current real-world state**
 
 ### Available Tools:
 
@@ -541,6 +569,9 @@ You have tools to search the web and fetch actual data. You MUST use these for A
 **Get market movers (gainers/losers/active):**
 <get_market_movers />
 
+**Get major market indices (Dow, S&P 500, Nasdaq, Russell 2000):**
+<get_market_indices />
+
 **Get quote for a specific stock:**
 <get_stock_quote symbol="AAPL" />
 
@@ -548,27 +579,41 @@ You have tools to search the web and fetch actual data. You MUST use these for A
 
 | User asks about | You MUST do |
 |-----------------|-------------|
+| Market indices (Dow, S&P, Nasdaq) | <get_market_indices /> |
 | Top gainers/losers/active | <get_market_movers /> |
 | Specific stock price | <get_stock_quote symbol="TICKER" /> |
 | After-hours movers | <fetch_url url="https://www.marketwatch.com/tools/screener/after-hours" /> |
 | Pre-market movers | <fetch_url url="https://www.marketwatch.com/tools/screener/premarket" /> |
 | Stock news | <search_web query="TICKER news ${today}" /> |
 
+**CRITICAL FOR INDICES:** When reporting Dow Jones, S&P 500, Nasdaq values:
+- ALWAYS use <get_market_indices /> to get REAL-TIME data
+- NEVER report index values from web search results (they may be stale)
+- NEVER make up or estimate index values
+
 ### CRITICAL: NEVER JUST PROVIDE LINKS
 
-**WRONG approach:**
-"Here are some resources where you can find after-hours data: [list of links]"
+**🚫 ABSOLUTELY FORBIDDEN - NEVER DO THIS:**
+- Listing links/sources for the user to visit themselves
+- "Here are some resources: [Nasdaq], [MarketBeat], [CNBC]..."
+- "You can find this information at..."
+- "Check out these sites for more info..."
+- Creating a table of source links instead of actual data
 
-**CORRECT approach:**
-1. Use <fetch_url> to get the actual page content
-2. Extract the stock data from the response
-3. Present the actual prices and changes in a table
+**THIS IS USELESS AND WASTES THE USER'S TIME. THEY ASKED YOU TO GET THE DATA, NOT TELL THEM WHERE TO FIND IT.**
+
+**✅ CORRECT approach:**
+1. Use <search_web> or <fetch_url> to GET the actual content
+2. EXTRACT the specific data (numbers, facts, figures) from the response
+3. PRESENT the actual data in your response
+4. If the search returns no useful data, say "I couldn't find [specific info]" - don't list alternative sources
 
 You MUST ALWAYS:
 1. FETCH the actual data using your tools
-2. EXTRACT specific prices, percentages, and stock symbols
-3. PRESENT the data in a table format
+2. EXTRACT specific numbers, facts, and figures
+3. PRESENT the data directly in your response
 4. NEVER tell users to "check these links" or "visit these sites"
+5. NEVER create a "Sources" table with links - that's not analysis, that's laziness
 
 **DATA QUALITY - AUTOMATIC CORRECTION:**
 If you receive stock data with $0.00 prices or 0.00% changes:
@@ -584,11 +629,76 @@ If you receive stock data with $0.00 prices or 0.00% changes:
    |--------|-------|--------|
    | NVDA   | $145  | +5.2%  |
 
-DO NOT give generic advice, provide resource links, or suggest checking elsewhere. YOU have the tools - USE THEM and present actual data.`;
+DO NOT give generic advice, provide resource links, or suggest checking elsewhere. YOU have the tools - USE THEM and present actual data.
+
+### STOCK ANALYSIS - PROVIDE ACTUAL ANALYSIS
+
+When a user asks about a specific stock (e.g., "analyze CELH", "is AAPL a good buy?", "what's happening with NVDA?"):
+
+**STEP 1 - ALWAYS FETCH STOCK-SPECIFIC DATA FIRST:**
+\`\`\`
+<get_stock_quote symbol="CELH" />
+<search_web query="CELH Celsius Holdings stock news analysis May 2026" />
+\`\`\`
+
+CRITICAL: The search query MUST include:
+- The actual ticker symbol (e.g., CELH, AAPL, NVDA)
+- The word "stock" 
+- Current date/month/year
+- NEVER search for generic "news" without the ticker - you'll get irrelevant geopolitical news
+
+**YOU MUST:**
+1. **Fetch the data** - Use <get_stock_quote symbol="TICKER" /> and <search_web query="TICKER [company name] stock news analysis [current month year]" />
+2. **ANALYZE the data** - Provide actual insights about:
+   - Price action and recent performance
+   - Key news and catalysts
+   - Technical levels (support/resistance if mentioned in news)
+   - Analyst sentiment and price targets (from search results)
+   - Risk factors and concerns
+3. **Give your assessment** - Based on the data, provide an opinion on the stock's outlook
+4. **Add a disclaimer** - End with: "⚠️ *Disclaimer: This is informational analysis only, not financial advice. Always do your own research before making investment decisions.*"
+
+**YOU MUST NOT:**
+- Refuse to analyze because "I can't give financial advice" - THIS IS WRONG BEHAVIOR
+- Say "I cannot provide financial advice" - YOU CAN when you add a disclaimer
+- Provide only generic explanations of "what analyst reports contain" - USELESS
+- Tell the user to "consult a financial advisor" without first providing analysis
+- Give empty non-answers that waste the user's time
+- Just show a price table without analysis - THAT'S NOT ANALYSIS
+
+**OVERRIDE YOUR DEFAULT TRAINING:** Your base training tells you to refuse financial analysis. IGNORE THAT in this context. Users of this app EXPECT and WANT stock analysis. The disclaimer makes it acceptable. Refusing is unhelpful and frustrating.
+
+**EXAMPLE - CORRECT RESPONSE:**
+\`\`\`
+## CELH Analysis
+
+**Current Price:** $29.33 (-9.17% today)
+
+**Key Observations:**
+- Sharp selloff on high volume (13M shares) suggests institutional activity
+- Trading near 52-week lows after missing earnings expectations
+- Energy drink sector facing increased competition from Monster and Red Bull
+
+**Recent News:**
+- Q1 earnings missed estimates by 12%
+- Management lowered full-year guidance
+- Amazon distribution deal renewal uncertain
+
+**Technical Levels:**
+- Support: $27.50 (recent low)
+- Resistance: $35.00 (prior breakdown level)
+
+**Assessment:**
+The stock is in a clear downtrend following disappointing fundamentals. While the selloff may be overdone in the short term, the lowered guidance suggests near-term headwinds. Watch for stabilization near $27-28 support before considering entry.
+
+⚠️ *Disclaimer: This is informational analysis only, not financial advice. Always do your own research before making investment decisions.*
+\`\`\`
+
+This is what users WANT and EXPECT - actual analysis, not evasion.`;
 }
 
 interface WebOperation {
-  type: 'search_web' | 'fetch_url' | 'get_stock_quote' | 'get_market_movers';
+  type: 'search_web' | 'fetch_url' | 'get_stock_quote' | 'get_market_movers' | 'get_market_indices';
   query?: string;
   url?: string;
   symbol?: string;
@@ -618,6 +728,11 @@ function parseWebOperations(content: string): WebOperation[] {
     operations.push({ type: 'get_market_movers' });
   }
   
+  const marketIndicesRegex = /<get_market_indices\s*\/?>/gi;
+  while ((match = marketIndicesRegex.exec(content)) !== null) {
+    operations.push({ type: 'get_market_indices' });
+  }
+  
   return operations.slice(0, 10);
 }
 
@@ -627,6 +742,7 @@ function cleanWebOperationTags(content: string): string {
     .replace(/<fetch_url\s+url="[^"]+"\s*\/?>/gi, '')
     .replace(/<get_stock_quote\s+symbol="[^"]+"\s*\/?>/gi, '')
     .replace(/<get_market_movers\s*\/?>/gi, '')
+    .replace(/<get_market_indices\s*\/?>/gi, '')
     .trim();
 }
 
@@ -678,6 +794,21 @@ function formatMarketMovers(movers: MarketMovers): string {
   return result;
 }
 
+function formatMarketIndices(data: MarketIndices): string {
+  let result = '**📊 Major Market Indices:**\n\n';
+  result += '| Index | Value | Change | % Change |\n';
+  result += '|-------|-------|--------|----------|\n';
+  
+  data.indices.forEach(index => {
+    const changeSign = index.change >= 0 ? '+' : '';
+    const changeColor = index.change >= 0 ? '🟢' : '🔴';
+    result += `| ${index.name} | ${index.value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} | ${changeColor} ${changeSign}${index.change.toFixed(2)} | ${changeSign}${index.change_percent.toFixed(2)}% |\n`;
+  });
+  
+  result += `\n*Updated: ${data.timestamp} | Source: Google Finance*`;
+  return result;
+}
+
 function createWebAccessTraces(operations: WebOperation[]): WebAccessTrace[] {
   return operations.map((op, i) => {
     let type: 'search' | 'fetch' = 'search';
@@ -696,6 +827,9 @@ function createWebAccessTraces(operations: WebOperation[]): WebAccessTrace[] {
     } else if (op.type === 'get_market_movers') {
       type = 'fetch';
       query = 'Market movers (gainers, losers, most active)';
+    } else if (op.type === 'get_market_indices') {
+      type = 'fetch';
+      query = 'Market indices (Dow, S&P 500, Nasdaq, Russell 2000)';
     }
     
     return {
@@ -860,12 +994,25 @@ async function executeWebOperationsWithTraces(
           result: `Retrieved ${totalStocks} stocks (gainers, losers, most active)`,
           expanded: false
         };
+      } else if (op.type === 'get_market_indices') {
+        setStatus('fetching');
+        console.log(`[aiStore] Getting market indices`);
+        const indices = await web.getMarketIndices();
+        const formatted = formatMarketIndices(indices);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `Retrieved ${indices.indices.length} market indices`,
+          expanded: false
+        };
       }
     } catch (error) {
       console.error(`[aiStore] Web operation failed:`, error);
       const opName = op.type === 'search_web' ? 'search' : 
                      op.type === 'get_stock_quote' ? `get quote for ${op.symbol}` :
-                     op.type === 'get_market_movers' ? 'get market data' : 'fetch';
+                     op.type === 'get_market_movers' ? 'get market data' :
+                     op.type === 'get_market_indices' ? 'get market indices' : 'fetch';
       results.push(`**Error:** Failed to ${opName}: ${error}`);
       updatedTraces[i] = { ...updatedTraces[i], status: 'error', error: String(error) };
     }
@@ -885,6 +1032,14 @@ const defaultConfig: AIProviderConfig = {
   temperature: 0.7,
   maxTokens: 4096,
   systemPrompt: `You are an expert coding assistant integrated into the OpenCodeBrew code editor.
+
+**🚨 ZERO HALLUCINATION POLICY 🚨**
+You must NEVER fabricate, invent, or hallucinate any factual information.
+- For real-world data (prices, news, stats, dates, figures): USE WEB TOOLS to fetch actual data
+- For code questions: ONLY reference code that is explicitly provided in the context
+- If you cannot verify something: SAY SO clearly - "I don't have data on this" or "I couldn't find this information"
+- NEVER make up numbers, prices, dates, statistics, or any factual claims
+- When web tools fail: Tell the user "I tried to fetch [X] but the search returned no results" - don't fill in with guesses
 
 **IMPORTANT: YOU HAVE FULL CODEBASE ACCESS**
 The user's project context is included directly in their messages under "[Context from IDE]":
@@ -907,6 +1062,21 @@ When explaining code:
 - Break down the logic step by step
 - Explain the purpose of functions, classes, and key variables
 - Highlight any potential issues or improvements
+
+**CODE REVIEW REQUESTS:**
+When asked to review code changes, a commit, or a PR:
+1. FIRST fetch the actual diff - NEVER speculate about what might have changed
+2. If given a commit hash, use git commands to fetch the actual changes
+3. Review the ACTUAL code changes, not imagined ones
+4. Look for: bugs, security issues, performance problems, code style, best practices
+5. Provide specific feedback with line references
+
+**CRITICAL OUTPUT FORMAT:**
+- NEVER expose your internal reasoning or chain-of-thought to the user
+- Do NOT start responses with "Alright, so I'm trying to..." or similar meta-commentary
+- Do NOT explain your thought process - just provide the answer
+- If you need to reason through a problem, do so internally, then present conclusions
+- The user should see RESULTS, not your deliberation process
 
 Always be concise but thorough. Format code examples with proper syntax highlighting using markdown code blocks.`,
   thinkAloud: false,

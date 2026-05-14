@@ -11,6 +11,9 @@ interface UsageStats {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_tokens: number;
+  total_cache_creation_tokens: number;
+  total_cache_read_tokens: number;
+  total_cost_usd: number;
   request_count: number;
 }
 
@@ -18,6 +21,9 @@ interface OverallStats {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_tokens: number;
+  total_cache_creation_tokens: number;
+  total_cache_read_tokens: number;
+  total_cost_usd: number;
   total_requests: number;
   by_model: UsageStats[];
 }
@@ -112,6 +118,9 @@ export function SettingsPanel() {
         total_prompt_tokens: 0,
         total_completion_tokens: 0,
         total_tokens: 0,
+        total_cache_creation_tokens: 0,
+        total_cache_read_tokens: 0,
+        total_cost_usd: 0,
         total_requests: 0,
         by_model: [],
       });
@@ -176,14 +185,43 @@ export function SettingsPanel() {
                     <div className={styles.usageValue}>{usageStats.total_tokens.toLocaleString()}</div>
                     <div className={styles.usageLabel}>Total Tokens</div>
                   </div>
-                  <div className={styles.usageCard}>
-                    <div className={styles.usageValue}>{usageStats.total_prompt_tokens.toLocaleString()}</div>
-                    <div className={styles.usageLabel}>Prompt Tokens</div>
+                  <div className={`${styles.usageCard} ${styles.costCard}`}>
+                    <div className={styles.usageValue}>
+                      ${usageStats.total_cost_usd.toFixed(4)}
+                    </div>
+                    <div className={styles.usageLabel}>Estimated Cost</div>
                   </div>
                   <div className={styles.usageCard}>
-                    <div className={styles.usageValue}>{usageStats.total_completion_tokens.toLocaleString()}</div>
-                    <div className={styles.usageLabel}>Completion Tokens</div>
+                    <div className={styles.usageValue}>
+                      {usageStats.total_cache_read_tokens > 0 
+                        ? `${Math.round((usageStats.total_cache_read_tokens / (usageStats.total_prompt_tokens + usageStats.total_cache_read_tokens)) * 100)}%`
+                        : '0%'}
+                    </div>
+                    <div className={styles.usageLabel}>Cache Hit Rate</div>
                   </div>
+                </div>
+                
+                <div className={styles.usageBreakdown}>
+                  <div className={styles.usageBreakdownItem}>
+                    <span>Prompt Tokens</span>
+                    <span>{usageStats.total_prompt_tokens.toLocaleString()}</span>
+                  </div>
+                  <div className={styles.usageBreakdownItem}>
+                    <span>Completion Tokens</span>
+                    <span>{usageStats.total_completion_tokens.toLocaleString()}</span>
+                  </div>
+                  {usageStats.total_cache_creation_tokens > 0 && (
+                    <div className={styles.usageBreakdownItem}>
+                      <span>Cache Created</span>
+                      <span>{usageStats.total_cache_creation_tokens.toLocaleString()}</span>
+                    </div>
+                  )}
+                  {usageStats.total_cache_read_tokens > 0 && (
+                    <div className={styles.usageBreakdownItem}>
+                      <span>Cache Read</span>
+                      <span>{usageStats.total_cache_read_tokens.toLocaleString()}</span>
+                    </div>
+                  )}
                 </div>
 
                 {usageStats.by_model.length > 0 && (
@@ -195,9 +233,8 @@ export function SettingsPanel() {
                           <th>Model</th>
                           <th>Provider</th>
                           <th>Requests</th>
-                          <th>Prompt</th>
-                          <th>Completion</th>
-                          <th>Total</th>
+                          <th>Total Tokens</th>
+                          <th>Cost</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -206,9 +243,12 @@ export function SettingsPanel() {
                             <td>{stat.model}</td>
                             <td className={styles.providerCell}>{stat.provider}</td>
                             <td>{stat.request_count.toLocaleString()}</td>
-                            <td>{stat.total_prompt_tokens.toLocaleString()}</td>
-                            <td>{stat.total_completion_tokens.toLocaleString()}</td>
                             <td>{stat.total_tokens.toLocaleString()}</td>
+                            <td className={styles.costCell}>
+                              {stat.total_cost_usd > 0 
+                                ? `$${stat.total_cost_usd.toFixed(4)}`
+                                : '-'}
+                            </td>
                           </tr>
                         ))}
                       </tbody>

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MCPServerConfig, MCPTool, MCPToolResult } from '../services/tauri';
 import { loadPrompt, PROMPT_NAMES, getPromptsPath, ensurePromptsDir } from '../services/promptLoader';
+import { useWorkspaceStore } from './workspaceStore';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
 export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
@@ -27,12 +28,32 @@ export interface AgentTask {
   status: AgentTaskStatus;
 }
 
+export interface MessageUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  estimatedCostUsd: number;
+}
+
+export interface SessionUsage {
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+  totalCacheCreation: number;
+  totalCacheRead: number;
+  totalCostUsd: number;
+  turnCount: number;
+}
+
 export interface AIMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
   attachments?: MessageAttachment[];
+  usage?: MessageUsage;
 }
 
 export interface MessageAttachment {
@@ -54,6 +75,12 @@ export interface AIConversation {
   appliedFileOps?: string[]; // Array of operation identifiers that have been kept
 }
 
+export interface CustomPricing {
+  enabled: boolean;
+  inputPerMillion: number;
+  outputPerMillion: number;
+}
+
 export interface AIProviderConfig {
   provider: AIProvider;
   model: string;
@@ -67,6 +94,7 @@ export interface AIProviderConfig {
   thinkAloud: boolean;
   claudeExtendedThinking: boolean;
   mcpServers: MCPServerConfig[];
+  customPricing?: CustomPricing;
 }
 
 export interface MCPServerState {
@@ -93,8 +121,12 @@ interface AIState {
   webAccessStatus: WebAccessStatus;
   webAccessTraces: WebAccessTrace[];
   mcpServerStates: MCPServerState[];
+  sessionUsage: SessionUsage;
+  lastMessageUsage: MessageUsage | null;
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
+  updateSessionUsage: (usage: MessageUsage) => void;
+  resetSessionUsage: () => void;
   setWebAccessStatus: (status: WebAccessStatus) => void;
   setWebAccessTraces: (traces: WebAccessTrace[]) => void;
   clearWebAccessTraces: () => void;
@@ -312,10 +344,12 @@ CRITICAL: When searching for news or current events:
 }
 
 interface WebOperation {
-  type: 'search_web' | 'fetch_url' | 'get_stock_quote' | 'get_market_movers';
+  type: 'search_web' | 'fetch_url' | 'get_stock_quote' | 'get_market_movers' | 'git_show_commit' | 'git_diff' | 'git_diff_since';
   query?: string;
   url?: string;
   symbol?: string;
+  commitId?: string;
+  staged?: boolean;
 }
 
 function parseWebOperations(content: string): WebOperation[] {
@@ -342,6 +376,22 @@ function parseWebOperations(content: string): WebOperation[] {
     operations.push({ type: 'get_market_movers' });
   }
   
+  // Git operations
+  const gitShowCommitRegex = /<git_show_commit\s+commit="([^"]+)"\s*\/?>/gi;
+  while ((match = gitShowCommitRegex.exec(content)) !== null) {
+    operations.push({ type: 'git_show_commit', commitId: match[1] });
+  }
+  
+  const gitDiffSinceRegex = /<git_diff_since\s+commit="([^"]+)"\s*\/?>/gi;
+  while ((match = gitDiffSinceRegex.exec(content)) !== null) {
+    operations.push({ type: 'git_diff_since', commitId: match[1] });
+  }
+  
+  const gitDiffRegex = /<git_diff(?:\s+staged="(true|false)")?\s*\/?>/gi;
+  while ((match = gitDiffRegex.exec(content)) !== null) {
+    operations.push({ type: 'git_diff', staged: match[1] === 'true' });
+  }
+  
   return operations.slice(0, 10);
 }
 
@@ -351,6 +401,9 @@ function cleanWebOperationTags(content: string): string {
     .replace(/<fetch_url\s+url="[^"]+"\s*\/?>/gi, '')
     .replace(/<get_stock_quote\s+symbol="[^"]+"\s*\/?>/gi, '')
     .replace(/<get_market_movers\s*\/?>/gi, '')
+    .replace(/<git_show_commit\s+commit="[^"]+"\s*\/?>/gi, '')
+    .replace(/<git_diff_since\s+commit="[^"]+"\s*\/?>/gi, '')
+    .replace(/<git_diff(?:\s+staged="[^"]+")?\s*\/?>/gi, '')
     .trim();
 }
 
@@ -402,6 +455,127 @@ function formatMarketMovers(movers: MarketMovers): string {
   return result;
 }
 
+interface CommitDiff {
+  commit_id: string;
+  message: string;
+  author: string;
+  email: string;
+  timestamp: string;
+  files: FileDiff[];
+  total_additions: number;
+  total_deletions: number;
+}
+
+interface DiffSinceResult {
+  from_commit: string;
+  to_commit: string;
+  commit_count: number;
+  files: FileDiff[];
+  total_additions: number;
+  total_deletions: number;
+}
+
+interface FileDiff {
+  old_path: string | null;
+  new_path: string | null;
+  status: string;
+  hunks: DiffHunk[];
+  additions: number;
+  deletions: number;
+}
+
+interface DiffHunk {
+  header: string;
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  lines: DiffLine[];
+}
+
+interface DiffLine {
+  line_type: string;
+  old_lineno: number | null;
+  new_lineno: number | null;
+  content: string;
+}
+
+function formatCommitDiff(diff: CommitDiff): string {
+  let result = `**Commit:** \`${diff.commit_id.substring(0, 8)}\`\n`;
+  result += `**Author:** ${diff.author} <${diff.email}>\n`;
+  result += `**Date:** ${diff.timestamp}\n`;
+  result += `**Message:** ${diff.message}\n\n`;
+  result += `**Summary:** +${diff.total_additions} -${diff.total_deletions} in ${diff.files.length} file(s)\n\n`;
+  
+  for (const file of diff.files) {
+    const path = file.new_path || file.old_path || 'unknown';
+    result += `### ${file.status}: ${path} (+${file.additions}/-${file.deletions})\n`;
+    result += '```diff\n';
+    for (const hunk of file.hunks) {
+      result += `${hunk.header}\n`;
+      for (const line of hunk.lines) {
+        const prefix = line.line_type === 'addition' ? '+' : 
+                       line.line_type === 'deletion' ? '-' : ' ';
+        result += `${prefix}${line.content}`;
+      }
+    }
+    result += '```\n\n';
+  }
+  
+  return result;
+}
+
+function formatFileDiffs(diffs: FileDiff[]): string {
+  if (diffs.length === 0) {
+    return 'No changes found.';
+  }
+  
+  let result = `**${diffs.length} file(s) changed:**\n\n`;
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+  
+  for (const file of diffs) {
+    const path = file.new_path || file.old_path || 'unknown';
+    totalAdditions += file.additions;
+    totalDeletions += file.deletions;
+    result += `### ${file.status}: ${path} (+${file.additions}/-${file.deletions})\n`;
+    result += '```diff\n';
+    for (const hunk of file.hunks) {
+      result += `${hunk.header}\n`;
+      for (const line of hunk.lines) {
+        const prefix = line.line_type === 'addition' ? '+' : 
+                       line.line_type === 'deletion' ? '-' : ' ';
+        result += `${prefix}${line.content}`;
+      }
+    }
+    result += '```\n\n';
+  }
+  
+  return `**Summary:** +${totalAdditions} -${totalDeletions}\n\n` + result;
+}
+
+function formatDiffSince(diff: DiffSinceResult): string {
+  let result = `**Changes since commit \`${diff.from_commit.substring(0, 8)}\` to HEAD (\`${diff.to_commit.substring(0, 8)}\`)**\n`;
+  result += `**${diff.commit_count} commit(s)** | +${diff.total_additions} -${diff.total_deletions} in ${diff.files.length} file(s)\n\n`;
+  
+  for (const file of diff.files) {
+    const path = file.new_path || file.old_path || 'unknown';
+    result += `### ${file.status}: ${path} (+${file.additions}/-${file.deletions})\n`;
+    result += '```diff\n';
+    for (const hunk of file.hunks) {
+      result += `${hunk.header}\n`;
+      for (const line of hunk.lines) {
+        const prefix = line.line_type === 'addition' ? '+' : 
+                       line.line_type === 'deletion' ? '-' : ' ';
+        result += `${prefix}${line.content}`;
+      }
+    }
+    result += '```\n\n';
+  }
+  
+  return result;
+}
+
 function createWebAccessTraces(operations: WebOperation[]): WebAccessTrace[] {
   return operations.map((op, i) => {
     let type: 'search' | 'fetch' = 'search';
@@ -420,6 +594,15 @@ function createWebAccessTraces(operations: WebOperation[]): WebAccessTrace[] {
     } else if (op.type === 'get_market_movers') {
       type = 'fetch';
       query = 'Market movers (gainers, losers, most active)';
+    } else if (op.type === 'git_show_commit') {
+      type = 'fetch';
+      query = `Git commit: ${op.commitId}`;
+    } else if (op.type === 'git_diff_since') {
+      type = 'fetch';
+      query = `Git changes since: ${op.commitId}`;
+    } else if (op.type === 'git_diff') {
+      type = 'fetch';
+      query = `Git diff (${op.staged ? 'staged' : 'unstaged'} changes)`;
     }
     
     return {
@@ -584,6 +767,57 @@ async function executeWebOperationsWithTraces(
           result: `Retrieved ${totalStocks} stocks (gainers, losers, most active)`,
           expanded: false
         };
+      } else if (op.type === 'git_show_commit' && op.commitId) {
+        setStatus('fetching');
+        console.log(`[aiStore] Getting git commit diff: ${op.commitId}`);
+        const { invoke } = await import('@tauri-apps/api/core');
+        const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath || '';
+        const commitDiff = await invoke<CommitDiff>('git_show_commit', { 
+          repoPath: workspacePath, 
+          commitId: op.commitId 
+        });
+        const formatted = formatCommitDiff(commitDiff);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `Commit ${op.commitId.substring(0, 8)}: ${commitDiff.files.length} files changed`,
+          expanded: false
+        };
+      } else if (op.type === 'git_diff_since' && op.commitId) {
+        setStatus('fetching');
+        console.log(`[aiStore] Getting git diff since: ${op.commitId}`);
+        const { invoke } = await import('@tauri-apps/api/core');
+        const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath || '';
+        const diffResult = await invoke<DiffSinceResult>('git_diff_since', { 
+          repoPath: workspacePath, 
+          commitId: op.commitId 
+        });
+        const formatted = formatDiffSince(diffResult);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `${diffResult.commit_count} commits, ${diffResult.files.length} files changed since ${op.commitId}`,
+          expanded: false
+        };
+      } else if (op.type === 'git_diff') {
+        setStatus('fetching');
+        console.log(`[aiStore] Getting git diff (staged=${op.staged})`);
+        const { invoke } = await import('@tauri-apps/api/core');
+        const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath || '';
+        const diffs = await invoke<FileDiff[]>('git_diff_all', { 
+          repoPath: workspacePath, 
+          staged: op.staged ?? false 
+        });
+        const formatted = formatFileDiffs(diffs);
+        results.push(formatted);
+        updatedTraces[i] = { 
+          ...updatedTraces[i], 
+          status: 'completed', 
+          result: `${diffs.length} files with changes`,
+          expanded: false
+        };
       }
     } catch (error) {
       console.error(`[aiStore] Web operation failed:`, error);
@@ -610,6 +844,14 @@ const defaultConfig: AIProviderConfig = {
   maxTokens: 4096,
   systemPrompt: `You are an expert coding assistant integrated into the OpenCodeBrew code editor.
 
+**🚨 ZERO HALLUCINATION POLICY 🚨**
+You must NEVER fabricate, invent, or hallucinate any factual information.
+- For real-world data (prices, news, stats, dates, figures): USE WEB TOOLS to fetch actual data
+- For code questions: ONLY reference code that is explicitly provided in the context
+- If you cannot verify something: SAY SO clearly - "I don't have data on this" or "I couldn't find this information"
+- NEVER make up numbers, prices, dates, statistics, or any factual claims
+- When web tools fail: Tell the user "I tried to fetch [X] but the search returned no results" - don't fill in with guesses
+
 **IMPORTANT: YOU HAVE FULL CODEBASE ACCESS**
 The user's project context is included directly in their messages under "[Context from IDE]":
 - **REPOSITORY STRUCTURE** - Full directory tree of the project
@@ -631,6 +873,41 @@ When explaining code:
 - Break down the logic step by step
 - Explain the purpose of functions, classes, and key variables
 - Highlight any potential issues or improvements
+
+**GIT OPERATIONS:**
+You can access git data using these tags:
+
+| Task | Tag to use |
+|------|------------|
+| **Review a specific commit** | \`<git_show_commit commit="abc123" />\` |
+| **Review all changes SINCE a commit** | \`<git_diff_since commit="abc123" />\` |
+| View uncommitted/unstaged changes | \`<git_diff />\` |
+| View staged changes | \`<git_diff staged="true" />\` |
+
+**⚠️ CHOOSING THE RIGHT TOOL:**
+- "review commit abc123" → \`<git_show_commit commit="abc123" />\` (shows that ONE commit)
+- "review since abc123" or "review changes since abc123" → \`<git_diff_since commit="abc123" />\` (shows ALL commits after abc123 up to HEAD)
+- "review my changes" (no commit hash) → \`<git_diff />\` (uncommitted only)
+
+**CODE REVIEW REQUESTS:**
+When asked to review code since a commit (e.g., "review since 51ab2eb"):
+1. Use \`<git_diff_since commit="51ab2eb" />\` - shows ALL changes from that commit to HEAD
+2. This includes multiple commits if there are any
+3. Wait for the diff results, then analyze the ACTUAL changes
+4. Look for: bugs, security issues, performance problems, code style, best practices
+
+Example - user says "review since commit 51ab2eb":
+\`\`\`
+<git_diff_since commit="51ab2eb" />
+\`\`\`
+
+**CRITICAL OUTPUT FORMAT:**
+- NEVER expose your internal reasoning or chain-of-thought to the user
+- Do NOT start responses with "Alright, so I'm trying to..." or similar meta-commentary
+- Do NOT explain your thought process - just provide the answer
+- If you need to reason through a problem, do so internally, then present conclusions
+- The user should see RESULTS, not your deliberation process
+- Do NOT use made-up tags like \`<execute_command>\` - only use documented tags above
 
 Always be concise but thorough. Format code examples with proper syntax highlighting using markdown code blocks.`,
   thinkAloud: false,
@@ -695,11 +972,51 @@ export const useAIStore = create<AIState>()(
         copilot: ['gpt-4o', 'gpt-4', 'gpt-3.5-turbo'],
       },
       copilotVisionModels: [],
+      sessionUsage: {
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalTokens: 0,
+        totalCacheCreation: 0,
+        totalCacheRead: 0,
+        totalCostUsd: 0,
+        turnCount: 0,
+      },
+      lastMessageUsage: null,
 
       setConfig: (newConfig) => {
         set((state) => ({
           config: { ...state.config, ...newConfig },
         }));
+      },
+      
+      updateSessionUsage: (usage: MessageUsage) => {
+        set((state) => ({
+          sessionUsage: {
+            totalPromptTokens: state.sessionUsage.totalPromptTokens + usage.promptTokens,
+            totalCompletionTokens: state.sessionUsage.totalCompletionTokens + usage.completionTokens,
+            totalTokens: state.sessionUsage.totalTokens + usage.totalTokens,
+            totalCacheCreation: state.sessionUsage.totalCacheCreation + usage.cacheCreationTokens,
+            totalCacheRead: state.sessionUsage.totalCacheRead + usage.cacheReadTokens,
+            totalCostUsd: state.sessionUsage.totalCostUsd + usage.estimatedCostUsd,
+            turnCount: state.sessionUsage.turnCount + 1,
+          },
+          lastMessageUsage: usage,
+        }));
+      },
+      
+      resetSessionUsage: () => {
+        set({
+          sessionUsage: {
+            totalPromptTokens: 0,
+            totalCompletionTokens: 0,
+            totalTokens: 0,
+            totalCacheCreation: 0,
+            totalCacheRead: 0,
+            totalCostUsd: 0,
+            turnCount: 0,
+          },
+          lastMessageUsage: null,
+        });
       },
 
       setWebAccessStatus: (status: WebAccessStatus) => {

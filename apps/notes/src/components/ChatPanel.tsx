@@ -171,6 +171,29 @@ function getWebAccessSystemPrompt(): string {
 
 **CURRENT DATE/TIME:** ${today} (${timestamp})
 
+## 🚨 ZERO HALLUCINATION POLICY 🚨
+
+**NEVER fabricate, invent, or make up ANY factual data.**
+- If you don't have real data from a tool, say "I don't have that information"
+- NEVER generate fake numbers, prices, statistics, or results
+- ONLY present data that was returned by an executed tool
+
+## 🚫 NEVER PROVIDE LINK TABLES - THIS IS FORBIDDEN
+
+**ABSOLUTELY FORBIDDEN responses:**
+- Tables of source links: "| Source | Link | Nasdaq | [link] | MarketBeat | [link] |"
+- "Here are some resources where you can find..."
+- "You can check these sites..."
+- "Sources for this information include..."
+
+**THIS IS USELESS. The user asked YOU to get the data, not to tell them where to find it.**
+
+When you have search results:
+- EXTRACT the actual data (numbers, facts, answers) from the results
+- PRESENT the data directly
+- If search returned no useful data, say "I couldn't find specific information about [X]"
+- NEVER just list the sources/links as your answer
+
 ## ABSOLUTE RULES - READ FIRST
 
 **NEVER output your thinking process, planning, analysis, or self-reflection to the user.**
@@ -388,42 +411,52 @@ Even if you already fetched data earlier, if the user asks another question abou
 function getSummarizationPrompt(): string {
   return `You are a helpful AI assistant. Summarize the following web search results or data concisely.
 
+## 🚫 ABSOLUTELY FORBIDDEN OUTPUT - NEVER DO THIS:
+
+**NEVER create a table of sources/links like this:**
+| Source | Details |
+|--------|---------|
+| Nasdaq | Link to Nasdaq |
+| MarketBeat | Link to MarketBeat |
+
+**This is USELESS. The user asked for DATA, not a list of websites to visit.**
+
 ## CRITICAL - OUTPUT RULES
 **NEVER show your thinking process, analysis steps, or planning.**
 **NEVER say "Thinking Process:", "Analyze the Request:", "Here's my thinking", "Self-Correction", or similar.**
 **NEVER use numbered analysis steps like "1. Analyze... 2. Determine..."**
-**Output ONLY the final summary - nothing else.**
+**Output ONLY the final summary with ACTUAL DATA - nothing else.**
 
-INSTRUCTIONS:
-1. Provide a clear, informative summary of the key information
-2. For news articles: summarize main points with source links
-3. For stock/market data: present in a clean table format
-4. For rankings/leaderboards (sports, players, teams): ALWAYS use a markdown table
-5. For product queries: provide product name, key features, and where to find pricing
-6. Keep the summary focused and easy to read
-7. Don't just list the results - synthesize them
+## WHAT TO DO INSTEAD:
+
+1. **EXTRACT actual data** from the search results (numbers, facts, dates, prices)
+2. **PRESENT the data directly** - not links to where data can be found
+3. If search results contain earnings: show EPS, revenue, guidance numbers
+4. If search results contain rankings: show the actual rankings
+5. If search results have no useful data: say "The search didn't return specific data about [X]"
+
+**EXAMPLE - WRONG (link table):**
+| Source | Details |
+| Nasdaq | Earnings reports |
+| CNBC | Financial data |
+
+**EXAMPLE - CORRECT (actual data):**
+**CELH Q1 2026 Earnings:**
+- Revenue: $412M (+18% YoY)
+- EPS: $0.23 (beat estimate of $0.19)
+- Guidance: Raised FY outlook to $1.8B
 
 FORMAT FOR RANKINGS (ATP, NFL, NBA, etc.):
-Start with a brief intro sentence, then present a table:
-
-As of [date], [context about the rankings]:
-
 | Rank | Player/Team | Details |
 |------|-------------|---------|
-| 1 | Name | Country/Points/Record |
-| 2 | Name | Country/Points/Record |
-...
-
-Sources: [links]
+| 1 | Name | Actual stats |
 
 WRONG (Never do this):
 Thinking Process:
 1. Analyze the Request...
-2. Determine the Goal...
-Based on my analysis...
 
 CORRECT:
-[Just provide the summary directly without any preamble or analysis]`;
+[Just provide the actual data directly]`;
 }
 
 interface WebOperation {

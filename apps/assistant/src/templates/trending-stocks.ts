@@ -302,18 +302,35 @@ function generatePrompts(config: Record<string, any>, discordEnabled: boolean = 
   
   const tableInstructions = useDiscordFormat
     ? `Use Discord-friendly formatting (NO markdown tables):
-- List each stock on its own line
-- Format: **SYMBOL** $price (change%)
-- Example: **NVDA** $950.25 (+5.32%)
-- Use code blocks for aligned data if needed`
+- Use code blocks with fixed-width alignment for clean display
+- Format each section in a code block like this:
+\`\`\`
+SYMBOL   PRICE      CHANGE
+NVDA     $950.25    +5.32%
+AAPL     $178.50    +2.15%
+\`\`\`
+- Keep columns aligned using spaces
+- Put section headers OUTSIDE code blocks: **🔺 Top Gainers**`
     : 'Use markdown tables for stock data';
 
-  const marketMoversPrompt = `You are a stock market analyst. Fetch today's market movers and analyze them.
+  const marketMoversPrompt = `You are a stock market analyst.
 
-Use this tool to get market data:
+## STEP 1 - OUTPUT THIS TOOL TAG NOW:
+
 <get_market_movers />
 
-After getting the data, filter and organize the results:
+## STOP AND WAIT - DO NOT CONTINUE UNTIL YOU RECEIVE TOOL RESULTS
+
+**CRITICAL PRICE WARNING:**
+- YOU DO NOT KNOW ANY STOCK PRICES
+- MU is NOT $89 - you made that up
+- GOOGL is NOT $1,542 - you made that up  
+- EVERY price you write without tool data is WRONG
+- The ONLY valid prices are the ones returned by <get_market_movers /> above
+
+**AFTER tool returns results, ONLY use those exact numbers.**
+
+After the tool returns data, filter and organize the results:
 - Categories to include: ${categories.join(', ')}
 - Minimum price change: ${minPriceChange}%
 - Minimum stock price: $${minPrice}
@@ -322,9 +339,13 @@ After getting the data, filter and organize the results:
 ${formatInstructions}
 
 ${useDiscordFormat 
-    ? `Present the data in Discord-friendly format:
-**SYMBOL** $price (change%) - brief note
-Example: **NVDA** $950.25 (+5.32%) - Strong momentum`
+    ? `Present each category in a Discord-friendly code block:
+**🔺 Top Gainers**
+\`\`\`
+SYMBOL   PRICE      CHANGE
+NVDA     $950.25    +5.32%
+\`\`\`
+This keeps data aligned and readable on Discord/mobile.`
     : `Present the data in a clear markdown table format:
 | Symbol | Price | Change | Change % | Volume |
 |--------|-------|--------|----------|--------|`}
@@ -346,16 +367,33 @@ Filter to stocks with sentiment score >= ${sentimentThreshold}/100.
 Cross-reference with the market movers from the previous stage. Highlight stocks that appear in both lists.
 
 ${useDiscordFormat 
-    ? `Present findings in Discord-friendly format:
-**SYMBOL** - Sentiment (messages) trend`
+    ? `Present sentiment in a Discord-friendly code block:
+**📊 Sentiment Trending**
+\`\`\`
+SYMBOL   SENTIMENT   MESSAGES
+NVDA     Bullish     12.5K
+\`\`\``
     : `Present findings in a table:
 | Symbol | Sentiment | Messages | Trend |
 |--------|-----------|----------|-------|`}` : '';
 
-  const watchlistPrompt = watchlist.length > 0 ? `Also fetch quotes for these watchlist stocks:
+  const watchlistPrompt = watchlist.length > 0 ? `## FETCH REAL QUOTES FOR WATCHLIST:
+
 ${watchlist.map((s: string) => `<get_stock_quote symbol="${s}" />`).join('\n')}
 
-Include these in a separate "Watchlist" section regardless of whether they meet the thresholds.` : '';
+**WAIT FOR THESE TOOLS TO RETURN ACTUAL PRICES.**
+**DO NOT WRITE ANY PRICES UNTIL YOU SEE THE TOOL RESULTS.**
+
+Example of WRONG output (you made up prices):
+"MU $89.20 (-0.7%)" ← FAKE - MU is actually ~$715!
+"GOOGL $1,542.70" ← FAKE - GOOGL is actually ~$175!
+
+Example of CORRECT behavior:
+1. Output the <get_stock_quote> tags above
+2. Wait for system to return: "MU: $715.26 (+6.5%)"
+3. THEN write: "MU $715.26 (+6.5%)"
+
+Include these in a separate "Watchlist" section.` : '';
 
   // Always fetch news - this is important for the summary
   const newsPrompt = `Search for recent news about trending stocks and the market:
@@ -366,46 +404,81 @@ ${watchlist.length > 0 ? `Also search for news on watchlist stocks:
 
 Collect relevant headlines and brief summaries for the Market News section.`;
 
-  const reportPrompt = `Compile a comprehensive Trending Stocks Report.
+  const reportPrompt = `Compile a Trending Stocks Report using ONLY the data provided below.
 
-Use ONLY the data from previous stages to create a well-organized report.
+## 🚨 DATA FROM PREVIOUS STAGES 🚨
 
-**CRITICAL: ANTI-HALLUCINATION VALIDATION**
-Before including ANY stock in this report, verify:
-- The stock symbol is a valid 1-5 letter ticker (e.g., NVDA, AAPL, META)
-- The stock was returned by a tool in a previous stage
-- NEVER include generic names like "XYZ CORP", "TECH INNOVATORS", or any company description
-- If tool results contain fewer stocks than expected, report ONLY those stocks - do not fill gaps with invented data
-- If a section has no valid data, write "No data available for this section"
+### Market Movers Data:
+{{fetch-movers_output}}
+
+${trackSentiment ? `### Sentiment Data:
+{{analyze-sentiment_output}}
+
+` : ''}${watchlist.length > 0 ? `### Watchlist Data:
+{{fetch-watchlist_output}}
+
+` : ''}### News Data:
+{{fetch-news_output}}
+
+---
+
+## 🚨 CRITICAL: COPY EXACT DATA FROM ABOVE 🚨
+
+You MUST copy the EXACT prices and percentages from the data above.
+DO NOT summarize or paraphrase - INCLUDE THE ACTUAL NUMBERS.
+
+${useDiscordFormat ? `## DISCORD FORMAT - USE CODE BLOCKS
+
+Your ENTIRE report must use this format for stock data:
+
+**🔺 Top Gainers**
+\`\`\`
+SYMBOL   PRICE       CHANGE
+SLS      $6.41       +22.80%
+AAOI     $228.03     +21.11%
+\`\`\`
+
+**🔻 Top Losers**
+\`\`\`
+SYMBOL   PRICE       CHANGE
+CELH     $28.14      -4.96%
+F        $47.78      -4.13%
+\`\`\`
+
+**📋 Watchlist**
+\`\`\`
+SYMBOL   PRICE       CHANGE
+MU       $804.00     +4.88%
+GOOGL    $403.46     +4.16%
+\`\`\`
+
+CRITICAL RULES:
+- Put ALL stock data inside \`\`\` code blocks
+- Use fixed-width columns with spaces for alignment
+- Section headers go OUTSIDE the code blocks
+- NO markdown tables (|---|) - Discord doesn't render them
+- NO asterisks inside code blocks
+` : ''}
 
 **Report Structure:**
-1. **Market Summary** - Brief market overview (2-3 sentences)
-2. **Top Gainers** - Stocks with biggest price increases (only from tool results)
-3. **Top Losers** - Stocks with biggest price decreases (only from tool results)
-4. **Most Active** - Highest volume stocks (only from tool results)
-${trackSentiment ? '5. **Sentiment Trending** - Stocks trending on social media (only from tool results)' : ''}
-6. **📋 Watchlist Summary** (REQUIRED) - Complete price list of ALL stocks mentioned in this report:
-   - Include ONLY stocks that appeared in tool results above
-   ${watchlist.length > 0 ? `- Plus your custom watchlist: ${watchlist.join(', ')}` : ''}
-   - For each stock show: Symbol, Current Price, Change %, Today's High/Low if available
-   - This section is MANDATORY and must appear in every report
-7. **📰 Latest News** (REQUIRED) - Recent market news and headlines:
-   - Include 5-8 relevant news headlines from search results
-   - If no news was fetched, write "News unavailable - search did not return results"
-   - This section is MANDATORY and must appear in every report
+1. **Market Summary** - 1-2 sentences max
+2. **🔺 Top Gainers** - Copy EXACT prices from market movers data
+3. **🔻 Top Losers** - Copy EXACT prices from market movers data  
+4. **📊 Most Active** - Copy EXACT prices from market movers data
+${trackSentiment ? '5. **💬 Sentiment** - Trending stocks from social data' : ''}
+${watchlist.length > 0 ? `6. **📋 Watchlist** - MUST include: ${watchlist.join(', ')} with their EXACT prices from the Watchlist Data above` : ''}
+7. **📰 News** - 3-5 headlines (brief)
 
-**Formatting:**
-- ${formatInstructions}
-- ${tableInstructions}
-- Include timestamp: {{datetime}}
-${includeChartLinks ? '- Add TradingView links for each stock' : ''}
+**COPY THE ACTUAL DATA FROM ABOVE:**
+- If Market Movers shows "SLS $6.41 +22.80%" → write "SLS $6.41 +22.80%"
+- If Watchlist shows "MU $804.00 +4.88%" → write "MU $804.00 +4.88%"
+- If data is missing or empty, write "Data unavailable"
 
-**Filters Applied:**
-- Min price change: ${minPriceChange}%
-- Min stock price: $${minPrice}
-- Max stocks per category: ${maxStocksPerCategory}
-
-**FINAL CHECK:** Review your report - if any stock symbol is longer than 5 characters or contains spaces/lowercase/numbers, REMOVE IT. Only real ticker symbols allowed.`;
+**DO NOT:**
+- Make up any prices or percentages
+- Write narrative paragraphs instead of data
+- Use markdown tables with |---| separators
+- Skip the watchlist section`;
 
   return {
     marketMovers: marketMoversPrompt,
@@ -423,18 +496,38 @@ function createAiAction(id: string, name: string, prompt: string, order: number)
     action_type: {
       type: 'ai_prompt',
       prompt,
-      system_prompt: `You are a professional stock market analyst. Provide accurate, data-driven analysis.
+      system_prompt: `You are a professional stock market analyst.
 
-CRITICAL ANTI-HALLUCINATION RULES:
-1. ONLY include stocks that were EXPLICITLY returned by the tools (get_market_movers, get_stock_quote)
-2. NEVER invent, fabricate, or generate fictional stock symbols or prices
-3. NEVER use company names instead of ticker symbols (e.g., never write "XYZ CORP" or "TECH INNOVATORS")
-4. All valid stock symbols are 1-5 uppercase letters (e.g., NVDA, AAPL, META, GOOGL)
-5. If a tool returns fewer stocks than expected, report only what you received - do not fill in gaps
-6. If a tool fails or returns no data, explicitly state "Data unavailable" for that section
-7. Every stock in your report MUST have come from a tool result in this conversation
+## 🚨 YOUR PRICE KNOWLEDGE IS COMPLETELY WRONG 🚨
 
-If you cannot verify a stock came from tool output, DO NOT include it.`,
+**PROOF THAT YOU DON'T KNOW PRICES:**
+- You might think MU is ~$89. WRONG. It's actually $715.
+- You might think GOOGL is ~$1,500. WRONG. It's actually ~$175.
+- You might think HIMX is ~$35. WRONG. It's actually ~$8.
+- EVERY price you "know" is outdated or fabricated.
+
+**THE ONLY WAY TO GET REAL PRICES:**
+1. Output: <get_market_movers /> or <get_stock_quote symbol="AAPL" />
+2. STOP WRITING - wait for tool results
+3. The system will return REAL prices like: "MU: $715.26 (+6.5%)"
+4. ONLY THEN copy those exact numbers into your response
+
+**DETECTION TEST:**
+If you write a price and it didn't come from a tool result in this conversation → IT'S FAKE
+
+**WRONG (fake prices you made up):**
+MU $89.20 (-0.7%)
+GOOGL $1,542.70 (+1.2%)
+
+**CORRECT (wait for tool, then use exact numbers):**
+<get_stock_quote symbol="MU" />
+[Tool returns: MU $715.26 +6.50%]
+Then write: MU $715.26 (+6.50%)
+
+RULES:
+1. NEVER write a price without tool data
+2. If tool fails, write "Price unavailable" - NOT a made-up number
+3. Every $ amount must match tool output exactly`,
     },
     order,
     on_error: 'continue',
@@ -584,7 +677,12 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
         action_type: {
           type: 'send_discord',
           webhook_url: discordWebhook,
-          content: '📈 **Stock Trends Report** - {{datetime}}\n\n{{generate-report_output}}',
+          content: `📈 **Stock Trends Report** - {{datetime}}
+
+{{generate-report_output}}
+
+---
+*Data from: Market Movers, StockTwits${watchlist.length > 0 ? ', Watchlist' : ''}*`,
           username: 'Stock Scanner',
         },
         order: 1,

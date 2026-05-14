@@ -73,6 +73,51 @@ export interface GitCommitInfo {
   timestamp: string;
 }
 
+export interface DiffLine {
+  line_type: string;
+  old_lineno: number | null;
+  new_lineno: number | null;
+  content: string;
+}
+
+export interface DiffHunk {
+  header: string;
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  lines: DiffLine[];
+}
+
+export interface FileDiff {
+  old_path: string | null;
+  new_path: string | null;
+  status: string;
+  hunks: DiffHunk[];
+  additions: number;
+  deletions: number;
+}
+
+export interface CommitDiff {
+  commit_id: string;
+  message: string;
+  author: string;
+  email: string;
+  timestamp: string;
+  files: FileDiff[];
+  total_additions: number;
+  total_deletions: number;
+}
+
+export interface DiffSinceResult {
+  from_commit: string;
+  to_commit: string;
+  commit_count: number;
+  files: FileDiff[];
+  total_additions: number;
+  total_deletions: number;
+}
+
 export interface MessageAttachment {
   id: string;
   type: 'image' | 'file';
@@ -299,6 +344,16 @@ export const git = {
   log: async (repoPath: string, limit?: number): Promise<GitCommitInfo[]> => {
     const invoke = await getInvoke();
     return invoke('git_log', { repoPath, limit });
+  },
+  
+  showCommit: async (repoPath: string, commitId: string): Promise<CommitDiff> => {
+    const invoke = await getInvoke();
+    return invoke('git_show_commit', { repoPath, commitId });
+  },
+  
+  diffSince: async (repoPath: string, commitId: string): Promise<DiffSinceResult> => {
+    const invoke = await getInvoke();
+    return invoke('git_diff_since', { repoPath, commitId });
   },
   
   fetch: async (repoPath: string, remoteName?: string): Promise<void> => {
@@ -809,4 +864,89 @@ export const vectordb = {
     const invoke = await getInvoke();
     return invoke('delete_index', { workspacePath });
   },
+};
+
+// Pricing and Cost Tracking
+export interface ModelPricing {
+  input_per_million: number;
+  output_per_million: number;
+  cache_write_per_million: number;
+  cache_read_per_million: number;
+}
+
+export interface TokenUsageEvent {
+  model: string;
+  provider: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  estimated_cost_usd: number;
+}
+
+export const pricing = {
+  getPricing: async (model: string, provider: string): Promise<ModelPricing | null> => {
+    const invoke = await getInvoke();
+    return invoke('get_pricing', { model, provider });
+  },
+
+  calculateCost: async (
+    model: string,
+    provider: string,
+    promptTokens: number,
+    completionTokens: number,
+    cacheCreationTokens?: number,
+    cacheReadTokens?: number,
+    customInputRate?: number,
+    customOutputRate?: number
+  ): Promise<number> => {
+    const invoke = await getInvoke();
+    return invoke('calculate_cost', {
+      model,
+      provider,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      cache_creation_tokens: cacheCreationTokens,
+      cache_read_tokens: cacheReadTokens,
+      custom_input_rate: customInputRate,
+      custom_output_rate: customOutputRate,
+    });
+  },
+};
+
+export const usage = {
+  initDb: async (): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('init_usage_db');
+  },
+
+  recordUsage: async (
+    model: string,
+    provider: string,
+    promptTokens: number,
+    completionTokens: number,
+    cacheCreationTokens?: number,
+    cacheReadTokens?: number,
+    estimatedCostUsd?: number
+  ): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('record_token_usage', {
+      model,
+      provider,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      cache_creation_tokens: cacheCreationTokens,
+      cache_read_tokens: cacheReadTokens,
+      estimated_cost_usd: estimatedCostUsd,
+    });
+  },
+};
+
+// Event listener helper for token usage
+export const listenForTokenUsage = async (callback: (event: TokenUsageEvent) => void): Promise<() => void> => {
+  const listen = await getListen();
+  return listen('token-usage', (event: { payload: TokenUsageEvent }) => {
+    callback(event.payload);
+  });
 };

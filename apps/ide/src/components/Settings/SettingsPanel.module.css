@@ -269,6 +269,40 @@
   text-transform: capitalize;
 }
 
+.costCell {
+  color: var(--accent-green, #4caf50);
+  font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+.costCard .usageValue {
+  color: var(--accent-green, #4caf50);
+}
+
+.usageBreakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary, #2d2d2d);
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.usageBreakdownItem {
+  display: flex;
+  gap: 8px;
+  font-size: var(--font-size-sm);
+}
+
+.usageBreakdownItem span:first-child {
+  color: var(--text-muted);
+}
+
+.usageBreakdownItem span:last-child {
+  color: var(--text-primary);
+  font-family: 'Fira Code', 'Consolas', monospace;
+}
+
 .emptyState {
   display: flex;
   flex-direction: column;

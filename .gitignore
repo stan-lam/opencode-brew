@@ -77,10 +77,13 @@ __snapshots__/
 
 # Tauri
 src-tauri/target/
+src-tauri/src-tauri/target/
 src-tauri/Cargo.lock
 src-tauri/gen/
 src-tauri/WixTools/
 src-tauri/*.ico
+src-tauri/debug/
+src-tauri/.tauri/
 *.dmg
 *.app
 *.AppImage
@@ -88,6 +91,16 @@ src-tauri/*.ico
 *.rpm
 *.msi
 *.exe
+
+# Debug artifacts
+debug/
+.debug/
+*.debug
+*.pdb
+*.dSYM/
+*.ilk
+*.exp
+*.lib
 
 # Secrets/Credentials
 *.key
