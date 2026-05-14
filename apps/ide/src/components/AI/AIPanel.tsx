@@ -1780,7 +1780,7 @@ function MarkdownRenderer({ content }: { content: string }) {
           })();
           
           // If it's a table, render as table instead of code block
-          if (isTableContent && (lang === '' || lang === 'text' || lang === 'plaintext')) {
+          if (isTableContent && (lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'code')) {
             const tableRows: string[][] = [];
             let hasHeader = false;
             
@@ -1851,7 +1851,7 @@ function MarkdownRenderer({ content }: { content: string }) {
             );
           })();
           
-          if (isChecklistContent && (lang === '' || lang === 'text' || lang === 'plaintext')) {
+          if (isChecklistContent && (lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'code')) {
             const listItems: React.ReactNode[] = [];
             codeLines.forEach((codeLine, idx) => {
               if (codeLine.trim().length === 0) return;
@@ -1915,7 +1915,7 @@ function MarkdownRenderer({ content }: { content: string }) {
             const hasTables = codeLines.some(l => (l.match(/\|/g) || []).length >= 2 && l.trim().startsWith('|'));
             
             // For text/plaintext blocks, prefer markdown rendering if markdown patterns found
-            const isTextLang = lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md';
+            const isTextLang = lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md' || lang === 'code';
             if (isTextLang && (hasHeaders || hasBold || hasTables)) {
               return true;
             }
@@ -2451,7 +2451,18 @@ function MarkdownRenderer({ content }: { content: string }) {
         // Skip very short lines or lines that look like prose
         if (trimmed.length < 3) return false;
         if (/^[A-Z][a-z].*[.!?]$/.test(trimmed)) return false; // Sentence
-        
+
+        const wordCount = trimmed.split(/\s+/).length;
+        const hasMarkdown =
+          /\*\*.+\*\*/.test(trimmed) ||
+          /`[^`]+`/.test(trimmed) ||
+          /^[\s]*[-*+]\s+\S/.test(trimmed) ||
+          /^[\s]*\d+\.\s+\S/.test(trimmed);
+        if (hasMarkdown) return false;
+
+        const hasCodePunctuation = /[{};=<>()[\]]/.test(trimmed);
+        if (wordCount >= 5 && !hasCodePunctuation) return false;
+
         return (
           // Keywords at start of line
           /^(const|let|var|function|class|import|export|if|else|for|while|return|async|await|try|catch|throw|switch|case|default|break|continue)\s/.test(trimmed) ||
@@ -2538,6 +2549,11 @@ function MarkdownRenderer({ content }: { content: string }) {
   };
 
   const renderInline = (rawText: string): React.ReactNode => {
+    // Safety check for null/undefined/empty
+    if (!rawText || typeof rawText !== 'string') {
+      return rawText || '';
+    }
+    
     // Clean up orphaned markers that the model sometimes outputs mid-stream or after list-stripping.
     // Orphaned ** (odd count) → strip the extra one.
     // Orphaned ` (odd count outside triple fences) → strip the extra one.
@@ -2547,7 +2563,14 @@ function MarkdownRenderer({ content }: { content: string }) {
       // Remove the last unmatched ** 
       text = text.replace(/\*\*(?!.*\*\*)/, '');
     }
-    const backtickCount = (text.match(/(?<!`)`(?!`)/g) || []).length;
+    
+    // Safe backtick counting (avoid lookbehind on older browsers)
+    let backtickCount = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '`' && text[i-1] !== '`' && text[i+1] !== '`') {
+        backtickCount++;
+      }
+    }
     if (backtickCount % 2 !== 0) {
       // Remove the last unmatched single backtick
       text = text.replace(/`(?=[^`]*$)/, '');
@@ -2588,13 +2611,21 @@ function MarkdownRenderer({ content }: { content: string }) {
       }
     }
 
-    // Italic *text* — exclude ** (look-ahead/behind)
-    const italicRegex = /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+    // Italic *text* — exclude ** by checking neighbors manually (avoids lookbehind compatibility issues)
+    const italicRegex = /\*([^*]+)\*/g;
     while ((m = italicRegex.exec(text)) !== null) {
-      if (noOverlap(m.index, m.index + m[0].length)) {
+      const start = m.index;
+      const end = m.index + m[0].length;
+      // Skip if this is part of a ** sequence
+      const prevChar = text[start - 1];
+      const nextChar = text[end];
+      if (prevChar === '*' || nextChar === '*') {
+        continue; // Part of bold **text** pattern
+      }
+      if (noOverlap(start, end)) {
         matches.push({
-          start: m.index,
-          end: m.index + m[0].length,
+          start,
+          end,
           element: <em key={key++}>{m[1]}</em>,
         });
       }

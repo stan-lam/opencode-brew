@@ -352,6 +352,184 @@ interface WebOperation {
   staged?: boolean;
 }
 
+interface FileReadOperation {
+  type: 'read_file' | 'search_files';
+  path?: string;
+  pattern?: string;
+}
+
+function parseFileReadOperations(content: string): FileReadOperation[] {
+  const operations: FileReadOperation[] = [];
+  
+  // First, extract any tags that might be inside code blocks
+  // This handles models that wrap tool calls in ```xml ... ``` or ```code ... ```
+  const codeBlockTagRegex = /```(?:xml|code)?\s*\n?\s*(<(?:read_file|search_files)[^>]+>)\s*\n?\s*```/gi;
+  let codeMatch: RegExpExecArray | null;
+  const extractedTags: string[] = [];
+  while ((codeMatch = codeBlockTagRegex.exec(content)) !== null) {
+    extractedTags.push(codeMatch[1]);
+  }
+  
+  // Combine original content with extracted tags for parsing
+  const contentToParse = content + '\n' + extractedTags.join('\n');
+  
+  // Match read_file - both self-closing and non-self-closing forms
+  const readFileRegex = /<read_file\s+path="([^"]+)"\s*\/?>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = readFileRegex.exec(contentToParse)) !== null) {
+    if (!operations.some(op => op.type === 'read_file' && op.path === match![1])) {
+      operations.push({ type: 'read_file', path: match[1] });
+    }
+  }
+  
+  // Also match the form with closing tag: <read_file path="..."></read_file>
+  const readFileWithClosingRegex = /<read_file\s+path="([^"]+)">\s*<\/read_file>/gi;
+  let match2: RegExpExecArray | null;
+  while ((match2 = readFileWithClosingRegex.exec(contentToParse)) !== null) {
+    if (!operations.some(op => op.type === 'read_file' && op.path === match2![1])) {
+      operations.push({ type: 'read_file', path: match2[1] });
+    }
+  }
+  
+  // Match search_files with various attribute names (pattern, name_pattern, query)
+  const searchFilesRegex = /<search_files\s+(?:pattern|name_pattern|query)="([^"]+)"\s*\/?>/gi;
+  let match3: RegExpExecArray | null;
+  while ((match3 = searchFilesRegex.exec(contentToParse)) !== null) {
+    if (!operations.some(op => op.type === 'search_files' && op.pattern === match3![1])) {
+      operations.push({ type: 'search_files', pattern: match3[1] });
+    }
+  }
+  
+  return operations.slice(0, 10); // Limit to 10 operations
+}
+
+function cleanFileReadOperationTags(content: string): string {
+  let cleaned = content
+    // Clean raw tags
+    .replace(/<read_file\s+path="[^"]+"\s*\/?>/gi, '')
+    .replace(/<read_file\s+path="[^"]+">\s*<\/read_file>/gi, '')
+    .replace(/<search_files\s+(?:pattern|name_pattern|query)="[^"]+"\s*\/?>/gi, '')
+    // Clean tags wrapped in code blocks (common model behavior)
+    .replace(/```(?:xml|code)?\s*\n?\s*<read_file\s+path="[^"]+"\s*\/?>\s*\n?\s*```/gi, '')
+    .replace(/```(?:xml|code)?\s*\n?\s*<search_files\s+(?:pattern|name_pattern|query)="[^"]+"\s*\/?>\s*\n?\s*```/gi, '');
+  
+  // Clean up multiple consecutive newlines
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  
+  return cleaned.trim();
+}
+
+async function executeFileReadOperations(
+  operations: FileReadOperation[],
+  workspacePath: string
+): Promise<string> {
+  const results: string[] = [];
+  
+  // Helper to detect language from file extension
+  const getLang = (filePath: string): string => {
+    const ext = filePath.split('.').pop()?.toLowerCase() || '';
+    const langMap: Record<string, string> = {
+      'ts': 'typescript', 'tsx': 'typescript',
+      'js': 'javascript', 'jsx': 'javascript',
+      'py': 'python', 'rs': 'rust', 'go': 'go',
+      'java': 'java', 'cpp': 'cpp', 'c': 'c',
+      'css': 'css', 'scss': 'scss', 'less': 'less',
+      'html': 'html', 'json': 'json', 'yaml': 'yaml',
+      'yml': 'yaml', 'md': 'markdown', 'sql': 'sql',
+      'sh': 'bash', 'bash': 'bash', 'zsh': 'bash',
+    };
+    return langMap[ext] || '';
+  };
+  
+  for (const op of operations) {
+    try {
+      if (op.type === 'read_file' && op.path) {
+        const fullPath = op.path.startsWith('/') 
+          ? op.path 
+          : `${workspacePath}/${op.path}`;
+        
+        console.log(`[aiStore] Reading file: ${fullPath}`);
+        const content = await fs.readFile(fullPath);
+        const lang = getLang(op.path);
+        
+        // Truncate very large files
+        const maxChars = 15000;
+        const truncatedContent = content.length > maxChars
+          ? content.slice(0, maxChars) + '\n... [truncated, file continues]'
+          : content;
+        
+        results.push(`**File: \`${op.path}\`**\n\`\`\`${lang}\n${truncatedContent}\n\`\`\``);
+      } else if (op.type === 'search_files' && op.pattern) {
+        console.log(`[aiStore] Searching files for pattern: ${op.pattern}`);
+        
+        const { invoke } = await import('@tauri-apps/api/core');
+        
+        try {
+          // Use the existing search_in_files command
+          const searchResults = await invoke<Array<{
+            file: string;
+            line: number;
+            column: number;
+            text: string;
+            match_text: string;
+          }>>('search_in_files', {
+            directory: workspacePath,
+            query: op.pattern,
+            options: {
+              case_sensitive: false,
+              whole_word: false,
+              use_regex: false
+            }
+          });
+          
+          if (searchResults.length === 0) {
+            results.push(`**Search: \`${op.pattern}\`**\n*No matches found.*`);
+          } else {
+            let searchOutput = `**Search: \`${op.pattern}\`** (${searchResults.length} matches)\n\n`;
+            
+            // Group by file
+            const byFile = new Map<string, Array<{line: number; text: string}>>();
+            for (const result of searchResults.slice(0, 50)) { // Limit total results
+              const relativePath = result.file.replace(workspacePath + '/', '');
+              if (!byFile.has(relativePath)) {
+                byFile.set(relativePath, []);
+              }
+              byFile.get(relativePath)!.push({ line: result.line, text: result.text });
+            }
+            
+            for (const [file, matches] of byFile) {
+              const lang = getLang(file);
+              searchOutput += `### \`${file}\`\n\`\`\`${lang}\n`;
+              for (const match of matches.slice(0, 5)) {
+                searchOutput += `${match.line}: ${match.text.trim()}\n`;
+              }
+              if (matches.length > 5) {
+                searchOutput += `... and ${matches.length - 5} more matches in this file\n`;
+              }
+              searchOutput += `\`\`\`\n\n`;
+            }
+            
+            if (searchResults.length > 50) {
+              searchOutput += `\n*... and ${searchResults.length - 50} more matches not shown*\n`;
+            }
+            
+            results.push(searchOutput.trim());
+          }
+        } catch (searchError) {
+          console.error(`[aiStore] search_in_files failed:`, searchError);
+          results.push(`**Search: \`${op.pattern}\`**\n*Error: Search failed - ${searchError}*`);
+        }
+      }
+    } catch (error) {
+      const opDesc = op.type === 'read_file' ? op.path : `search: ${op.pattern}`;
+      console.error(`[aiStore] Failed operation ${opDesc}:`, error);
+      results.push(`**${op.type === 'read_file' ? 'File' : 'Search'}: \`${opDesc}\`**\n*Error: ${error}*`);
+    }
+  }
+  
+  return results.join('\n\n---\n\n');
+}
+
 function parseWebOperations(content: string): WebOperation[] {
   const operations: WebOperation[] = [];
   
@@ -1369,8 +1547,8 @@ export const useAIStore = create<AIState>()(
                 const existingMessages = conv.messages;
                 const lastMessage = existingMessages[existingMessages.length - 1];
                 
-                // Clean web operation tags from displayed content during streaming
-                const displayContent = cleanWebOperationTags(responseContent);
+                // Clean web and file read operation tags from displayed content during streaming
+                const displayContent = cleanFileReadOperationTags(cleanWebOperationTags(responseContent));
                 
                 let updatedMessages;
                 if (lastMessage?.role === 'assistant') {
@@ -1641,22 +1819,190 @@ export const useAIStore = create<AIState>()(
                   get().saveWorkspaceHistory();
                 });
               } else {
-                set({ isStreaming: false, thinkingStatus: null });
-                // Auto-save when streaming completes
-                get().saveWorkspaceHistory();
+                // Check for file read operations (agent mode only)
+                const fileReadOps = parseFileReadOperations(responseContent);
+                const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath;
+                
+                if (fileReadOps.length > 0 && workspacePath && currentMode === 'agent') {
+                  // Clean read_file tags from the displayed content
+                  const cleanedContent = cleanFileReadOperationTags(responseContent);
+                  
+                  // Update assistant message to show cleaned content
+                  set((state) => {
+                    const conv = state.activeConversation;
+                    if (!conv) return state;
+                    
+                    const existingMessages = conv.messages;
+                    const lastMessage = existingMessages[existingMessages.length - 1];
+                    
+                    if (lastMessage?.role === 'assistant') {
+                      const updatedMessages = existingMessages.map((m, i) =>
+                        i === existingMessages.length - 1
+                          ? { ...m, content: cleanedContent }
+                          : m
+                      );
+                      
+                      return {
+                        activeConversation: { ...conv, messages: updatedMessages },
+                        conversations: state.conversations.map((c) =>
+                          c.id === conv.id ? { ...conv, messages: updatedMessages } : c
+                        ),
+                      };
+                    }
+                    return state;
+                  });
+                  
+                  set({ thinkingStatus: `Reading ${fileReadOps.length} file(s)...` });
+                  
+                  // Execute file read operations
+                  executeFileReadOperations(fileReadOps, workspacePath).then(async (fileContents) => {
+                    set({ thinkingStatus: 'Processing file contents...' });
+                    
+                    try {
+                      const { ai } = await import('../services/tauri');
+                      const conv = get().activeConversation;
+                      if (!conv) {
+                        set({ isStreaming: false, thinkingStatus: null });
+                        get().saveWorkspaceHistory();
+                        return;
+                      }
+                      
+                      // Build continuation messages with file contents
+                      const continuationMessages = [
+                        { role: 'system', content: systemPrompt, attachments: undefined },
+                        ...conv.messages.slice(0, -1).map(m => ({
+                          role: m.role,
+                          content: m.content,
+                          attachments: m.attachments,
+                        })),
+                        // Include the cleaned assistant response so far
+                        { role: 'assistant', content: cleanedContent, attachments: undefined },
+                        // Add file contents as context for continuation
+                        { role: 'user', content: `Here are the file contents you requested:\n\n${fileContents}\n\nNow please continue with your analysis or make the necessary changes. Do not repeat the read_file tags.`, attachments: undefined },
+                      ];
+                      
+                      // Track content for the continuation
+                      let continuationContent = cleanedContent ? cleanedContent.trim() + '\n\n' : '';
+                      
+                      // Set up listener for continuation
+                      const contUnlisten = await ai.onStreamChunk(conversationId, (contChunk) => {
+                        if (contChunk.content) {
+                          continuationContent += contChunk.content;
+                          
+                          // Clean any file read tags from continuation content
+                          const displayContinuationContent = cleanFileReadOperationTags(continuationContent);
+                          
+                          // Update the assistant message with continued content
+                          set((state) => {
+                            const currentConv = state.activeConversation;
+                            if (!currentConv) return state;
+                            
+                            const existingMessages = currentConv.messages;
+                            const lastMessage = existingMessages[existingMessages.length - 1];
+                            
+                            if (lastMessage?.role === 'assistant') {
+                              const updatedMessages = existingMessages.map((m, i) =>
+                                i === existingMessages.length - 1
+                                  ? { ...m, content: displayContinuationContent }
+                                  : m
+                              );
+                              
+                              return {
+                                activeConversation: { ...currentConv, messages: updatedMessages },
+                                conversations: state.conversations.map((c) =>
+                                  c.id === currentConv.id ? { ...currentConv, messages: updatedMessages } : c
+                                ),
+                              };
+                            }
+                            return state;
+                          });
+                        }
+                        
+                        if (contChunk.done) {
+                          set({ isStreaming: false, thinkingStatus: null });
+                          get().saveWorkspaceHistory();
+                          
+                          // Advance agent task if needed
+                          const { agentTasks, agentTaskIndex } = get();
+                          if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
+                            get().advanceAgentTask();
+                          }
+                          
+                          // Process next queued prompt if any
+                          const { promptQueue } = get();
+                          if (promptQueue.length > 0) {
+                            const [nextPrompt, ...remaining] = promptQueue;
+                            set({ promptQueue: remaining });
+                            setTimeout(() => get().sendMessage(nextPrompt), 100);
+                          }
+                        }
+                      });
+                      
+                      // Make continuation API call
+                      if (config.provider === 'ollama') {
+                        await ai.chatOllama(
+                          config.baseUrl || 'http://localhost:11434',
+                          config.model,
+                          continuationMessages,
+                          config.temperature,
+                          config.maxTokens,
+                          conversationId
+                        );
+                      } else if (config.provider === 'copilot') {
+                        await ai.chatCopilot(
+                          config.model,
+                          continuationMessages,
+                          config.temperature,
+                          config.maxTokens,
+                          conversationId
+                        );
+                      } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
+                        const baseUrl = config.provider === 'openai' 
+                          ? 'https://api.openai.com/v1'
+                          : config.provider === 'claude'
+                          ? 'https://api.anthropic.com/v1'
+                          : config.baseUrl || '';
+                        
+                        await ai.chatOpenAI(
+                          baseUrl,
+                          config.apiKey || '',
+                          config.model,
+                          continuationMessages,
+                          config.temperature,
+                          config.maxTokens,
+                          conversationId
+                        );
+                      }
+                      
+                      contUnlisten();
+                    } catch (error) {
+                      console.error('[aiStore] File read continuation failed:', error);
+                      set({ isStreaming: false, thinkingStatus: null });
+                      get().saveWorkspaceHistory();
+                    }
+                  }).catch((error) => {
+                    console.error('[aiStore] File read operations failed:', error);
+                    set({ isStreaming: false, thinkingStatus: null });
+                    get().saveWorkspaceHistory();
+                  });
+                } else {
+                  set({ isStreaming: false, thinkingStatus: null });
+                  // Auto-save when streaming completes
+                  get().saveWorkspaceHistory();
 
-                // Advance agent task progress when a response completes in agent mode
-                const { agentTasks, agentTaskIndex } = get();
-                if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
-                  get().advanceAgentTask();
-                }
+                  // Advance agent task progress when a response completes in agent mode
+                  const { agentTasks, agentTaskIndex } = get();
+                  if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
+                    get().advanceAgentTask();
+                  }
 
-                // Process next queued prompt if any
-                const { promptQueue } = get();
-                if (promptQueue.length > 0) {
-                  const [nextPrompt, ...remaining] = promptQueue;
-                  set({ promptQueue: remaining });
-                  setTimeout(() => get().sendMessage(nextPrompt), 100);
+                  // Process next queued prompt if any
+                  const { promptQueue } = get();
+                  if (promptQueue.length > 0) {
+                    const [nextPrompt, ...remaining] = promptQueue;
+                    set({ promptQueue: remaining });
+                    setTimeout(() => get().sendMessage(nextPrompt), 100);
+                  }
                 }
               }
             }

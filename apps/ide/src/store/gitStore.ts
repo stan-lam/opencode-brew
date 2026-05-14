@@ -59,6 +59,7 @@ interface GitState {
   commit: (message: string) => Promise<void>;
   checkout: (branch: string) => Promise<void>;
   fetchBranches: () => Promise<void>;
+refreshAll: () => Promise<void>;
   fetch: (remoteName?: string) => Promise<void>;
   pull: (remoteName?: string) => Promise<string>;
   push: (remoteName?: string, force?: boolean) => Promise<string>;

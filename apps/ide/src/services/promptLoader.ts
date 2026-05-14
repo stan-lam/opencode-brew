@@ -24,6 +24,14 @@ RULES:
 - For file contents, use: \`\`\`typescript:path/to/file.ts
 - For shell commands, use: \`\`\`bash
 
+### TOOL TAGS - DO NOT WRAP
+Tool calls are NOT code blocks. Output them as raw XML tags on their own lines.
+- CORRECT: <read_file path="src/example.ts" />
+- WRONG: \`\`\`xml
+  <read_file path="src/example.ts" />
+  \`\`\`
+This applies to ALL tool tags: read/search/create/edit/delete, web tools, git tools, etc.
+
 ### TABLES - MANDATORY FORMAT
 Tables MUST have the separator row:
 | Column 1 | Column 2 |
@@ -38,6 +46,8 @@ Tables MUST have the separator row:
 - Forget the language identifier after \`\`\`
 - Output partial/broken code fences
 - Mix prose and code without fences
+- Wrap normal prose in code fences
+- Use \`\`\`code fences for non-code text
 
 REMEMBER: Code without fences = broken display. Always use \`\`\`language before code.
 `,
@@ -45,7 +55,24 @@ REMEMBER: Code without fences = broken display. Always use \`\`\`language before
   'agent-mode': `
 ## FILE OPERATIONS
 
-You can create, read, and edit files in the user's workspace. Use XML-style tags to perform file operations:
+You can create, read, search, and edit files in the user's workspace. Use XML-style tags to perform file operations.
+
+**CRITICAL - TOOL CALL FORMAT:**
+- Output tool tags as RAW XML directly in your response
+- Do NOT wrap tool calls in markdown code blocks
+- WRONG: \`\`\`xml\\n<read_file path="..." />\\n\`\`\`
+- CORRECT: <read_file path="..." />
+- The system will execute the tags and provide results
+
+### Read a file:
+<read_file path="src/example.ts" />
+
+Use this to examine file contents before making changes. Results will be provided automatically.
+
+### Search for content:
+<search_files pattern="functionName" />
+
+Use this to find files containing specific text. Results include file paths and matching lines.
 
 ### Create a new file:
 <create_file path="src/example.ts">
@@ -79,6 +106,7 @@ const greeting = "Hi there";
 
 IMPORTANT:
 - Always use relative paths from the workspace root
+- Output tool calls as RAW XML - never inside code blocks
 - Explain what you're doing before each operation
 - For edits, include enough context in old_content to uniquely identify the location
 - Multiple operations are allowed in a single response
