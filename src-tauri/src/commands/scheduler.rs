@@ -9,6 +9,166 @@ use regex::Regex;
 
 use crate::commands::web;
 use crate::commands::usage;
+use std::collections::HashSet;
+
+// ============= Fake Data Detection with Live Validation =============
+
+// Common real stock symbols (fast lookup, no API call needed)
+fn get_known_symbols() -> HashSet<&'static str> {
+    [
+        // Mega caps
+        "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA", "BRK.A", "BRK.B",
+        // Large tech
+        "AMD", "INTC", "MU", "QCOM", "AVGO", "TXN", "AMAT", "LRCX", "KLAC", "MRVL",
+        // Other popular
+        "NFLX", "DIS", "PYPL", "SQ", "SHOP", "SPOT", "UBER", "LYFT", "ABNB", "COIN",
+        "CRM", "ORCL", "IBM", "CSCO", "ADBE", "NOW", "SNOW", "PLTR", "DDOG", "NET",
+        // Finance
+        "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "AXP",
+        // Healthcare
+        "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "WBA",
+        // Consumer
+        "WMT", "COST", "TGT", "HD", "LOW", "NKE", "SBUX", "MCD", "KO", "PEP",
+        // Energy
+        "XOM", "CVX", "COP", "SLB", "OXY",
+        // Indices/ETFs
+        "SPY", "QQQ", "DIA", "IWM", "VTI", "VOO",
+        // Chinese ADRs
+        "BABA", "JD", "PDD", "BIDU", "NIO", "XPEV", "LI",
+        // Meme/popular
+        "GME", "AMC", "BB", "NOK", "SOFI", "RIVN", "LCID",
+        // Semis
+        "TSM", "ASML", "ARM", "SMCI",
+        // User mentioned
+        "HIMX", "CELH",
+    ].iter().cloned().collect()
+}
+
+// Extract all symbols and their claimed prices from AI response
+fn extract_symbols_and_prices(response: &str) -> Vec<(String, f64)> {
+    let mut results = Vec::new();
+    
+    // Pattern: SYMBOL $PRICE or SYMBOL: $PRICE  
+    let price_re = Regex::new(r"\b([A-Z]{2,5})\b[:\s]+\$([\d,]+\.?\d*)").unwrap();
+    
+    for cap in price_re.captures_iter(response) {
+        let symbol = cap[1].to_string();
+        let price_str = cap[2].replace(",", "");
+        
+        if let Ok(price) = price_str.parse::<f64>() {
+            // Avoid duplicates
+            if !results.iter().any(|(s, _)| s == &symbol) {
+                results.push((symbol, price));
+            }
+        }
+    }
+    
+    results
+}
+
+// Validate symbols and prices against live market data
+async fn validate_against_live_data(symbols_prices: Vec<(String, f64)>) -> (Vec<String>, Vec<String>) {
+    let known = get_known_symbols();
+    let mut fake_symbols = Vec::new();
+    let mut wrong_prices = Vec::new();
+    
+    for (symbol, claimed_price) in symbols_prices {
+        // Skip if in known list - we'll still verify price but assume symbol is real
+        let is_known = known.contains(symbol.as_str());
+        
+        // Try to get real quote from market data
+        println!("[validator] Checking {} (claimed ${:.2})...", symbol, claimed_price);
+        
+        match web::get_stock_quote(symbol.clone()).await {
+            Ok(quote) => {
+                let real_price = quote.price;
+                
+                // Price tolerance: allow 10% difference (for delayed data, rounding, etc.)
+                let tolerance = real_price * 0.10;
+                let diff = (claimed_price - real_price).abs();
+                
+                if diff > tolerance && diff > 5.0 {
+                    // Significant price discrepancy
+                    wrong_prices.push(format!(
+                        "{}: AI said ${:.2}, actual is ${:.2} ({:+.1}% off)",
+                        symbol, claimed_price, real_price,
+                        ((claimed_price - real_price) / real_price) * 100.0
+                    ));
+                    println!("[validator] {} price WRONG: claimed ${:.2}, actual ${:.2}", 
+                        symbol, claimed_price, real_price);
+                } else {
+                    println!("[validator] {} price OK: claimed ${:.2}, actual ${:.2}", 
+                        symbol, claimed_price, real_price);
+                }
+            }
+            Err(e) => {
+                // Symbol lookup failed - likely fake or delisted
+                if !is_known {
+                    fake_symbols.push(symbol.clone());
+                    println!("[validator] {} appears FAKE (lookup failed: {})", symbol, e);
+                } else {
+                    println!("[validator] {} lookup failed but is known symbol: {}", symbol, e);
+                }
+            }
+        }
+        
+        // Small delay to avoid rate limiting
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    
+    (fake_symbols, wrong_prices)
+}
+
+// Validate AI response and add warning if fake data detected
+async fn validate_and_warn_fake_data(response: &str) -> String {
+    // Extract all symbols and their claimed prices
+    let symbols_prices = extract_symbols_and_prices(response);
+    
+    if symbols_prices.is_empty() {
+        println!("[validator] No stock symbols/prices found in response");
+        return response.to_string();
+    }
+    
+    println!("[validator] Found {} symbols to validate: {:?}", 
+        symbols_prices.len(), 
+        symbols_prices.iter().map(|(s, p)| format!("{}=${:.2}", s, p)).collect::<Vec<_>>()
+    );
+    
+    // Limit validation to first 10 symbols to avoid too many API calls
+    let to_validate: Vec<_> = symbols_prices.into_iter().take(10).collect();
+    
+    // Validate against live market data
+    let (fake_symbols, wrong_prices) = validate_against_live_data(to_validate).await;
+    
+    if fake_symbols.is_empty() && wrong_prices.is_empty() {
+        println!("[validator] All data validated successfully!");
+        return response.to_string();
+    }
+    
+    // Build warning message
+    let mut warning = String::from("\n\n---\n⚠️ **DATA VALIDATION WARNING** ⚠️\n\n");
+    warning.push_str("Live market data check found discrepancies:\n\n");
+    
+    if !fake_symbols.is_empty() {
+        warning.push_str(&format!("**Invalid symbols (not found in market):** {}\n\n", fake_symbols.join(", ")));
+    }
+    
+    if !wrong_prices.is_empty() {
+        warning.push_str("**Incorrect prices:**\n");
+        for wp in &wrong_prices {
+            warning.push_str(&format!("- {}\n", wp));
+        }
+        warning.push_str("\n");
+    }
+    
+    warning.push_str("*The AI generated inaccurate data. Prices shown above are from live market data.*\n");
+    warning.push_str("---\n");
+    
+    println!("[validator] Added warning for {} fake symbols, {} wrong prices", 
+        fake_symbols.len(), wrong_prices.len());
+    
+    format!("{}{}", response, warning)
+}
 
 // ============= Default AI System Prompt (with web access capabilities) =============
 
@@ -1139,6 +1299,9 @@ async fn record_scheduler_token_usage(app: &AppHandle, model: &str, provider: &s
         provider.to_string(),
         prompt_tokens,
         completion_tokens,
+        None, // cache_creation_tokens
+        None, // cache_read_tokens
+        None, // estimated_cost_usd
     ).await {
         println!("[scheduler] Failed to record token usage: {}", e);
     }
@@ -1544,20 +1707,33 @@ async fn execute_ai_prompt_with_tools(
         // Build continuation prompt with tool results
         let tool_results_text = tool_results.join("\n\n");
         current_prompt = format!(
-            r#"You previously requested to use tools. Here are the results:
+            r#"Here are the ACTUAL results from the tools you requested:
 
 {}
 
-IMPORTANT: If the search results above only show links/titles but NOT the actual data you need (like specific player names, rankings, scores, numbers), you MUST use <fetch_url url="..." /> on the most relevant URL to get the actual content.
+🚨 CRITICAL RULES:
+1. ONLY use data that appears EXACTLY in the results above
+2. DO NOT invent, estimate, or make up ANY numbers, prices, or facts
+3. If the data you need is not in these results, say "Data not available" - do NOT fabricate it
+4. Every stock price, percentage, and statistic in your response MUST come from above
 
-If you have the actual data you need, provide a complete answer with a well-formatted table showing the specific information requested (names, rankings, points, etc.)."#,
+If the results only show links/titles without actual data, use <fetch_url url="..." /> to get the content.
+
+Now provide your response using ONLY the real data above."#,
             tool_results_text
         );
         
         println!("[scheduler::tools] Built continuation prompt with {} tool results", tool_results.len());
     }
     
-    Ok(final_response)
+    // Validate response for fake data against live market data
+    println!("[scheduler::tools] Validating AI response against live market data...");
+    let validated_response = validate_and_warn_fake_data(&final_response).await;
+    if validated_response.len() > final_response.len() {
+        println!("[scheduler::tools] WARNING: Fake/incorrect data detected in AI response, added warning");
+    }
+    
+    Ok(validated_response)
 }
 
 // Execute tools and return both the modified response and the collected tool results

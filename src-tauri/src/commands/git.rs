@@ -443,6 +443,249 @@ pub async fn git_diff_all(repo_path: String, staged: bool) -> Result<Vec<FileDif
     Ok(diffs)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommitDiff {
+    pub commit_id: String,
+    pub message: String,
+    pub author: String,
+    pub email: String,
+    pub timestamp: String,
+    pub files: Vec<FileDiff>,
+    pub total_additions: u32,
+    pub total_deletions: u32,
+}
+
+#[command]
+pub async fn git_show_commit(repo_path: String, commit_id: String) -> Result<CommitDiff, String> {
+    let repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    // Use revparse_single to support both full and abbreviated commit hashes
+    let object = repo.revparse_single(&commit_id)
+        .map_err(|e| format!("Could not resolve commit '{}': {}", commit_id, e))?;
+    
+    let commit = object.peel_to_commit()
+        .map_err(|e| format!("'{}' is not a valid commit: {}", commit_id, e))?;
+    
+    // Extract values before they go out of scope (borrow checker)
+    let commit_message = commit.message().unwrap_or("").to_string();
+    let author_name = commit.author().name().unwrap_or("Unknown").to_string();
+    let author_email = commit.author().email().unwrap_or("").to_string();
+    let timestamp = chrono::DateTime::from_timestamp(commit.time().seconds(), 0)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default();
+    
+    let tree = commit.tree()
+        .map_err(|e| format!("Failed to get commit tree: {}", e))?;
+    
+    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+    
+    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
+        .map_err(|e| format!("Failed to create diff: {}", e))?;
+    
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut total_additions = 0u32;
+    let mut total_deletions = 0u32;
+    
+    for (idx, delta) in diff.deltas().enumerate() {
+        let mut file_diff = FileDiff {
+            old_path: delta.old_file().path().map(|p| p.to_string_lossy().to_string()),
+            new_path: delta.new_file().path().map(|p| p.to_string_lossy().to_string()),
+            status: match delta.status() {
+                git2::Delta::Added => "added",
+                git2::Delta::Deleted => "deleted",
+                git2::Delta::Modified => "modified",
+                git2::Delta::Renamed => "renamed",
+                git2::Delta::Copied => "copied",
+                _ => "unknown",
+            }.to_string(),
+            hunks: Vec::new(),
+            additions: 0,
+            deletions: 0,
+        };
+        
+        if let Ok(Some(patch)) = git2::Patch::from_diff(&diff, idx) {
+            let (_, additions, deletions) = patch.line_stats().unwrap_or((0, 0, 0));
+            file_diff.additions = additions as u32;
+            file_diff.deletions = deletions as u32;
+            total_additions += additions as u32;
+            total_deletions += deletions as u32;
+            
+            for hunk_idx in 0..patch.num_hunks() {
+                if let Ok((hunk, _)) = patch.hunk(hunk_idx) {
+                    let mut diff_hunk = DiffHunk {
+                        header: String::from_utf8_lossy(hunk.header()).trim().to_string(),
+                        old_start: hunk.old_start(),
+                        old_lines: hunk.old_lines(),
+                        new_start: hunk.new_start(),
+                        new_lines: hunk.new_lines(),
+                        lines: Vec::new(),
+                    };
+                    
+                    for line_idx in 0..patch.num_lines_in_hunk(hunk_idx).unwrap_or(0) {
+                        if let Ok(line) = patch.line_in_hunk(hunk_idx, line_idx) {
+                            let line_type = match line.origin() {
+                                '+' => "addition",
+                                '-' => "deletion",
+                                ' ' => "context",
+                                _ => "other",
+                            };
+                            
+                            diff_hunk.lines.push(DiffLine {
+                                line_type: line_type.to_string(),
+                                old_lineno: line.old_lineno(),
+                                new_lineno: line.new_lineno(),
+                                content: String::from_utf8_lossy(line.content()).to_string(),
+                            });
+                        }
+                    }
+                    
+                    file_diff.hunks.push(diff_hunk);
+                }
+            }
+        }
+        
+        files.push(file_diff);
+    }
+    
+    Ok(CommitDiff {
+        commit_id: commit.id().to_string(),
+        message: commit_message,
+        author: author_name,
+        email: author_email,
+        timestamp,
+        files,
+        total_additions,
+        total_deletions,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiffSinceResult {
+    pub from_commit: String,
+    pub to_commit: String,
+    pub commit_count: usize,
+    pub files: Vec<FileDiff>,
+    pub total_additions: u32,
+    pub total_deletions: u32,
+}
+
+#[command]
+pub async fn git_diff_since(repo_path: String, commit_id: String) -> Result<DiffSinceResult, String> {
+    let repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    // Parse the "since" commit - use revparse_single to support both full and abbreviated hashes
+    let from_object = repo.revparse_single(&commit_id)
+        .map_err(|e| format!("Could not resolve commit '{}': {}", commit_id, e))?;
+    
+    let from_commit = from_object.peel_to_commit()
+        .map_err(|e| format!("'{}' is not a valid commit: {}", commit_id, e))?;
+    
+    let from_oid = from_commit.id();
+    
+    // Get HEAD commit
+    let head = repo.head()
+        .map_err(|e| format!("Failed to get HEAD: {}", e))?;
+    let head_commit = head.peel_to_commit()
+        .map_err(|e| format!("Failed to get HEAD commit: {}", e))?;
+    
+    let to_oid = head_commit.id();
+    
+    // Count commits between from and HEAD
+    let mut revwalk = repo.revwalk()
+        .map_err(|e| format!("Failed to create revwalk: {}", e))?;
+    revwalk.push(to_oid)
+        .map_err(|e| format!("Failed to push HEAD: {}", e))?;
+    revwalk.hide(from_oid)
+        .map_err(|e| format!("Failed to hide from commit: {}", e))?;
+    let commit_count = revwalk.count();
+    
+    // Get the trees for diff
+    let from_tree = from_commit.tree()
+        .map_err(|e| format!("Failed to get from commit tree: {}", e))?;
+    let to_tree = head_commit.tree()
+        .map_err(|e| format!("Failed to get HEAD tree: {}", e))?;
+    
+    // Create diff between the two trees
+    let diff = repo.diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
+        .map_err(|e| format!("Failed to create diff: {}", e))?;
+    
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut total_additions = 0u32;
+    let mut total_deletions = 0u32;
+    
+    for (idx, delta) in diff.deltas().enumerate() {
+        let mut file_diff = FileDiff {
+            old_path: delta.old_file().path().map(|p| p.to_string_lossy().to_string()),
+            new_path: delta.new_file().path().map(|p| p.to_string_lossy().to_string()),
+            status: match delta.status() {
+                git2::Delta::Added => "added",
+                git2::Delta::Deleted => "deleted",
+                git2::Delta::Modified => "modified",
+                git2::Delta::Renamed => "renamed",
+                git2::Delta::Copied => "copied",
+                _ => "unknown",
+            }.to_string(),
+            hunks: Vec::new(),
+            additions: 0,
+            deletions: 0,
+        };
+        
+        if let Ok(Some(patch)) = git2::Patch::from_diff(&diff, idx) {
+            let (_, additions, deletions) = patch.line_stats().unwrap_or((0, 0, 0));
+            file_diff.additions = additions as u32;
+            file_diff.deletions = deletions as u32;
+            total_additions += additions as u32;
+            total_deletions += deletions as u32;
+            
+            for hunk_idx in 0..patch.num_hunks() {
+                if let Ok((hunk, _)) = patch.hunk(hunk_idx) {
+                    let mut diff_hunk = DiffHunk {
+                        header: String::from_utf8_lossy(hunk.header()).trim().to_string(),
+                        old_start: hunk.old_start(),
+                        old_lines: hunk.old_lines(),
+                        new_start: hunk.new_start(),
+                        new_lines: hunk.new_lines(),
+                        lines: Vec::new(),
+                    };
+                    
+                    for line_idx in 0..patch.num_lines_in_hunk(hunk_idx).unwrap_or(0) {
+                        if let Ok(line) = patch.line_in_hunk(hunk_idx, line_idx) {
+                            let line_type = match line.origin() {
+                                '+' => "addition",
+                                '-' => "deletion",
+                                ' ' => "context",
+                                _ => "other",
+                            };
+                            
+                            diff_hunk.lines.push(DiffLine {
+                                line_type: line_type.to_string(),
+                                old_lineno: line.old_lineno(),
+                                new_lineno: line.new_lineno(),
+                                content: String::from_utf8_lossy(line.content()).to_string(),
+                            });
+                        }
+                    }
+                    
+                    file_diff.hunks.push(diff_hunk);
+                }
+            }
+        }
+        
+        files.push(file_diff);
+    }
+    
+    Ok(DiffSinceResult {
+        from_commit: from_oid.to_string(),
+        to_commit: to_oid.to_string(),
+        commit_count,
+        files,
+        total_additions,
+        total_deletions,
+    })
+}
+
 fn get_credentials_callback() -> RemoteCallbacks<'static> {
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(|_url, username_from_url, allowed_types| {

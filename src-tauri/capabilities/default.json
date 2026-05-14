@@ -36,6 +36,8 @@
     "process:allow-exit",
     "process:allow-restart",
     "fs:default",
+    "fs:read-all",
+    "fs:write-all",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-read-file",
@@ -49,24 +51,9 @@
     "fs:allow-exists",
     "fs:allow-stat",
     {
-      "identifier": "fs:allow-read-text-file",
+      "identifier": "fs:scope",
       "allow": [{ "path": "**" }]
     },
-    {
-      "identifier": "fs:allow-write-text-file", 
-      "allow": [{ "path": "**" }]
-    },
-    {
-      "identifier": "fs:allow-read-dir",
-      "allow": [{ "path": "**" }]
-    },
-    {
-      "identifier": "fs:allow-read-file",
-      "allow": [{ "path": "**" }]
-    },
-    {
-      "identifier": "fs:allow-stat",
-      "allow": [{ "path": "**" }]
-    }
+    "app-commands"
   ]
 }

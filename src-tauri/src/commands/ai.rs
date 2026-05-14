@@ -258,6 +258,9 @@ pub struct TokenUsageEvent {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub estimated_cost_usd: f64,
 }
 
 /// Estimate token count from text (approximately 4 characters per token)
@@ -265,11 +268,31 @@ fn estimate_tokens(text: &str) -> i64 {
     (text.len() as f64 / 4.0).ceil() as i64
 }
 
-/// Emit token usage event for tracking
+/// Emit token usage event for tracking (basic version for simple providers)
 fn emit_token_usage(app: &AppHandle, model: &str, provider: &str, prompt_content: &str, completion_content: &str) {
+    emit_token_usage_detailed(app, model, provider, prompt_content, completion_content, 0, 0);
+}
+
+/// Emit detailed token usage event with cache and cost tracking
+fn emit_token_usage_detailed(
+    app: &AppHandle, 
+    model: &str, 
+    provider: &str, 
+    prompt_content: &str, 
+    completion_content: &str,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+) {
     let prompt_tokens = estimate_tokens(prompt_content);
     let completion_tokens = estimate_tokens(completion_content);
     let total_tokens = prompt_tokens + completion_tokens;
+    
+    // Calculate cost using pricing module
+    let estimated_cost_usd = if let Some(pricing) = super::pricing::get_model_pricing(model, provider) {
+        pricing.calculate_cost(prompt_tokens, completion_tokens, cache_creation_tokens, cache_read_tokens)
+    } else {
+        0.0
+    };
     
     let usage = TokenUsageEvent {
         model: model.to_string(),
@@ -277,10 +300,13 @@ fn emit_token_usage(app: &AppHandle, model: &str, provider: &str, prompt_content
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+        estimated_cost_usd,
     };
     
-    println!("[ai.rs] Token usage: model={}, provider={}, prompt={}, completion={}, total={}", 
-             model, provider, prompt_tokens, completion_tokens, total_tokens);
+    println!("[ai.rs] Token usage: model={}, provider={}, prompt={}, completion={}, total={}, cache_create={}, cache_read={}, cost=${:.6}", 
+             model, provider, prompt_tokens, completion_tokens, total_tokens, cache_creation_tokens, cache_read_tokens, estimated_cost_usd);
     
     let _ = app.emit("token-usage", usage);
 }

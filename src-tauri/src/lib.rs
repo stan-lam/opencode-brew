@@ -320,6 +320,8 @@ pub fn run() {
             commands::git::git_log,
             commands::git::git_diff_file,
             commands::git::git_diff_all,
+            commands::git::git_show_commit,
+            commands::git::git_diff_since,
             commands::git::is_git_repo,
             commands::git::git_fetch,
             commands::git::git_pull,
@@ -365,6 +367,7 @@ pub fn run() {
             commands::web::fetch_url_rendered,
             commands::web::get_stock_quote,
             commands::web::get_market_movers,
+            commands::web::get_market_indices,
             commands::web::get_mlb_standings,
             commands::mcp::mcp_start_server,
             commands::mcp::mcp_stop_server,
@@ -428,6 +431,9 @@ pub fn run() {
             commands::vectordb::search_codebase,
             commands::vectordb::get_index_status,
             commands::vectordb::delete_index,
+            // Pricing for cost tracking
+            commands::pricing::get_pricing,
+            commands::pricing::calculate_cost,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {

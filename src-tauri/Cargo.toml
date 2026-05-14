@@ -54,10 +54,9 @@ zip = "2.2"
 base64 = "0.22"
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
 cron = "0.12"
-lancedb = "0.27"
-arrow = { version = "53", default-features = false }
-arrow-array = "53"
-arrow-schema = "53"
+lancedb = { version = "0.27.2", optional = true }
+arrow-array = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -65,3 +64,5 @@ tauri-plugin-single-instance = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+vectordb = ["lancedb", "arrow-array", "arrow-schema"]
+

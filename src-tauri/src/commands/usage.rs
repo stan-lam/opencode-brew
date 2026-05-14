@@ -15,6 +15,9 @@ pub struct TokenUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub estimated_cost_usd: f64,
     pub created_at: String,
 }
 
@@ -25,6 +28,9 @@ pub struct UsageStats {
     pub total_prompt_tokens: i64,
     pub total_completion_tokens: i64,
     pub total_tokens: i64,
+    pub total_cache_creation_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cost_usd: f64,
     pub request_count: i64,
 }
 
@@ -33,6 +39,9 @@ pub struct OverallStats {
     pub total_prompt_tokens: i64,
     pub total_completion_tokens: i64,
     pub total_tokens: i64,
+    pub total_cache_creation_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cost_usd: f64,
     pub total_requests: i64,
     pub by_model: Vec<UsageStats>,
 }
@@ -69,6 +78,9 @@ pub async fn init_usage_db(app: AppHandle) -> Result<(), String> {
             prompt_tokens INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
             created_at TEXT NOT NULL
         );
         
@@ -77,6 +89,11 @@ pub async fn init_usage_db(app: AppHandle) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_token_usage_created_at ON token_usage(created_at);
         "#
     ).map_err(|e| e.to_string())?;
+    
+    // Migration: Add new columns if they don't exist (for existing databases)
+    let _ = conn.execute("ALTER TABLE token_usage ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE token_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE token_usage ADD COLUMN estimated_cost_usd REAL NOT NULL DEFAULT 0.0", []);
     
     println!("[usage] Database initialized");
     Ok(())
@@ -91,21 +108,27 @@ pub async fn record_token_usage(
     provider: String,
     prompt_tokens: i64,
     completion_tokens: i64,
+    cache_creation_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    estimated_cost_usd: Option<f64>,
 ) -> Result<TokenUsage, String> {
     let conn = get_connection(&app)?;
     
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let total_tokens = prompt_tokens + completion_tokens;
+    let cache_creation = cache_creation_tokens.unwrap_or(0);
+    let cache_read = cache_read_tokens.unwrap_or(0);
+    let cost = estimated_cost_usd.unwrap_or(0.0);
     
     conn.execute(
-        "INSERT INTO token_usage (id, model, provider, prompt_tokens, completion_tokens, total_tokens, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, model, provider, prompt_tokens, completion_tokens, total_tokens, now],
+        "INSERT INTO token_usage (id, model, provider, prompt_tokens, completion_tokens, total_tokens, cache_creation_tokens, cache_read_tokens, estimated_cost_usd, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![id, model, provider, prompt_tokens, completion_tokens, total_tokens, cache_creation, cache_read, cost, now],
     ).map_err(|e| e.to_string())?;
     
-    println!("[usage] Recorded usage: model={}, provider={}, prompt={}, completion={}, total={}", 
-             model, provider, prompt_tokens, completion_tokens, total_tokens);
+    println!("[usage] Recorded usage: model={}, provider={}, prompt={}, completion={}, total={}, cache_create={}, cache_read={}, cost=${:.6}", 
+             model, provider, prompt_tokens, completion_tokens, total_tokens, cache_creation, cache_read, cost);
     
     Ok(TokenUsage {
         id,
@@ -114,6 +137,9 @@ pub async fn record_token_usage(
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        cache_creation_tokens: cache_creation,
+        cache_read_tokens: cache_read,
+        estimated_cost_usd: cost,
         created_at: now,
     })
 }
@@ -123,16 +149,19 @@ pub async fn get_usage_stats(app: AppHandle) -> Result<OverallStats, String> {
     let conn = get_connection(&app)?;
     
     // Get overall totals
-    let (total_prompt, total_completion, total_tokens, total_requests): (i64, i64, i64, i64) = conn
+    let (total_prompt, total_completion, total_tokens, total_cache_creation, total_cache_read, total_cost, total_requests): (i64, i64, i64, i64, i64, f64, i64) = conn
         .query_row(
             "SELECT 
                 COALESCE(SUM(prompt_tokens), 0),
                 COALESCE(SUM(completion_tokens), 0),
                 COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(estimated_cost_usd), 0.0),
                 COUNT(*)
              FROM token_usage",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         )
         .map_err(|e| e.to_string())?;
     
@@ -145,6 +174,9 @@ pub async fn get_usage_stats(app: AppHandle) -> Result<OverallStats, String> {
                 COALESCE(SUM(prompt_tokens), 0) as total_prompt,
                 COALESCE(SUM(completion_tokens), 0) as total_completion,
                 COALESCE(SUM(total_tokens), 0) as total,
+                COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation,
+                COALESCE(SUM(cache_read_tokens), 0) as total_cache_read,
+                COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost,
                 COUNT(*) as request_count
              FROM token_usage
              GROUP BY model, provider
@@ -160,7 +192,10 @@ pub async fn get_usage_stats(app: AppHandle) -> Result<OverallStats, String> {
                 total_prompt_tokens: row.get(2)?,
                 total_completion_tokens: row.get(3)?,
                 total_tokens: row.get(4)?,
-                request_count: row.get(5)?,
+                total_cache_creation_tokens: row.get(5)?,
+                total_cache_read_tokens: row.get(6)?,
+                total_cost_usd: row.get(7)?,
+                request_count: row.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -171,6 +206,9 @@ pub async fn get_usage_stats(app: AppHandle) -> Result<OverallStats, String> {
         total_prompt_tokens: total_prompt,
         total_completion_tokens: total_completion,
         total_tokens,
+        total_cache_creation_tokens: total_cache_creation,
+        total_cache_read_tokens: total_cache_read,
+        total_cost_usd: total_cost,
         total_requests,
         by_model,
     })
@@ -184,17 +222,20 @@ pub async fn get_usage_by_date_range(
 ) -> Result<OverallStats, String> {
     let conn = get_connection(&app)?;
     
-    let (total_prompt, total_completion, total_tokens, total_requests): (i64, i64, i64, i64) = conn
+    let (total_prompt, total_completion, total_tokens, total_cache_creation, total_cache_read, total_cost, total_requests): (i64, i64, i64, i64, i64, f64, i64) = conn
         .query_row(
             "SELECT 
                 COALESCE(SUM(prompt_tokens), 0),
                 COALESCE(SUM(completion_tokens), 0),
                 COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(estimated_cost_usd), 0.0),
                 COUNT(*)
              FROM token_usage
              WHERE created_at >= ?1 AND created_at <= ?2",
             params![start_date, end_date],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         )
         .map_err(|e| e.to_string())?;
     
@@ -206,6 +247,9 @@ pub async fn get_usage_by_date_range(
                 COALESCE(SUM(prompt_tokens), 0),
                 COALESCE(SUM(completion_tokens), 0),
                 COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(estimated_cost_usd), 0.0),
                 COUNT(*)
              FROM token_usage
              WHERE created_at >= ?1 AND created_at <= ?2
@@ -222,7 +266,10 @@ pub async fn get_usage_by_date_range(
                 total_prompt_tokens: row.get(2)?,
                 total_completion_tokens: row.get(3)?,
                 total_tokens: row.get(4)?,
-                request_count: row.get(5)?,
+                total_cache_creation_tokens: row.get(5)?,
+                total_cache_read_tokens: row.get(6)?,
+                total_cost_usd: row.get(7)?,
+                request_count: row.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -233,6 +280,9 @@ pub async fn get_usage_by_date_range(
         total_prompt_tokens: total_prompt,
         total_completion_tokens: total_completion,
         total_tokens,
+        total_cache_creation_tokens: total_cache_creation,
+        total_cache_read_tokens: total_cache_read,
+        total_cost_usd: total_cost,
         total_requests,
         by_model,
     })
@@ -255,7 +305,9 @@ pub async fn get_recent_usage(app: AppHandle, limit: i32) -> Result<Vec<TokenUsa
     
     let mut stmt = conn
         .prepare(
-            "SELECT id, model, provider, prompt_tokens, completion_tokens, total_tokens, created_at
+            "SELECT id, model, provider, prompt_tokens, completion_tokens, total_tokens, 
+                    COALESCE(cache_creation_tokens, 0), COALESCE(cache_read_tokens, 0), 
+                    COALESCE(estimated_cost_usd, 0.0), created_at
              FROM token_usage
              ORDER BY created_at DESC
              LIMIT ?1"
@@ -271,7 +323,10 @@ pub async fn get_recent_usage(app: AppHandle, limit: i32) -> Result<Vec<TokenUsa
                 prompt_tokens: row.get(3)?,
                 completion_tokens: row.get(4)?,
                 total_tokens: row.get(5)?,
-                created_at: row.get(6)?,
+                cache_creation_tokens: row.get(6)?,
+                cache_read_tokens: row.get(7)?,
+                estimated_cost_usd: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?

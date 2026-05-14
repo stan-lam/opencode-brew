@@ -1202,6 +1202,21 @@ pub struct MarketMovers {
     pub most_active: Vec<StockQuote>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketIndex {
+    pub symbol: String,
+    pub name: String,
+    pub value: f64,
+    pub change: f64,
+    pub change_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketIndices {
+    pub indices: Vec<MarketIndex>,
+    pub timestamp: String,
+}
+
 // Helper to validate a stock quote result
 fn validate_quote(result: Result<StockQuote, String>, symbol: &str, source: &str) -> Option<StockQuote> {
     match result {
@@ -1242,12 +1257,13 @@ pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
     let source_timeout = Duration::from_secs(5);
     
     // Use a channel to receive results from parallel tasks
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Option<StockQuote>)>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Option<StockQuote>)>(5);
     
-    // Spawn all sources in parallel
+    // Spawn all sources in parallel - TradingView added as reliable source
     let sources = vec![
         ("Yahoo Finance", "yahoo"),
         ("Google Finance", "google"),
+        ("TradingView", "tradingview"),
         ("Stocktwits", "stocktwits"),
         ("MarketWatch", "marketwatch"),
     ];
@@ -1263,6 +1279,7 @@ pub async fn get_stock_quote(symbol: String) -> Result<StockQuote, String> {
             let result = match source_id.as_str() {
                 "yahoo" => timeout(source_timeout, fetch_yahoo_finance_quote(&client, &symbol)).await,
                 "google" => timeout(source_timeout, fetch_google_finance_quote(&client, &symbol)).await,
+                "tradingview" => timeout(source_timeout, fetch_tradingview_quote(&client, &symbol)).await,
                 "stocktwits" => timeout(source_timeout, fetch_stocktwits_quote(&client, &symbol)).await,
                 "marketwatch" => timeout(source_timeout, fetch_marketwatch_quote(&client, &symbol)).await,
                 _ => return,
@@ -1455,31 +1472,35 @@ async fn fetch_stocktwits_quote(client: &Client, symbol: &str) -> Result<StockQu
 
 fn parse_stocktwits_html(html: &str, symbol: &str) -> Result<StockQuote, String> {
     let mut price = 0.0;
-    let mut prev_close = 0.0;
+    let mut change = 0.0;
+    let mut change_percent = 0.0;
     let mut volume = 0u64;
     let mut name = symbol.to_string();
     
-    // Parse price - look for "Price" label followed by value like "$11.02"
-    if let Ok(re) = regex::Regex::new(r#"Price[^$]*\$(\d+\.?\d*)"#) {
+    // StockTwits displays data like: "$123.45" and "+$1.23 (+1.50%)" or "-$2.00 (-1.60%)"
+    // Parse price - look for the main price display (usually largest/first dollar amount)
+    if let Ok(re) = regex::Regex::new(r#"(?i)(?:price|last)[^$]*\$(\d{1,5}(?:,\d{3})*\.?\d*)"#) {
         if let Some(caps) = re.captures(html) {
             if let Some(m) = caps.get(1) {
-                if let Ok(p) = m.as_str().parse::<f64>() {
+                let price_str = m.as_str().replace(",", "");
+                if let Ok(p) = price_str.parse::<f64>() {
                     price = p;
-                    println!("[web::stocktwits] Parsed price: ${:.2}", price);
+                    println!("[web::stocktwits] Parsed price from label: ${:.2}", price);
                 }
             }
         }
     }
     
-    // Also try to find price in structured data format
+    // Fallback: find first reasonable price-like value
     if price == 0.0 {
-        if let Ok(re) = regex::Regex::new(r#"\$(\d+\.\d{2})"#) {
+        if let Ok(re) = regex::Regex::new(r#"\$(\d{1,5}(?:,\d{3})*\.\d{2})"#) {
             for caps in re.captures_iter(html) {
                 if let Some(m) = caps.get(1) {
-                    if let Ok(p) = m.as_str().parse::<f64>() {
-                        if p > 0.0 && p < 100000.0 {
+                    let price_str = m.as_str().replace(",", "");
+                    if let Ok(p) = price_str.parse::<f64>() {
+                        if p > 0.5 && p < 100000.0 {
                             price = p;
-                            println!("[web::stocktwits] Parsed price (alt): ${:.2}", price);
+                            println!("[web::stocktwits] Parsed price (first match): ${:.2}", price);
                             break;
                         }
                     }
@@ -1488,16 +1509,53 @@ fn parse_stocktwits_html(html: &str, symbol: &str) -> Result<StockQuote, String>
         }
     }
     
-    // Parse previous close - look for "Prev Close" followed by value
-    if let Ok(re) = regex::Regex::new(r#"Prev\s*Close[^$]*\$(\d+\.?\d*)"#) {
-        if let Some(caps) = re.captures(html) {
-            if let Some(m) = caps.get(1) {
-                if let Ok(p) = m.as_str().parse::<f64>() {
-                    prev_close = p;
-                    println!("[web::stocktwits] Parsed prev close: ${:.2}", prev_close);
+    // Parse change% DIRECTLY from displayed value like "(+5.32%)" or "(-3.45%)" or "+5.32%" or "-3.45%"
+    // This is more reliable than calculating from price/prev_close
+    if let Ok(re) = regex::Regex::new(r#"([+-])\s*(\d+\.?\d*)\s*%"#) {
+        for caps in re.captures_iter(html) {
+            if let (Some(sign), Some(pct)) = (caps.get(1), caps.get(2)) {
+                if let Ok(p) = pct.as_str().parse::<f64>() {
+                    if p > 0.0 && p < 100.0 {
+                        let sign_val = if sign.as_str() == "-" { -1.0 } else { 1.0 };
+                        change_percent = p * sign_val;
+                        println!("[web::stocktwits] Parsed change% directly: {:+.2}%", change_percent);
+                        break;
+                    }
                 }
             }
         }
+    }
+    
+    // Parse change amount directly like "+$1.23" or "-$2.00" or "(+$1.23)" 
+    if let Ok(re) = regex::Regex::new(r#"([+-])\s*\$(\d+\.?\d*)"#) {
+        for caps in re.captures_iter(html) {
+            if let (Some(sign), Some(amt)) = (caps.get(1), caps.get(2)) {
+                if let Ok(a) = amt.as_str().parse::<f64>() {
+                    if a > 0.0 && a < price.max(1000.0) {
+                        let sign_val = if sign.as_str() == "-" { -1.0 } else { 1.0 };
+                        change = a * sign_val;
+                        println!("[web::stocktwits] Parsed change$ directly: {:+.2}", change);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // If we have price and change but no change%, calculate it
+    if change_percent == 0.0 && change != 0.0 && price > 0.0 {
+        let prev = price - change;
+        if prev > 0.0 {
+            change_percent = (change / prev) * 100.0;
+            println!("[web::stocktwits] Calculated change%: {:+.2}%", change_percent);
+        }
+    }
+    
+    // If we have price and change% but no change, calculate it
+    if change == 0.0 && change_percent != 0.0 && price > 0.0 {
+        let prev = price / (1.0 + change_percent / 100.0);
+        change = price - prev;
+        println!("[web::stocktwits] Calculated change$: {:+.2}", change);
     }
     
     // Parse volume - look for "Volume" followed by value like "2.29M"
@@ -1518,35 +1576,34 @@ fn parse_stocktwits_html(html: &str, symbol: &str) -> Result<StockQuote, String>
         }
     }
     
-    // Try to get company name from page
-    if let Ok(re) = regex::Regex::new(&format!(r#"{}[^<]*([A-Za-z][A-Za-z\s,\.]+(?:Inc|Corp|Ltd|Co|LLC|LP)\.?)"#, symbol)) {
+    // Try to get company name from title tag first (most reliable)
+    if let Ok(re) = regex::Regex::new(r#"<title>\s*([^<:]+?)(?:\s*[-:|]|</title>)"#) {
         if let Some(caps) = re.captures(html) {
             if let Some(m) = caps.get(1) {
-                name = m.as_str().trim().to_string();
-                println!("[web::stocktwits] Parsed name: {}", name);
-            }
-        }
-    }
-    
-    // Also try title tag for name
-    if name == symbol {
-        if let Ok(re) = regex::Regex::new(r#"<title>([^:]+):"#) {
-            if let Some(caps) = re.captures(html) {
-                if let Some(m) = caps.get(1) {
-                    let title_name = m.as_str().trim();
-                    if !title_name.is_empty() && title_name != symbol {
-                        name = title_name.to_string();
-                    }
+                let title_name = m.as_str().trim();
+                if !title_name.is_empty() && 
+                   !title_name.eq_ignore_ascii_case(symbol) &&
+                   title_name.len() > 2 {
+                    name = title_name.to_string();
+                    println!("[web::stocktwits] Parsed name from title: {}", name);
                 }
             }
         }
     }
     
-    // Calculate change from price and prev_close
-    let change = if prev_close > 0.0 { price - prev_close } else { 0.0 };
-    let change_percent = if prev_close > 0.0 { (change / prev_close) * 100.0 } else { 0.0 };
+    // Fallback: try to find company name near symbol
+    if name == symbol {
+        if let Ok(re) = regex::Regex::new(&format!(r#"{}[^<]*?([A-Za-z][A-Za-z\s,\.]+(?:Inc|Corp|Ltd|Co|LLC|LP)\.?)"#, symbol)) {
+            if let Some(caps) = re.captures(html) {
+                if let Some(m) = caps.get(1) {
+                    name = m.as_str().trim().to_string();
+                    println!("[web::stocktwits] Parsed name from content: {}", name);
+                }
+            }
+        }
+    }
     
-    println!("[web::stocktwits] Calculated change: ${:.2} ({:.2}%)", change, change_percent);
+    println!("[web::stocktwits] Final: {} @ ${:.2} ({:+.2}%)", symbol, price, change_percent);
     
     if price > 0.0 {
         Ok(StockQuote {
@@ -1952,6 +2009,170 @@ async fn fetch_marketwatch_quote(client: &Client, symbol: &str) -> Result<StockQ
     }
 }
 
+async fn fetch_tradingview_quote(client: &Client, symbol: &str) -> Result<StockQuote, String> {
+    let symbol_upper = symbol.to_uppercase();
+    
+    // TradingView URL format: /symbols/EXCHANGE-SYMBOL/ 
+    // Try common US exchanges
+    let exchanges = ["NASDAQ", "NYSE", "AMEX", "NYSEARCA"];
+    
+    for exchange in &exchanges {
+        let url = format!("https://www.tradingview.com/symbols/{}-{}/", exchange, symbol_upper);
+        println!("[web::tradingview] Trying URL: {}", url);
+        
+        let response = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        
+        // Check if we got redirected somewhere else
+        let final_url = response.url().to_string().to_uppercase();
+        if !final_url.contains(&symbol_upper) {
+            println!("[web::tradingview] Redirected away from symbol: {}", final_url);
+            continue;
+        }
+        
+        if !response.status().is_success() {
+            continue;
+        }
+        
+        let html = match response.text().await {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        
+        // Verify we're on the right symbol page
+        let html_upper = html.to_uppercase();
+        if !html_upper.contains(&format!(">{}<", symbol_upper)) &&
+           !html_upper.contains(&format!("\"{}\"", symbol_upper)) {
+            println!("[web::tradingview] Page doesn't contain exact symbol {}", symbol_upper);
+            continue;
+        }
+        
+        // TradingView embeds data in JSON-LD or structured data
+        // Look for price patterns like "$123.45" near the symbol
+        let mut price = 0.0;
+        let mut change = 0.0;
+        let mut change_percent = 0.0;
+        let mut name = symbol_upper.clone();
+        
+        // Parse price from various TradingView patterns
+        // TradingView shows price prominently, look for large price values
+        if let Ok(re) = regex::Regex::new(r#"(?i)(?:last|price|close)[^$\d]*\$?(\d{1,5}(?:,\d{3})*\.?\d*)"#) {
+            if let Some(caps) = re.captures(&html) {
+                if let Some(m) = caps.get(1) {
+                    let price_str = m.as_str().replace(",", "");
+                    if let Ok(p) = price_str.parse::<f64>() {
+                        if p > 0.5 && p < 100000.0 {
+                            price = p;
+                            println!("[web::tradingview] Parsed price: ${:.2}", price);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback: find price-like values
+        if price == 0.0 {
+            if let Ok(re) = regex::Regex::new(r#"(\d{1,5}(?:,\d{3})*\.\d{2})"#) {
+                for caps in re.captures_iter(&html) {
+                    if let Some(m) = caps.get(1) {
+                        let price_str = m.as_str().replace(",", "");
+                        if let Ok(p) = price_str.parse::<f64>() {
+                            if p > 1.0 && p < 50000.0 {
+                                price = p;
+                                println!("[web::tradingview] Parsed price (fallback): ${:.2}", price);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Parse change% directly - TradingView shows like "+1.23%" or "−1.23%" (note: may use minus sign)
+        if let Ok(re) = regex::Regex::new(r#"([+\-−])(\d+\.?\d*)\s*%"#) {
+            for caps in re.captures_iter(&html) {
+                if let (Some(sign), Some(pct)) = (caps.get(1), caps.get(2)) {
+                    if let Ok(p) = pct.as_str().parse::<f64>() {
+                        if p > 0.0 && p < 50.0 {
+                            let sign_val = if sign.as_str() == "+" { 1.0 } else { -1.0 };
+                            change_percent = p * sign_val;
+                            println!("[web::tradingview] Parsed change%: {:+.2}%", change_percent);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Parse change amount
+        if let Ok(re) = regex::Regex::new(r#"([+\-−])\s*\$?(\d+\.?\d*)\s*(?:\(|USD)"#) {
+            for caps in re.captures_iter(&html) {
+                if let (Some(sign), Some(amt)) = (caps.get(1), caps.get(2)) {
+                    if let Ok(a) = amt.as_str().parse::<f64>() {
+                        if a > 0.0 && a < price.max(100.0) {
+                            let sign_val = if sign.as_str() == "+" { 1.0 } else { -1.0 };
+                            change = a * sign_val;
+                            println!("[web::tradingview] Parsed change$: {:+.2}", change);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Calculate missing values
+        if change_percent == 0.0 && change != 0.0 && price > 0.0 {
+            let prev = price - change;
+            if prev > 0.0 {
+                change_percent = (change / prev) * 100.0;
+            }
+        }
+        if change == 0.0 && change_percent != 0.0 && price > 0.0 {
+            let prev = price / (1.0 + change_percent / 100.0);
+            change = price - prev;
+        }
+        
+        // Get company name from title
+        if let Ok(re) = regex::Regex::new(r#"<title>([^<|]+)"#) {
+            if let Some(caps) = re.captures(&html) {
+                if let Some(m) = caps.get(1) {
+                    let title = m.as_str().trim();
+                    // Clean up title - often like "AAPL Stock Price — Apple Inc"
+                    if let Some(name_part) = title.split("Stock Price").next() {
+                        let clean_name = name_part.trim().trim_end_matches('—').trim();
+                        if !clean_name.is_empty() && clean_name.len() > symbol_upper.len() {
+                            name = clean_name.to_string();
+                        }
+                    } else if let Some(name_part) = title.split('|').next() {
+                        let clean_name = name_part.trim();
+                        if !clean_name.is_empty() && clean_name.len() > symbol_upper.len() {
+                            name = clean_name.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        if price > 0.0 {
+            println!("[web::tradingview] Success: {} ({}) @ ${:.2} ({:+.2}%)", 
+                symbol_upper, name, price, change_percent);
+            return Ok(StockQuote {
+                symbol: symbol_upper,
+                name,
+                price,
+                change,
+                change_percent,
+                volume: 0,
+                market_cap: None,
+            });
+        }
+    }
+    
+    Err(format!("Could not fetch TradingView data for {}", symbol))
+}
+
 // Get market movers from Stocktwits (trending) + MarketWatch (gainers/losers)
 // Then enrich with actual prices from Google Finance
 #[command]
@@ -2043,6 +2264,10 @@ pub async fn get_market_movers() -> Result<MarketMovers, String> {
     gainers.retain(|s| s.price > 0.0);
     losers.retain(|s| s.price > 0.0);
     most_active.retain(|s| s.price > 0.0);
+
+    // Re-validate mover buckets after enrichment (quotes can flip direction)
+    gainers.retain(|s| s.change_percent > 0.0);
+    losers.retain(|s| s.change_percent < 0.0);
     
     // Sort by change percent
     gainers.sort_by(|a, b| b.change_percent.partial_cmp(&a.change_percent).unwrap_or(std::cmp::Ordering::Equal));
@@ -2065,6 +2290,144 @@ pub async fn get_market_movers() -> Result<MarketMovers, String> {
         losers,
         most_active,
     })
+}
+
+#[command]
+pub async fn get_market_indices() -> Result<MarketIndices, String> {
+    let client = create_client()?;
+    
+    println!("[web::get_market_indices] Fetching major market indices");
+    
+    // Define major indices with their Google Finance identifiers
+    let indices_config = vec![
+        (".DJI", "INDEXDJX", "Dow Jones Industrial Average"),
+        (".INX", "INDEXSP", "S&P 500"),
+        (".IXIC", "INDEXNASDAQ", "Nasdaq Composite"),
+        ("RUT", "INDEXRUSSELL", "Russell 2000"),
+    ];
+    
+    let mut indices = Vec::new();
+    
+    for (symbol, exchange, name) in indices_config {
+        let url = format!("https://www.google.com/finance/quote/{}:{}", symbol, exchange);
+        println!("[web::indices] Fetching {}: {}", name, url);
+        
+        match client.get(&url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    if let Ok(html) = response.text().await {
+                        if let Some(index) = parse_google_finance_index(&html, symbol, name) {
+                            println!("[web::indices] Got {}: {:.2} ({:+.2}%)", 
+                                name, index.value, index.change_percent);
+                            indices.push(index);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[web::indices] Failed to fetch {}: {}", name, e);
+            }
+        }
+        
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    
+    // If Google failed, try MarketWatch as fallback
+    if indices.is_empty() {
+        println!("[web::indices] Google failed, trying MarketWatch...");
+        if let Ok(mw_indices) = fetch_marketwatch_indices(&client).await {
+            indices = mw_indices;
+        }
+    }
+    
+    if indices.is_empty() {
+        return Err("Unable to fetch market indices. Please try again later.".to_string());
+    }
+    
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    
+    Ok(MarketIndices { indices, timestamp })
+}
+
+fn parse_google_finance_index(html: &str, symbol: &str, name: &str) -> Option<MarketIndex> {
+    let document = Html::parse_document(html);
+    
+    // Try data attributes first (most reliable)
+    let price_selector = Selector::parse("[data-last-price]").ok()?;
+    let value = document.select(&price_selector)
+        .next()
+        .and_then(|el| el.value().attr("data-last-price"))
+        .and_then(|p| p.parse::<f64>().ok())?;
+    
+    // Get change and change percent
+    let change_selector = Selector::parse("[data-price-change]").ok()?;
+    let change = document.select(&change_selector)
+        .next()
+        .and_then(|el| el.value().attr("data-price-change"))
+        .and_then(|c| c.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    
+    let pct_selector = Selector::parse("[data-price-change-percent]").ok()?;
+    let change_percent = document.select(&pct_selector)
+        .next()
+        .and_then(|el| el.value().attr("data-price-change-percent"))
+        .and_then(|p| p.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    
+    Some(MarketIndex {
+        symbol: symbol.to_string(),
+        name: name.to_string(),
+        value,
+        change,
+        change_percent,
+    })
+}
+
+async fn fetch_marketwatch_indices(client: &Client) -> Result<Vec<MarketIndex>, String> {
+    let url = "https://www.marketwatch.com/";
+    
+    let response = client.get(url).send().await
+        .map_err(|e| format!("MarketWatch request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("MarketWatch returned status: {}", response.status()));
+    }
+    
+    let html = response.text().await
+        .map_err(|e| format!("Failed to read MarketWatch response: {}", e))?;
+    
+    let document = Html::parse_document(&html);
+    let mut indices = Vec::new();
+    
+    // MarketWatch homepage has index data in specific elements
+    // Try to find index tickers in the markets bar
+    let index_names = [
+        ("DJIA", "Dow Jones Industrial Average"),
+        ("S&P 500", "S&P 500"),
+        ("NASDAQ", "Nasdaq Composite"),
+    ];
+    
+    for (short_name, full_name) in &index_names {
+        // Try to find the index value using various selectors
+        let ticker_selector = Selector::parse(&format!("[data-ticker='{}']", short_name)).ok();
+        
+        if let Some(selector) = ticker_selector {
+            if let Some(el) = document.select(&selector).next() {
+                let value_str = el.text().collect::<String>();
+                if let Ok(value) = value_str.replace(",", "").trim().parse::<f64>() {
+                    indices.push(MarketIndex {
+                        symbol: short_name.to_string(),
+                        name: full_name.to_string(),
+                        value,
+                        change: 0.0,
+                        change_percent: 0.0,
+                    });
+                }
+            }
+        }
+    }
+    
+    Ok(indices)
 }
 
 async fn fetch_marketwatch_movers(client: &Client, category: &str) -> Result<Vec<StockQuote>, String> {
