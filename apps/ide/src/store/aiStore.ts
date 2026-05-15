@@ -111,6 +111,7 @@ interface AIState {
   activeConversation: AIConversation | null;
   isStreaming: boolean;
   thinkingStatus: string | null;
+  streamContinuationPending: boolean;
   availableModels: Record<AIProvider, string[]>;
   copilotVisionModels: string[];
   currentWorkspacePath: string | null;
@@ -142,7 +143,8 @@ interface AIState {
   sendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
   queuePrompt: (content: string) => void;
   clearQueue: () => void;
-  stopStreaming: () => void;
+  stopStreaming: (reason?: string) => void;
+  finalizeStreaming: () => void;
   clearConversation: () => void;
   refreshAvailableModels: () => Promise<void>;
   loadWorkspaceHistory: (workspacePath: string) => Promise<void>;
@@ -161,6 +163,15 @@ interface AIState {
 }
 
 const AI_HISTORY_FILE = 'ai-history.json';
+const ENABLE_HISTORY_SAVE = false;
+const SAVE_HISTORY_DEBOUNCE_MS = 2000;
+const MIN_SAVE_INTERVAL_MS = 8000;
+const STREAM_IDLE_TIMEOUT_MS = 90000;
+const STREAM_COMPLETION_TIMEOUT_MS = 12000;
+let saveHistoryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let saveHistoryInFlight = false;
+let saveHistoryQueued = false;
+let lastHistorySaveAt = 0;
 
 /**
  * Converts a workspace filesystem path into a safe directory name by replacing
@@ -257,12 +268,36 @@ async function saveHistoryToFile(workspacePath: string, conversations: AIConvers
     console.log('Saving AI history to:', storageDir);
     await ensureStorageDir(storageDir);
     const historyPath = `${storageDir}/${AI_HISTORY_FILE}`;
+    const MAX_MESSAGES_PER_CONVERSATION = 200;
+    const MAX_MESSAGE_LENGTH = 20000;
+
+    const sanitizeMessage = (message: AIMessage): AIMessage => {
+      const trimmedContent = message.content.length > MAX_MESSAGE_LENGTH
+        ? `${message.content.slice(0, MAX_MESSAGE_LENGTH)}\n... [truncated]`
+        : message.content;
+      const attachments = message.attachments?.map((attachment) => ({
+        ...attachment,
+        data: undefined,
+      }));
+      return {
+        ...message,
+        content: trimmedContent,
+        attachments,
+      };
+    };
+
+    const sanitizedConversations = conversations.map((conversation) => ({
+      ...conversation,
+      messages: conversation.messages
+        .slice(-MAX_MESSAGES_PER_CONVERSATION)
+        .map(sanitizeMessage),
+    }));
     const data = {
       version: 1,
       savedAt: new Date().toISOString(),
-      conversations,
+      conversations: sanitizedConversations,
     };
-    await fs.writeFile(historyPath, JSON.stringify(data, null, 2));
+    await fs.writeFileBackground(historyPath, JSON.stringify(data));
     console.log('AI history saved successfully to:', historyPath);
   } catch (error) {
     console.error('Could not save AI history:', error);
@@ -424,6 +459,10 @@ async function executeFileReadOperations(
   workspacePath: string
 ): Promise<string> {
   const results: string[] = [];
+  console.log('[aiStore] executeFileReadOperations start', {
+    count: operations.length,
+    workspacePath,
+  });
   
   // Helper to detect language from file extension
   const getLang = (filePath: string): string => {
@@ -444,6 +483,7 @@ async function executeFileReadOperations(
   for (const op of operations) {
     try {
       if (op.type === 'read_file' && op.path) {
+        console.log('[aiStore] read_file op', { path: op.path });
         const fullPath = op.path.startsWith('/') 
           ? op.path 
           : `${workspacePath}/${op.path}`;
@@ -460,6 +500,7 @@ async function executeFileReadOperations(
         
         results.push(`**File: \`${op.path}\`**\n\`\`\`${lang}\n${truncatedContent}\n\`\`\``);
       } else if (op.type === 'search_files' && op.pattern) {
+        console.log('[aiStore] search_files op', { pattern: op.pattern });
         console.log(`[aiStore] Searching files for pattern: ${op.pattern}`);
         
         const { invoke } = await import('@tauri-apps/api/core');
@@ -527,6 +568,9 @@ async function executeFileReadOperations(
     }
   }
   
+  console.log('[aiStore] executeFileReadOperations complete', {
+    resultLen: results.join('\n\n---\n\n').length,
+  });
   return results.join('\n\n---\n\n');
 }
 
@@ -1019,7 +1063,7 @@ const defaultConfig: AIProviderConfig = {
   copilotClientId: '',
   copilotUsageOrg: '',
   temperature: 0.7,
-  maxTokens: 4096,
+  maxTokens: 8192,
   systemPrompt: `You are an expert coding assistant integrated into the OpenCodeBrew code editor.
 
 **🚨 ZERO HALLUCINATION POLICY 🚨**
@@ -1134,6 +1178,7 @@ export const useAIStore = create<AIState>()(
       activeConversation: null,
       isStreaming: false,
       thinkingStatus: null,
+      streamContinuationPending: false,
       currentWorkspacePath: null,
       promptQueue: [],
       agentMode: 'chat',
@@ -1267,10 +1312,58 @@ export const useAIStore = create<AIState>()(
       },
 
       saveWorkspaceHistory: async () => {
-        const { currentWorkspacePath, conversations } = get();
-        if (currentWorkspacePath) {
-          await saveHistoryToFile(currentWorkspacePath, conversations);
+        if (!ENABLE_HISTORY_SAVE) {
+          return;
         }
+        if (saveHistoryDebounceTimer) {
+          clearTimeout(saveHistoryDebounceTimer);
+        }
+
+        saveHistoryDebounceTimer = setTimeout(() => {
+          saveHistoryDebounceTimer = null;
+
+          const now = Date.now();
+          if (now - lastHistorySaveAt < MIN_SAVE_INTERVAL_MS) {
+            saveHistoryQueued = true;
+            return;
+          }
+
+          const runSave = async () => {
+            if (saveHistoryInFlight) {
+              saveHistoryQueued = true;
+              return;
+            }
+
+            const { currentWorkspacePath, conversations } = get();
+            if (!currentWorkspacePath) return;
+
+            saveHistoryInFlight = true;
+            try {
+              await saveHistoryToFile(currentWorkspacePath, conversations);
+              lastHistorySaveAt = Date.now();
+            } finally {
+              saveHistoryInFlight = false;
+              if (saveHistoryQueued) {
+                saveHistoryQueued = false;
+                get().saveWorkspaceHistory();
+              }
+            }
+          };
+
+          if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(() => {
+              runSave().catch((error) =>
+                console.error('Failed to save AI history (idle):', error)
+              );
+            }, { timeout: 5000 });
+          } else {
+            setTimeout(() => {
+              runSave().catch((error) =>
+                console.error('Failed to save AI history (timeout):', error)
+              );
+            }, 0);
+          }
+        }, SAVE_HISTORY_DEBOUNCE_MS);
       },
 
       createConversation: () => {
@@ -1314,6 +1407,12 @@ export const useAIStore = create<AIState>()(
         }
         
         if (!conversation) return;
+        console.log('[aiStore] sendMessage start', {
+          conversationId: conversation.id,
+          contentLen: content.length,
+          attachments: attachments?.length ?? 0,
+          agentMode: get().agentMode,
+        });
 
         // Get context from editor store
         const { useEditorStore } = await import('./editorStore');
@@ -1473,6 +1572,55 @@ export const useAIStore = create<AIState>()(
           };
         });
 
+        let responseContent = '';
+        const conversationId = conversation.id;
+        let autoContinueCount = 0;
+        const MAX_AUTO_CONTINUES = 3;
+        let streamTimeoutId: ReturnType<typeof setTimeout> | null = null;
+        let completionTimeoutId: ReturnType<typeof setTimeout> | null = null;
+        let completionTimeoutTriggered = false;
+
+        const clearStreamTimeout = () => {
+          if (streamTimeoutId) {
+            clearTimeout(streamTimeoutId);
+            streamTimeoutId = null;
+          }
+        };
+
+        const resetStreamTimeout = () => {
+          clearStreamTimeout();
+          streamTimeoutId = setTimeout(() => {
+            console.warn('[aiStore] Stream stalled; stopping generation (idle-timeout).');
+            clearStreamTimeout();
+            if (get().isStreaming) {
+              get().stopStreaming('idle-timeout');
+            }
+          }, STREAM_IDLE_TIMEOUT_MS);
+        };
+
+        const clearCompletionTimeout = () => {
+          if (completionTimeoutId) {
+            clearTimeout(completionTimeoutId);
+            completionTimeoutId = null;
+          }
+        };
+
+        const resetCompletionTimeout = () => {
+          clearCompletionTimeout();
+          if (completionTimeoutTriggered) return;
+          completionTimeoutId = setTimeout(() => {
+            if (!get().isStreaming || responseContent.trim().length === 0) {
+              return;
+            }
+            completionTimeoutTriggered = true;
+            console.warn('[aiStore] stream completion timeout; finalizing', {
+              conversationId,
+              contentLen: responseContent.length,
+            });
+            get().finalizeStreaming();
+          }, STREAM_COMPLETION_TIMEOUT_MS);
+        };
+
         try {
           const { ai } = await import('../services/tauri');
           
@@ -1526,13 +1674,69 @@ export const useAIStore = create<AIState>()(
             message.attachments?.some((attachment) => attachment.type === 'image')
           );
 
-          let responseContent = '';
-          const conversationId = conversation.id;
+          
+
+          const shouldAutoContinue = (text: string): boolean => {
+            const trimmed = text.trim();
+            if (!trimmed) return false;
+            const lower = trimmed.toLowerCase();
+            const hasToolTags = /<\w+[^>]*>/i.test(trimmed);
+            const endsWithSuspense = trimmed.endsWith('...') || /[,:]$/.test(trimmed);
+            const shortResponse = trimmed.length < 700;
+            const mediumResponse = trimmed.length < 1500;
+            const longResponse = trimmed.length < 5000;
+            
+            // Check if the last sentence contains an action phrase (indicates unfinished intent)
+            const sentences = trimmed.split(/[.!?]\s+/);
+            const lastSentence = sentences[sentences.length - 1]?.toLowerCase() || '';
+            const lastSentenceHasAction = /(let me|i need to|i should|i will|i'll|let's|i want to|looking at|checking|searching|reading)\b/i.test(lastSentence);
+            
+            // Check if response ends with a forward-looking statement
+            const endsWithIntent = /(to understand|to see|to check|to look|to find|to get|to analyze|the full picture|more context)\s*[.!]?\s*$/i.test(trimmed);
+            
+            // Check if response ends with a numbered/bulleted plan list (indicates plan without execution)
+            const endsWithPlanList = /\n\s*\d+\.\s+[^\n]+\s*$/m.test(trimmed) && 
+              /(i'll need to|i need to|here's what|the plan|steps|tasks|to do):/i.test(lower);
+            
+            // Check if response ends with a clear action statement (any length)
+            const endsWithActionStatement = /(let me (search|look|check|read|examine|find|analyze|explore|investigate|see|get|fetch|review)[^.]*[.!]?\s*$)/i.test(trimmed);
+            
+            // Check if response was truncated mid-sentence (ends with incomplete word patterns)
+            const endsWithTruncation = /\s(to|for|with|and|or|the|a|an|is|are|was|were|be|been|being|have|has|had|will|would|could|should|can|may|might|must|shall|in|on|at|by|from|into|that|which|who|whom|whose|this|these|those|it|its|if|then|but|so|as|of)\s*$/i.test(trimmed) ||
+              /[,(]\s*$/.test(trimmed) ||
+              /\w+-\s*$/.test(trimmed);
+            
+            console.log('[aiStore] shouldAutoContinue check', {
+              textLen: trimmed.length,
+              lastSentence: lastSentence.slice(0, 100),
+              endsWithSuspense,
+              shortResponse,
+              mediumResponse,
+              longResponse,
+              lastSentenceHasAction,
+              endsWithIntent,
+              endsWithPlanList,
+              endsWithActionStatement,
+              endsWithTruncation,
+              hasToolTags,
+            });
+            
+            if (endsWithSuspense && shortResponse) return true;
+            if (lastSentenceHasAction && mediumResponse && !hasToolTags) return true;
+            if (endsWithIntent && mediumResponse && !hasToolTags) return true;
+            if (endsWithPlanList && longResponse && !hasToolTags) return true;
+            if (endsWithActionStatement && !hasToolTags) return true;
+            if (endsWithTruncation) return true;
+            return false;
+          };
+
           
           // Set up streaming listener
           let hasStartedStreaming = false;
           const unlisten = await ai.onStreamChunk(conversationId, (chunk) => {
+            resetStreamTimeout();
             if (chunk.content) {
+              resetCompletionTimeout();
               // Clear thinking status once we start receiving content
               if (!hasStartedStreaming) {
                 hasStartedStreaming = true;
@@ -1588,11 +1792,22 @@ export const useAIStore = create<AIState>()(
             }
             
             if (chunk.done) {
+              clearStreamTimeout();
+              clearCompletionTimeout();
+              console.log('[aiStore] stream done', {
+                conversationId,
+                contentLen: responseContent.length,
+              });
               // Check for web operations in the response (all modes)
               const { agentMode: currentMode } = get();
               const webOps = parseWebOperations(responseContent);
               
               if (webOps.length > 0) {
+                set({ streamContinuationPending: true });
+                console.log('[aiStore] web operations detected', {
+                  conversationId,
+                  count: webOps.length,
+                });
                 // Clean web operation tags from the displayed content
                 const cleanedContent = cleanWebOperationTags(responseContent);
                 
@@ -1673,6 +1888,7 @@ export const useAIStore = create<AIState>()(
                     if (!conv) {
                       // Fallback: append results directly
                       appendWebResultsToMessage(webResults);
+                      set({ streamContinuationPending: false });
                       set({ isStreaming: false, thinkingStatus: null });
                       get().clearWebAccessTraces();
                       get().saveWorkspaceHistory();
@@ -1700,8 +1916,17 @@ export const useAIStore = create<AIState>()(
                     // Set up listener for continuation with timeout
                     const timeoutMs = 15000;
                     let timeoutId: ReturnType<typeof setTimeout>;
+                    let contUnlisten: (() => void) | null = null;
+                    let contListenerTimeoutId: ReturnType<typeof setTimeout> | null = null;
                     
-                    const contUnlisten = await ai.onStreamChunk(conversationId, (contChunk) => {
+                    console.log('[aiStore] web continuation listen setup', { conversationId });
+                    contListenerTimeoutId = setTimeout(() => {
+                      if (!contUnlisten) {
+                        console.warn('[aiStore] web continuation listener not ready after 2s', { conversationId });
+                      }
+                    }, 2000);
+
+                    ai.onStreamChunk(conversationId, (contChunk) => {
                       if (contChunk.content) {
                         hasReceivedContent = true;
                         clearTimeout(timeoutId);
@@ -1742,9 +1967,13 @@ export const useAIStore = create<AIState>()(
                         if (!hasReceivedContent) {
                           appendWebResultsToMessage(webResults);
                         }
+                        set({ streamContinuationPending: false });
                         set({ isStreaming: false, thinkingStatus: null });
                         get().clearWebAccessTraces();
                         get().saveWorkspaceHistory();
+                        if (contUnlisten) {
+                          contUnlisten();
+                        }
                         
                         // Advance agent task if needed
                         const { agentTasks, agentTaskIndex } = get();
@@ -1752,6 +1981,15 @@ export const useAIStore = create<AIState>()(
                           get().advanceAgentTask();
                         }
                       }
+                    }).then((unlisten) => {
+                      contUnlisten = unlisten;
+                      if (contListenerTimeoutId) {
+                        clearTimeout(contListenerTimeoutId);
+                        contListenerTimeoutId = null;
+                      }
+                      console.log('[aiStore] web continuation listener ready', { conversationId });
+                    }).catch((error) => {
+                      console.error('[aiStore] web continuation listener failed', error);
                     });
                     
                     // Set timeout to fallback to direct append if continuation takes too long
@@ -1759,15 +1997,22 @@ export const useAIStore = create<AIState>()(
                       if (!hasReceivedContent) {
                         console.log('[aiStore] Continuation timeout, appending results directly');
                         appendWebResultsToMessage(webResults);
+                        set({ streamContinuationPending: false });
                         set({ isStreaming: false, thinkingStatus: null });
                         get().clearWebAccessTraces();
                         get().saveWorkspaceHistory();
-                        contUnlisten();
+                        if (contUnlisten) {
+                          contUnlisten();
+                        }
                       }
                     }, timeoutMs);
                     
                     // Make continuation API call
                     if (config.provider === 'ollama') {
+                      console.log('[aiStore] web continuation request', {
+                        conversationId,
+                        provider: 'ollama',
+                      });
                       await ai.chatOllama(
                         config.baseUrl || 'http://localhost:11434',
                         config.model,
@@ -1777,6 +2022,10 @@ export const useAIStore = create<AIState>()(
                         conversationId
                       );
                     } else if (config.provider === 'copilot') {
+                      console.log('[aiStore] web continuation request', {
+                        conversationId,
+                        provider: 'copilot',
+                      });
                       await ai.chatCopilot(
                         config.model,
                         continuationMessages,
@@ -1791,6 +2040,10 @@ export const useAIStore = create<AIState>()(
                         ? 'https://api.anthropic.com/v1'
                         : config.baseUrl || '';
                       
+                      console.log('[aiStore] web continuation request', {
+                        conversationId,
+                        provider: config.provider,
+                      });
                       await ai.chatOpenAI(
                         baseUrl,
                         config.apiKey || '',
@@ -1803,17 +2056,22 @@ export const useAIStore = create<AIState>()(
                     }
                     
                     clearTimeout(timeoutId);
-                    contUnlisten();
+                    const unlistenFn = contUnlisten as (() => void) | null;
+                    if (unlistenFn) {
+                      unlistenFn();
+                    }
                   } catch (error) {
                     console.error('[aiStore] Web continuation failed:', error);
                     // Fallback: append web results directly to message
                     appendWebResultsToMessage(webResults);
+                    set({ streamContinuationPending: false });
                     set({ isStreaming: false, thinkingStatus: null });
                     get().clearWebAccessTraces();
                     get().saveWorkspaceHistory();
                   }
                 }).catch((error) => {
                   console.error('[aiStore] Web operations failed:', error);
+                  set({ streamContinuationPending: false });
                   set({ isStreaming: false, thinkingStatus: null });
                   get().clearWebAccessTraces();
                   get().saveWorkspaceHistory();
@@ -1824,6 +2082,11 @@ export const useAIStore = create<AIState>()(
                 const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath;
                 
                 if (fileReadOps.length > 0 && workspacePath && currentMode === 'agent') {
+                  set({ streamContinuationPending: true });
+                  console.log('[aiStore] file read operations detected', {
+                    conversationId,
+                    count: fileReadOps.length,
+                  });
                   // Clean read_file tags from the displayed content
                   const cleanedContent = cleanFileReadOperationTags(responseContent);
                   
@@ -1853,15 +2116,32 @@ export const useAIStore = create<AIState>()(
                   });
                   
                   set({ thinkingStatus: `Reading ${fileReadOps.length} file(s)...` });
+                  console.log('[aiStore] file read continuation start', {
+                    conversationId,
+                    count: fileReadOps.length,
+                    workspacePath,
+                  });
                   
                   // Execute file read operations
                   executeFileReadOperations(fileReadOps, workspacePath).then(async (fileContents) => {
                     set({ thinkingStatus: 'Processing file contents...' });
+                    console.log('[aiStore] file read continuation payload', {
+                      conversationId,
+                      contentLen: fileContents.length,
+                    });
                     
                     try {
                       const { ai } = await import('../services/tauri');
                       const conv = get().activeConversation;
+                      console.log('[aiStore] file read continuation prepare', {
+                        conversationId,
+                        hasConversation: Boolean(conv),
+                      });
                       if (!conv) {
+                        console.warn('[aiStore] file read continuation aborted: no active conversation', {
+                          conversationId,
+                        });
+                        set({ streamContinuationPending: false });
                         set({ isStreaming: false, thinkingStatus: null });
                         get().saveWorkspaceHistory();
                         return;
@@ -1883,10 +2163,35 @@ export const useAIStore = create<AIState>()(
                       
                       // Track content for the continuation
                       let continuationContent = cleanedContent ? cleanedContent.trim() + '\n\n' : '';
+                      let continuationFirstChunk = false;
+                      let continuationNoChunkTimeoutId: ReturnType<typeof setTimeout> | null = null;
                       
                       // Set up listener for continuation
-                      const contUnlisten = await ai.onStreamChunk(conversationId, (contChunk) => {
+                      console.log('[aiStore] file read continuation listen setup', {
+                        conversationId,
+                      });
+                      let contUnlisten: (() => void) | null = null;
+                      let contListenerTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+                      contListenerTimeoutId = setTimeout(() => {
+                        if (!contUnlisten) {
+                          console.warn('[aiStore] file read continuation listener not ready after 2s', { conversationId });
+                        }
+                      }, 2000);
+
+                      ai.onStreamChunk(conversationId, (contChunk) => {
                         if (contChunk.content) {
+                          if (!continuationFirstChunk) {
+                            continuationFirstChunk = true;
+                            console.log('[aiStore] file read continuation first chunk', {
+                              conversationId,
+                              chunkLen: contChunk.content.length,
+                            });
+                            if (continuationNoChunkTimeoutId) {
+                              clearTimeout(continuationNoChunkTimeoutId);
+                              continuationNoChunkTimeoutId = null;
+                            }
+                          }
                           continuationContent += contChunk.content;
                           
                           // Clean any file read tags from continuation content
@@ -1919,13 +2224,29 @@ export const useAIStore = create<AIState>()(
                         }
                         
                         if (contChunk.done) {
+                          set({ streamContinuationPending: false });
                           set({ isStreaming: false, thinkingStatus: null });
                           get().saveWorkspaceHistory();
+                          if (contUnlisten) {
+                            contUnlisten();
+                          }
                           
                           // Advance agent task if needed
                           const { agentTasks, agentTaskIndex } = get();
                           if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
                             get().advanceAgentTask();
+                          }
+                          
+                          // Check for auto-continue after continuation completes
+                          const currentConv = get().activeConversation;
+                          if (currentConv) {
+                            const lastMsg = currentConv.messages[currentConv.messages.length - 1];
+                            const contResponseContent = lastMsg?.role === 'assistant' ? lastMsg.content : '';
+                            if (autoContinueCount < MAX_AUTO_CONTINUES && shouldAutoContinue(contResponseContent)) {
+                              autoContinueCount++;
+                              console.log('[aiStore] auto-continue queued after continuation', { conversationId, attempt: autoContinueCount, max: MAX_AUTO_CONTINUES });
+                              get().queuePrompt('Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.');
+                            }
                           }
                           
                           // Process next queued prompt if any
@@ -1936,10 +2257,30 @@ export const useAIStore = create<AIState>()(
                             setTimeout(() => get().sendMessage(nextPrompt), 100);
                           }
                         }
+                      }).then((unlisten) => {
+                        contUnlisten = unlisten;
+                        if (contListenerTimeoutId) {
+                          clearTimeout(contListenerTimeoutId);
+                          contListenerTimeoutId = null;
+                        }
+                        console.log('[aiStore] file read continuation listener ready', { conversationId });
+                      }).catch((error) => {
+                        console.error('[aiStore] file read continuation listener failed', error);
                       });
                       
                       // Make continuation API call
                       if (config.provider === 'ollama') {
+                        console.log('[aiStore] file read continuation request', {
+                          conversationId,
+                          provider: 'ollama',
+                        });
+                        continuationNoChunkTimeoutId = setTimeout(() => {
+                          if (!continuationFirstChunk) {
+                            console.warn('[aiStore] file read continuation no chunks after 8s', {
+                              conversationId,
+                            });
+                          }
+                        }, 8000);
                         await ai.chatOllama(
                           config.baseUrl || 'http://localhost:11434',
                           config.model,
@@ -1949,6 +2290,17 @@ export const useAIStore = create<AIState>()(
                           conversationId
                         );
                       } else if (config.provider === 'copilot') {
+                        console.log('[aiStore] file read continuation request', {
+                          conversationId,
+                          provider: 'copilot',
+                        });
+                        continuationNoChunkTimeoutId = setTimeout(() => {
+                          if (!continuationFirstChunk) {
+                            console.warn('[aiStore] file read continuation no chunks after 8s', {
+                              conversationId,
+                            });
+                          }
+                        }, 8000);
                         await ai.chatCopilot(
                           config.model,
                           continuationMessages,
@@ -1963,6 +2315,17 @@ export const useAIStore = create<AIState>()(
                           ? 'https://api.anthropic.com/v1'
                           : config.baseUrl || '';
                         
+                        console.log('[aiStore] file read continuation request', {
+                          conversationId,
+                          provider: config.provider,
+                        });
+                        continuationNoChunkTimeoutId = setTimeout(() => {
+                          if (!continuationFirstChunk) {
+                            console.warn('[aiStore] file read continuation no chunks after 8s', {
+                              conversationId,
+                            });
+                          }
+                        }, 8000);
                         await ai.chatOpenAI(
                           baseUrl,
                           config.apiKey || '',
@@ -1973,19 +2336,29 @@ export const useAIStore = create<AIState>()(
                           conversationId
                         );
                       }
+                      if (continuationNoChunkTimeoutId) {
+                        clearTimeout(continuationNoChunkTimeoutId);
+                        continuationNoChunkTimeoutId = null;
+                      }
                       
-                      contUnlisten();
+                      const unlistenFn = contUnlisten as (() => void) | null;
+                      if (unlistenFn) {
+                        unlistenFn();
+                      }
                     } catch (error) {
                       console.error('[aiStore] File read continuation failed:', error);
+                      set({ streamContinuationPending: false });
                       set({ isStreaming: false, thinkingStatus: null });
                       get().saveWorkspaceHistory();
                     }
                   }).catch((error) => {
                     console.error('[aiStore] File read operations failed:', error);
+                    set({ streamContinuationPending: false });
                     set({ isStreaming: false, thinkingStatus: null });
                     get().saveWorkspaceHistory();
                   });
                 } else {
+                  set({ streamContinuationPending: false });
                   set({ isStreaming: false, thinkingStatus: null });
                   // Auto-save when streaming completes
                   get().saveWorkspaceHistory();
@@ -1994,6 +2367,12 @@ export const useAIStore = create<AIState>()(
                   const { agentTasks, agentTaskIndex } = get();
                   if (currentMode === 'agent' && agentTasks.length > 0 && agentTaskIndex >= 0) {
                     get().advanceAgentTask();
+                  }
+
+                  if (autoContinueCount < MAX_AUTO_CONTINUES && shouldAutoContinue(responseContent)) {
+                    autoContinueCount++;
+                    console.log('[aiStore] auto-continue queued', { conversationId, attempt: autoContinueCount, max: MAX_AUTO_CONTINUES });
+                    get().queuePrompt('Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.');
                   }
 
                   // Process next queued prompt if any
@@ -2015,6 +2394,7 @@ export const useAIStore = create<AIState>()(
             ? 'GitHub Copilot'
             : config.provider;
           set({ thinkingStatus: `Connecting to ${providerLabel}...` });
+          resetStreamTimeout();
 
           let copilotModel = config.model;
           if (config.provider === 'copilot') {
@@ -2115,9 +2495,13 @@ export const useAIStore = create<AIState>()(
 
           // Cleanup listener
           unlisten();
+          clearStreamTimeout();
+          clearCompletionTimeout();
           set({ isStreaming: false, thinkingStatus: null });
           
         } catch (error) {
+          clearStreamTimeout();
+          clearCompletionTimeout();
           const errorText = formatAIError(error);
           console.error('Failed to send message:', errorText);
           
@@ -2168,6 +2552,7 @@ export const useAIStore = create<AIState>()(
       },
 
       queuePrompt: (content: string) => {
+        console.log('[aiStore] queuePrompt', { contentLen: content.length });
         set((state) => ({
           promptQueue: [...state.promptQueue, content],
         }));
@@ -2177,12 +2562,28 @@ export const useAIStore = create<AIState>()(
         set({ promptQueue: [] });
       },
 
-      stopStreaming: () => {
+      stopStreaming: (reason: string = 'manual') => {
+        console.warn(`[aiStore] stopStreaming called (${reason})`, {
+          conversationId: get().activeConversation?.id,
+        });
         set({ isStreaming: false, thinkingStatus: null });
         // Call the backend to stop streaming
         import('../services/tauri').then(({ ai }) => {
           ai.stopStream().catch((err) => console.error('Failed to stop stream:', err));
         });
+        // Process next queued prompt if any
+        const { promptQueue } = get();
+        if (promptQueue.length > 0) {
+          const [nextPrompt, ...remaining] = promptQueue;
+          set({ promptQueue: remaining });
+          setTimeout(() => get().sendMessage(nextPrompt), 100);
+        }
+      },
+      finalizeStreaming: () => {
+        console.log('[aiStore] finalizeStreaming', {
+          conversationId: get().activeConversation?.id,
+        });
+        set({ isStreaming: false, thinkingStatus: null });
         // Process next queued prompt if any
         const { promptQueue } = get();
         if (promptQueue.length > 0) {

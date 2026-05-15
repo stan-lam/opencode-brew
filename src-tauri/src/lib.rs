@@ -299,6 +299,7 @@ pub fn run() {
             commands::fs::read_directory,
             commands::fs::read_file,
             commands::fs::write_file,
+            commands::fs::write_file_background,
             commands::fs::create_file,
             commands::fs::create_directory,
             commands::fs::delete_path,

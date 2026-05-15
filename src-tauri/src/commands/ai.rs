@@ -764,15 +764,25 @@ pub async fn chat_ollama(
     let mut full_content = String::new();
     println!("[ai.rs] Starting to process stream...");
     
+    let mut cancel_active = true;
     loop {
         tokio::select! {
             // Check for cancellation
-            _ = cancel_rx.recv() => {
-                println!("Stream cancelled for conversation: {}", conversation_id);
-                // Clean up
-                let mut streams = ACTIVE_STREAMS.write().await;
-                streams.remove(&conversation_id);
-                return Err("Stream cancelled by user".to_string());
+            cancel_result = cancel_rx.recv(), if cancel_active => {
+                match cancel_result {
+                    Ok(_) => {
+                        println!("Stream cancelled for conversation: {}", conversation_id);
+                        // Clean up
+                        let mut streams = ACTIVE_STREAMS.write().await;
+                        streams.remove(&conversation_id);
+                        return Err("Stream cancelled by user".to_string());
+                    }
+                    Err(_) => {
+                        // Sender was dropped; keep streaming but disable future cancel checks
+                        println!("[ai.rs] Cancel channel closed; continuing stream.");
+                        cancel_active = false;
+                    }
+                }
             }
             // Process stream chunks
             chunk_result = stream.next() => {
@@ -841,6 +851,11 @@ pub async fn chat_ollama(
                     }
                     None => {
                         // Stream ended
+                        let event_name = format!("ai-stream-{}", conversation_id);
+                        let _ = app.emit(&event_name, StreamChunk {
+                            content: String::new(),
+                            done: true,
+                        });
                         let mut streams = ACTIVE_STREAMS.write().await;
                         streams.remove(&conversation_id);
                         break;
@@ -963,15 +978,24 @@ pub async fn chat_openai(
     let mut stream = response.bytes_stream();
     let mut full_content = String::new();
     
+    let mut cancel_active = true;
     loop {
         tokio::select! {
             // Check for cancellation
-            _ = cancel_rx.recv() => {
-                println!("Stream cancelled for conversation: {}", conversation_id);
-                // Clean up
-                let mut streams = ACTIVE_STREAMS.write().await;
-                streams.remove(&conversation_id);
-                return Err("Stream cancelled by user".to_string());
+            cancel_result = cancel_rx.recv(), if cancel_active => {
+                match cancel_result {
+                    Ok(_) => {
+                        println!("Stream cancelled for conversation: {}", conversation_id);
+                        // Clean up
+                        let mut streams = ACTIVE_STREAMS.write().await;
+                        streams.remove(&conversation_id);
+                        return Err("Stream cancelled by user".to_string());
+                    }
+                    Err(_) => {
+                        println!("[ai.rs] Cancel channel closed; continuing stream.");
+                        cancel_active = false;
+                    }
+                }
             }
             // Process stream chunks
             chunk_result = stream.next() => {
@@ -1017,6 +1041,11 @@ pub async fn chat_openai(
                     }
                     None => {
                         // Stream ended
+                        let event_name = format!("ai-stream-{}", conversation_id);
+                        let _ = app.emit(&event_name, StreamChunk {
+                            content: String::new(),
+                            done: true,
+                        });
                         let mut streams = ACTIVE_STREAMS.write().await;
                         streams.remove(&conversation_id);
                         break;
@@ -1166,15 +1195,24 @@ pub async fn chat_copilot(
     let mut stream = response.bytes_stream();
     let mut full_content = String::new();
 
+    let mut cancel_active = true;
     loop {
         tokio::select! {
             // Check for cancellation
-            _ = cancel_rx.recv() => {
-                println!("Stream cancelled for conversation: {}", conversation_id);
-                // Clean up
-                let mut streams = ACTIVE_STREAMS.write().await;
-                streams.remove(&conversation_id);
-                return Err("Stream cancelled by user".to_string());
+            cancel_result = cancel_rx.recv(), if cancel_active => {
+                match cancel_result {
+                    Ok(_) => {
+                        println!("Stream cancelled for conversation: {}", conversation_id);
+                        // Clean up
+                        let mut streams = ACTIVE_STREAMS.write().await;
+                        streams.remove(&conversation_id);
+                        return Err("Stream cancelled by user".to_string());
+                    }
+                    Err(_) => {
+                        println!("[ai.rs] Cancel channel closed; continuing stream.");
+                        cancel_active = false;
+                    }
+                }
             }
             // Process stream chunks
             chunk_result = stream.next() => {
@@ -1220,6 +1258,11 @@ pub async fn chat_copilot(
                     }
                     None => {
                         // Stream ended
+                        let event_name = format!("ai-stream-{}", conversation_id);
+                        let _ = app.emit(&event_name, StreamChunk {
+                            content: String::new(),
+                            done: true,
+                        });
                         let mut streams = ACTIVE_STREAMS.write().await;
                         streams.remove(&conversation_id);
                         break;

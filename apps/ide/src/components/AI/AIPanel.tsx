@@ -2969,6 +2969,7 @@ export function AIPanel() {
     queuePrompt,
     clearQueue,
     stopStreaming,
+    finalizeStreaming,
     refreshAvailableModels,
     clearAgentTasks,
     updateSessionUsage,
@@ -2985,6 +2986,8 @@ export function AIPanel() {
   const [isDragging, setIsDragging] = useState(false);
   const [allPendingOps, setAllPendingOps] = useState<Array<{operation: FileOperation; messageId: string; applied: boolean}>>([]);
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
+  const [showProcessingIndicator, setShowProcessingIndicator] = useState(false);
+  const [pendingResponse, setPendingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2992,6 +2995,46 @@ export function AIPanel() {
   const forceScrollRef = useRef(false);
   const { deleteConversation, importConversationsFromPath } = useAIStore();
   const prevIsStreamingRef = useRef(false);
+  const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasQueuedPrompts = promptQueue.length > 0;
+  const processingLabel = thinkingStatus?.trim()
+    || (pendingResponse ? 'Waiting for model...' : (isStreaming ? 'Generating response...' : (hasQueuedPrompts ? `Queued prompt${promptQueue.length > 1 ? 's' : ''} pending...` : '')));
+  const showProcessingStatus = Boolean(processingLabel);
+  const showQueueIcon = showProcessingStatus && !isStreaming && !thinkingStatus && !pendingResponse && hasQueuedPrompts;
+
+  useEffect(() => {
+    if (processingTimerRef.current) {
+      clearTimeout(processingTimerRef.current);
+      processingTimerRef.current = null;
+    }
+
+    if (thinkingStatus) {
+      setShowProcessingIndicator(true);
+    } else if (isStreaming) {
+      processingTimerRef.current = setTimeout(() => {
+        setShowProcessingIndicator(true);
+      }, 1200);
+    } else if (pendingResponse) {
+      processingTimerRef.current = setTimeout(() => {
+        setShowProcessingIndicator(true);
+      }, 600);
+    } else {
+      setShowProcessingIndicator(false);
+    }
+
+    return () => {
+      if (processingTimerRef.current) {
+        clearTimeout(processingTimerRef.current);
+        processingTimerRef.current = null;
+      }
+    };
+  }, [isStreaming, thinkingStatus, pendingResponse]);
+
+  useEffect(() => {
+    if (isStreaming || thinkingStatus) {
+      setPendingResponse(false);
+    }
+  }, [isStreaming, thinkingStatus]);
 
   // Verify and update applied status of pending operations based on actual file state
   useEffect(() => {
@@ -3110,6 +3153,12 @@ export function AIPanel() {
           event.cache_read_tokens,
           event.estimated_cost_usd
         );
+
+        // If the stream ended without a final done chunk, use token usage as a fallback completion signal.
+        const { isStreaming: isStreamingNow, streamContinuationPending } = useAIStore.getState();
+        if (isStreamingNow && !streamContinuationPending) {
+          finalizeStreaming();
+        }
       });
     };
     
@@ -3775,6 +3824,7 @@ export function AIPanel() {
 
     const message = input;
     const messageAttachments = attachments;
+    setPendingResponse(true);
     setInput('');
     setAttachments([]);
     resetScrollLock();
@@ -3860,6 +3910,14 @@ export function AIPanel() {
             </>
           )}
         </div>
+        {showProcessingStatus && (
+          <div className={styles.headerProcessingStatus} aria-live="polite">
+            <span className={styles.processingStatusIcon}>
+              {showQueueIcon ? <Clock size={14} /> : <Loader2 size={14} className={styles.spinning} />}
+            </span>
+            <span className={styles.processingStatusText}>{processingLabel}</span>
+          </div>
+        )}
         <div className={styles.headerActions}>
           <button
             className={styles.newChatBtn}
@@ -4349,17 +4407,39 @@ export function AIPanel() {
               >
                 <Settings size={16} />
               </button>
+              {isStreaming && (
+                <button
+                  type="button"
+                  className={`${styles.controlBtn} ${styles.stopBtn}`}
+                  onClick={stopStreaming}
+                  title="Stop generating"
+                >
+                  <Square size={16} />
+                </button>
+              )}
+              {showProcessingIndicator && (
+                <div className={styles.processingIndicator} title="AI is processing">
+                  <Loader2 size={16} className={styles.spinning} />
+                </div>
+              )}
               <button
-                type={isStreaming ? "button" : "submit"}
+                type="submit"
                 className={styles.sendBtn}
-                disabled={!isStreaming && !input.trim() && attachments.length === 0}
-                onClick={isStreaming ? stopStreaming : undefined}
-                title={isStreaming ? 'Stop generating' : (promptQueue.length > 0 ? 'Queue prompt' : 'Send message')}
+                disabled={!input.trim() && attachments.length === 0}
+                title={isStreaming ? 'Queue prompt' : (promptQueue.length > 0 ? 'Queue prompt' : 'Send message')}
               >
-                {isStreaming ? <Square size={18} /> : <Send size={18} />}
+                <Send size={18} />
               </button>
             </div>
           </div>
+          {showProcessingStatus && (
+            <div className={styles.processingStatus} aria-live="polite">
+              <span className={styles.processingStatusIcon}>
+                {showQueueIcon ? <Clock size={14} /> : <Loader2 size={14} className={styles.spinning} />}
+              </span>
+              <span className={styles.processingStatusText}>{processingLabel}</span>
+            </div>
+          )}
         </form>
 
         {showHistory && (

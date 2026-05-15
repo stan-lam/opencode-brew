@@ -122,6 +122,38 @@ pub async fn write_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[command]
+pub async fn write_file_background(path: String, content: String) -> Result<(), String> {
+    println!(
+        "[Tauri write_file_background] Queued {} bytes to: {}",
+        content.len(),
+        &path
+    );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = fs::write(&path, &content) {
+            println!("[Tauri write_file_background] ERROR writing {}: {}", &path, e);
+            return;
+        }
+        match fs::metadata(&path) {
+            Ok(meta) => {
+                println!(
+                    "[Tauri write_file_background] SUCCESS - file exists, size: {} bytes",
+                    meta.len()
+                );
+            }
+            Err(e) => {
+                println!(
+                    "[Tauri write_file_background] ERROR - file not found after write: {}",
+                    e
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[command]
 pub async fn create_file(path: String) -> Result<(), String> {
     fs::write(&path, "").map_err(|e| format!("Failed to create file: {}", e))
 }

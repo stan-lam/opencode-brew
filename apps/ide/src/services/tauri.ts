@@ -199,6 +199,11 @@ export const fs = {
     const invoke = await getInvoke();
     return invoke('write_file', { path, content });
   },
+
+  writeFileBackground: async (path: string, content: string): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('write_file_background', { path, content });
+  },
   
   createFile: async (path: string): Promise<void> => {
     const invoke = await getInvoke();
@@ -905,12 +910,12 @@ export const pricing = {
     return invoke('calculate_cost', {
       model,
       provider,
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      cache_creation_tokens: cacheCreationTokens,
-      cache_read_tokens: cacheReadTokens,
-      custom_input_rate: customInputRate,
-      custom_output_rate: customOutputRate,
+      promptTokens,
+      completionTokens,
+      cacheCreationTokens,
+      cacheReadTokens,
+      customInputRate,
+      customOutputRate,
     });
   },
 };
@@ -934,11 +939,11 @@ export const usage = {
     return invoke('record_token_usage', {
       model,
       provider,
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      cache_creation_tokens: cacheCreationTokens,
-      cache_read_tokens: cacheReadTokens,
-      estimated_cost_usd: estimatedCostUsd,
+      promptTokens,
+      completionTokens,
+      cacheCreationTokens,
+      cacheReadTokens,
+      estimatedCostUsd,
     });
   },
 };
