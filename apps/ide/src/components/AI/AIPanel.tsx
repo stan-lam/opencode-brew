@@ -26,6 +26,7 @@ import {
   ChevronRight,
   Globe,
   Clock,
+  ExternalLink,
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage } from '../../services/tauri';
 import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
@@ -478,14 +479,25 @@ function parseFileOperations(content: string): FileOperation[] {
     }
   }
   
-  // Parse edit_file tags
-  const editRegex = /<edit_file\s+path="([^"]+)"(?:\s+mode="(replace|insert)")?(?:\s+line="(\d+)")?>[\s\S]*?(?:<old_content>([\s\S]*?)<\/old_content>[\s\S]*?<new_content>([\s\S]*?)<\/new_content>|([\s\S]*?))<\/edit_file>/g;
-  while ((match = editRegex.exec(content)) !== null) {
+  // Parse edit_file tags - first find all edit_file blocks, then extract old/new content
+  const editBlockRegex = /<edit_file\s+path="([^"]+)"(?:\s+mode="(replace|insert)")?(?:\s+line="(\d+)")?>([\s\S]*?)<\/edit_file>/g;
+  while ((match = editBlockRegex.exec(content)) !== null) {
     const path = match[1];
     const mode = (match[2] as 'replace' | 'insert') || 'replace';
     const line = match[3] ? parseInt(match[3]) : undefined;
-    const oldContent = match[4]?.trim();
-    const newContent = match[5]?.trim() || match[6]?.trim();
+    const body = match[4];
+    
+    // Extract old_content and new_content from the body
+    const oldMatch = body.match(/<old_content>([\s\S]*?)<\/old_content>/);
+    const newMatch = body.match(/<new_content>([\s\S]*?)<\/new_content>/);
+    
+    let oldContent = oldMatch ? oldMatch[1].trim() : undefined;
+    let newContent = newMatch ? newMatch[1].trim() : undefined;
+    
+    // If no old/new tags found, treat entire body as new content (simple edit)
+    if (!oldContent && !newContent) {
+      newContent = body.trim();
+    }
     
     operations.push({
       type: 'edit',
@@ -2673,6 +2685,7 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
   const [isExpanded, setIsExpanded] = useState(true);
   const [isCodeExpanded, setIsCodeExpanded] = useState(false);
   const codeRef = useRef<HTMLPreElement>(null);
+  const { openAIDiff } = useEditorStore();
 
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -2695,6 +2708,67 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
       case 'edit': return '~';
       case 'delete': return '-';
     }
+  };
+
+  const handleViewInEditor = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    let oldContent = '';
+    let newContent = '';
+    let insertLine: number | undefined = undefined;
+    
+    if (operation.type === 'create') {
+      newContent = operation.content || '';
+    } else if (operation.type === 'edit') {
+      // Handle insert mode - no oldContent, just line number
+      if (operation.mode === 'insert') {
+        newContent = operation.newContent || '';
+        insertLine = operation.line;
+      } else {
+        // Check if oldContent/newContent already have proper content (no XML tags)
+        if (operation.oldContent && !operation.oldContent.includes('<old_content>')) {
+          oldContent = operation.oldContent;
+        }
+        if (operation.newContent && !operation.newContent.includes('<new_content>')) {
+          newContent = operation.newContent;
+        }
+        
+        // If content still contains XML tags, extract the actual content
+        if (!oldContent || !newContent) {
+          const rawContent = operation.newContent || operation.oldContent || '';
+          if (rawContent.includes('<old_content>')) {
+            const oldMatch = rawContent.match(/<old_content>([\s\S]*?)<\/old_content>/i);
+            if (oldMatch) oldContent = oldMatch[1].trim();
+          }
+          if (rawContent.includes('<new_content>')) {
+            const newMatch = rawContent.match(/<new_content>([\s\S]*?)<\/new_content>/i);
+            if (newMatch) newContent = newMatch[1].trim();
+          }
+        }
+      }
+    }
+    
+    // Use the new inline diff mode
+    const { openFileWithAIEdit } = useEditorStore.getState();
+    const { currentWorkspace } = useWorkspaceStore.getState();
+    if (currentWorkspace) {
+      const fullPath = operation.path.startsWith('/') 
+        ? operation.path 
+        : `${currentWorkspace.rootPath}/${operation.path}`;
+      await openFileWithAIEdit(fullPath, oldContent, newContent, operation.type, insertLine);
+    }
+  };
+  
+  const getLineStats = () => {
+    if (operation.type === 'create' && operation.content) {
+      return `+${operation.content.split('\n').length}`;
+    }
+    if (operation.type === 'edit') {
+      const added = operation.newContent?.split('\n').length || 0;
+      const removed = operation.oldContent?.split('\n').length || 0;
+      return `+${added} -${removed}`;
+    }
+    return '';
   };
 
   const renderCodeBlock = (content: string | undefined, className: string) => {
@@ -2726,13 +2800,30 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
     );
   };
 
+  const fileName = operation.path.split('/').pop() || operation.path;
+  const filePath = operation.path.includes('/') 
+    ? operation.path.substring(0, operation.path.lastIndexOf('/'))
+    : '';
+
   return (
     <div className={styles.fileOpPreview}>
       <div className={styles.fileOpHeader} onClick={() => setIsExpanded(!isExpanded)}>
         <span className={`${styles.fileOpIcon} ${styles[`fileOp${operation.type}`]}`}>
           {getOperationIcon()}
         </span>
-        <span className={styles.fileOpTitle}>{getOperationTitle()}</span>
+        <span className={styles.fileOpTitle}>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{filePath && `${filePath}/`}</span>
+          {fileName}
+          <span style={{ marginLeft: 8, fontSize: 11, opacity: 0.5 }}>{getLineStats()}</span>
+        </span>
+        <button 
+          className={styles.fileOpViewBtn}
+          onClick={handleViewInEditor}
+          title="Open in editor"
+        >
+          <ExternalLink size={12} />
+          View
+        </button>
         <span className={styles.fileOpExpand}>{isExpanded ? '▼' : '▶'}</span>
       </div>
       {isExpanded && (
@@ -2745,11 +2836,15 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
           {operation.type === 'edit' && operation.mode === 'replace' && (
             <div className={styles.fileOpDiff}>
               <div className={styles.fileOpDiffSection}>
-                <div className={styles.fileOpDiffLabel}>- Remove</div>
+                <div className={styles.fileOpDiffLabel}>
+                  <span style={{ color: '#ef9a9a' }}>−</span> Current
+                </div>
                 {renderCodeBlock(operation.oldContent, styles.fileOpDiffOld)}
               </div>
               <div className={styles.fileOpDiffSection}>
-                <div className={styles.fileOpDiffLabel}>+ Add</div>
+                <div className={styles.fileOpDiffLabel}>
+                  <span style={{ color: '#a5d6a7' }}>+</span> Proposed
+                </div>
                 {renderCodeBlock(operation.newContent, styles.fileOpDiffNew)}
               </div>
             </div>

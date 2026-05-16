@@ -6,6 +6,7 @@ import { WelcomeTab } from './WelcomeTab';
 import { SearchReplaceBar, useSearchReplace } from './SearchReplace';
 import { DiffEditor } from './DiffEditor';
 import { HistoryDiffEditor } from './HistoryDiffEditor';
+import { AIDiffEditor } from './AIDiffEditor';
 import styles from './EditorArea.module.css';
 
 function isMarkdownFile(path: string): boolean {
@@ -49,6 +50,18 @@ export function EditorArea() {
           historyTimestamp={activeFile.historyDiffInfo.historyTimestamp}
           oldContent={activeFile.historyDiffInfo.oldContent}
           newContent={activeFile.historyDiffInfo.newContent}
+        />
+      );
+    }
+
+    if (activeFile.type === 'ai-diff' && activeFile.aiDiffInfo) {
+      return (
+        <AIDiffEditor
+          key={activeFile.path}
+          filePath={activeFile.aiDiffInfo.filePath}
+          oldContent={activeFile.aiDiffInfo.oldContent}
+          newContent={activeFile.aiDiffInfo.newContent}
+          operationType={activeFile.aiDiffInfo.operationType}
         />
       );
     }

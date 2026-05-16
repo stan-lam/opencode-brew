@@ -182,6 +182,7 @@ export const useGitStore = create<GitState>((set, get) => ({
       });
 
       await get().fetchBranches();
+      await get().fetchCommitHistory();
       
       // Start auto-fetch if enabled
       get().startAutoFetch();

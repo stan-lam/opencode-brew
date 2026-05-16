@@ -44,18 +44,13 @@ export function ActivityBar() {
   } = useLayoutStore();
 
   const handleSideClick = (id: SidePanelTab) => {
-    console.log('ActivityBar: handleSideClick', id);
-    console.log('ActivityBar: current state', { activeSideTab, showSidePanel });
     if (activeSideTab === id && showSidePanel) {
-      console.log('ActivityBar: toggling side panel off');
+      // Clicking same tab while visible - hide panel
       toggleSidePanel();
     } else {
-      console.log('ActivityBar: setting active tab to', id);
+      // Clicking different tab or panel not visible - show panel with this tab
+      // setActiveSideTab already sets showSidePanel: true, so no need to toggle
       setActiveSideTab(id);
-      if (!showSidePanel) {
-        console.log('ActivityBar: showing side panel');
-        toggleSidePanel();
-      }
     }
   };
 

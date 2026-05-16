@@ -3,6 +3,7 @@ import Editor, { OnMount, OnChange } from '@monaco-editor/react';
 import { useEditorStore } from '../../store/editorStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import { useProblemsStore, Problem } from '../../store/problemsStore';
+import { AIEditOverlay } from './AIEditOverlay';
 import styles from './MonacoEditor.module.css';
 
 interface MonacoEditorProps {
@@ -19,7 +20,8 @@ interface SearchOptions {
 }
 
 export function MonacoEditor({ path, content, language, onScroll }: MonacoEditorProps) {
-  const { updateFileContent, saveFile, setCursorPosition } = useEditorStore();
+  const { updateFileContent, saveFile, setCursorPosition, activeFile } = useEditorStore();
+  const pendingAIEdit = activeFile?.path === path ? activeFile?.pendingAIEdit : undefined;
   const { theme, fontSize } = useSettingsStore();
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
@@ -505,6 +507,15 @@ export function MonacoEditor({ path, content, language, onScroll }: MonacoEditor
 
   return (
     <div className={styles.editorWrapper}>
+      {pendingAIEdit && (
+        <AIEditOverlay
+          filePath={path}
+          oldContent={pendingAIEdit.oldContent}
+          newContent={pendingAIEdit.newContent}
+          operationType={pendingAIEdit.operationType}
+          insertLine={pendingAIEdit.insertLine}
+        />
+      )}
       <Editor
         height="100%"
         language={language}

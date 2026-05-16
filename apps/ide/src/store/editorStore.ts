@@ -25,7 +25,7 @@ export interface OpenFile {
   language: string;
   isDirty: boolean;
   cursorPosition: { line: number; column: number };
-  type?: 'file' | 'diff' | 'history-diff';
+  type?: 'file' | 'diff' | 'history-diff' | 'ai-diff';
   diffInfo?: {
     repoPath: string;
     filePath: string;
@@ -39,6 +39,18 @@ export interface OpenFile {
     oldContent: string;
     newContent: string;
   };
+  aiDiffInfo?: {
+    filePath: string;
+    oldContent: string;
+    newContent: string;
+    operationType: 'create' | 'edit' | 'delete';
+  };
+  pendingAIEdit?: {
+    oldContent: string;
+    newContent: string;
+    operationType: 'create' | 'edit' | 'delete';
+    insertLine?: number;
+  };
 }
 
 interface EditorState {
@@ -47,6 +59,10 @@ interface EditorState {
   openFile: (path: string) => Promise<void>;
   openDiff: (repoPath: string, filePath: string, staged: boolean) => void;
   openHistoryDiff: (filePath: string, fileName: string, historyId: number, timestamp: string, oldContent: string, newContent: string) => void;
+  openAIDiff: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete') => void;
+  openFileWithAIEdit: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete', insertLine?: number) => Promise<void>;
+  clearAIEdit: (path: string) => void;
+  applyAIEdit: (path: string) => void;
   closeFile: (path: string) => void;
   setActiveFile: (path: string) => void;
   updateFileContent: (path: string, content: string) => void;
@@ -203,6 +219,146 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }));
   },
 
+  openAIDiff: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete') => {
+    const { openFiles } = get();
+    const diffId = `ai:${Date.now()}:${filePath}`;
+    const existingDiff = openFiles.find((f) => f.path === diffId);
+
+    if (existingDiff) {
+      set({ activeFile: existingDiff });
+      return;
+    }
+
+    const fileName = filePath.split('/').pop() || filePath;
+    const opLabel = operationType === 'create' ? 'New' : operationType === 'edit' ? 'Edit' : 'Delete';
+    const newDiff: OpenFile = {
+      path: diffId,
+      name: `${fileName} (AI ${opLabel})`,
+      content: '',
+      language: getLanguageFromPath(filePath),
+      isDirty: false,
+      cursorPosition: { line: 1, column: 1 },
+      type: 'ai-diff',
+      aiDiffInfo: {
+        filePath,
+        oldContent,
+        newContent,
+        operationType,
+      },
+    };
+
+    set((state) => ({
+      openFiles: [...state.openFiles, newDiff],
+      activeFile: newDiff,
+    }));
+  },
+
+  openFileWithAIEdit: async (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete', insertLine?: number) => {
+    const { openFiles, openFile, openAIDiff } = get();
+    
+    // For create operations, use the AI diff view since file doesn't exist
+    if (operationType === 'create') {
+      openAIDiff(filePath, oldContent, newContent, operationType);
+      return;
+    }
+    
+    // Check if file is already open
+    let existingFile = openFiles.find((f) => f.path === filePath && f.type !== 'diff' && f.type !== 'ai-diff');
+    
+    if (!existingFile) {
+      // Try to open the file
+      try {
+        await openFile(filePath);
+        existingFile = get().openFiles.find((f) => f.path === filePath && f.type !== 'diff' && f.type !== 'ai-diff');
+      } catch (error) {
+        // If file doesn't exist, fall back to AI diff view
+        console.warn('Could not open file, using diff view:', error);
+        openAIDiff(filePath, oldContent, newContent, operationType);
+        return;
+      }
+    }
+    
+    if (existingFile) {
+      // Add pending AI edit info to the file
+      set((state) => ({
+        openFiles: state.openFiles.map((f) =>
+          f.path === filePath && f.type !== 'diff' && f.type !== 'ai-diff'
+            ? { ...f, pendingAIEdit: { oldContent, newContent, operationType, insertLine } }
+            : f
+        ),
+        activeFile: state.activeFile?.path === filePath
+          ? { ...state.activeFile, pendingAIEdit: { oldContent, newContent, operationType, insertLine } }
+          : state.activeFile,
+      }));
+      
+      // Set as active
+      get().setActiveFile(filePath);
+    }
+  },
+
+  clearAIEdit: (path: string) => {
+    set((state) => ({
+      openFiles: state.openFiles.map((f) =>
+        f.path === path ? { ...f, pendingAIEdit: undefined } : f
+      ),
+      activeFile: state.activeFile?.path === path
+        ? { ...state.activeFile, pendingAIEdit: undefined }
+        : state.activeFile,
+    }));
+  },
+
+  applyAIEdit: (path: string) => {
+    const file = get().openFiles.find((f) => f.path === path);
+    if (!file || !file.pendingAIEdit) return;
+    
+    const { oldContent, newContent, operationType, insertLine } = file.pendingAIEdit;
+    let updatedContent = file.content;
+    
+    if (operationType === 'create') {
+      // For create, newContent is the entire file
+      updatedContent = newContent;
+    } else if (operationType === 'edit') {
+      // Handle insert mode - insert at specific line
+      if (insertLine !== undefined && !oldContent) {
+        const lines = file.content.split('\n');
+        const insertIdx = Math.max(0, Math.min(insertLine - 1, lines.length));
+        lines.splice(insertIdx, 0, newContent.trim());
+        updatedContent = lines.join('\n');
+      } else {
+        // For replace mode, replace oldContent with newContent in the file
+        const oldTrimmed = oldContent.trim();
+        const newTrimmed = newContent.trim();
+        
+        if (oldTrimmed && file.content.includes(oldTrimmed)) {
+          updatedContent = file.content.replace(oldTrimmed, newTrimmed);
+        } else {
+          // Try with normalized line endings
+          const normalizedContent = file.content.replace(/\r\n/g, '\n');
+          const normalizedOld = oldTrimmed.replace(/\r\n/g, '\n');
+          const normalizedNew = newTrimmed.replace(/\r\n/g, '\n');
+          
+          if (normalizedContent.includes(normalizedOld)) {
+            updatedContent = normalizedContent.replace(normalizedOld, normalizedNew);
+          } else {
+            console.warn('Could not find oldContent in file, appending newContent instead');
+            updatedContent = file.content + '\n' + newTrimmed;
+          }
+        }
+      }
+    }
+    
+    set((state) => ({
+      openFiles: state.openFiles.map((f) =>
+        f.path === path
+          ? { ...f, content: updatedContent, isDirty: true, pendingAIEdit: undefined }
+          : f
+      ),
+      activeFile: state.activeFile?.path === path
+        ? { ...state.activeFile, content: updatedContent, isDirty: true, pendingAIEdit: undefined }
+        : state.activeFile,
+    }));
+  },
+
   closeFile: (path: string) => {
     const state = get();
     const newOpenFiles = state.openFiles.filter((f) => f.path !== path);
@@ -244,12 +400,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   saveFile: async (path: string) => {
     const file = get().openFiles.find((f) => f.path === path);
-    if (!file) return;
+    if (!file) {
+      console.error('[editorStore] saveFile: file not found in openFiles:', path);
+      console.log('[editorStore] openFiles paths:', get().openFiles.map(f => f.path));
+      return;
+    }
 
     try {
+      console.log('[editorStore] saveFile: writing to', path, 'content length:', file.content?.length);
       await fs.writeFile(path, file.content);
+      console.log('[editorStore] saveFile: write successful');
+      
       // Save to local history
-      await history.save(path, file.content).catch(console.error);
+      await history.save(path, file.content).catch((e) => console.error('[editorStore] history save error:', e));
       
       set((state) => ({
         openFiles: state.openFiles.map((f) =>
@@ -263,8 +426,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       // Emit event to notify history panel of the save
       window.dispatchEvent(new CustomEvent('file-saved', { detail: { path } }));
+      console.log('[editorStore] saveFile: completed successfully');
     } catch (error) {
-      console.error('Failed to save file:', error);
+      console.error('[editorStore] Failed to save file:', error);
+      throw error; // Re-throw so caller knows it failed
     }
   },
 
