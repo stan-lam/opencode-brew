@@ -1,8 +1,9 @@
-import { FolderOpen, FileText, GitBranch, MessageSquare, Clock, Zap, Search, Folder, ExternalLink, RefreshCw } from 'lucide-react';
+import { FolderOpen, FileText, GitBranch, MessageSquare, Clock, Search, Folder, ExternalLink, RefreshCw } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { dialog, appWindow } from '../../services/tauri';
 import { invoke } from '@tauri-apps/api/core';
+import { Logo } from '../Logo';
 import styles from './WelcomeTab.module.css';
 
 export function WelcomeTab() {
@@ -50,7 +51,7 @@ export function WelcomeTab() {
       <div className={styles.welcome}>
         <div className={styles.content}>
           <div className={styles.logo}>
-            <Folder size={48} strokeWidth={1.5} />
+            <Logo size={56} />
           </div>
           <h1 className={styles.title}>{currentWorkspace.name}</h1>
           <p className={styles.subtitle}>{currentWorkspace.rootPath}</p>
@@ -154,7 +155,7 @@ export function WelcomeTab() {
     <div className={styles.welcome}>
       <div className={styles.content}>
         <div className={styles.logo}>
-          <Zap size={48} strokeWidth={1.5} />
+          <Logo size={64} />
         </div>
         <h1 className={styles.title}>Welcome to OpenCodeBrew</h1>
         <p className={styles.subtitle}>

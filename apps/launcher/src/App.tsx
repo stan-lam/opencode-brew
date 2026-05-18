@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Code2, MessageSquare, Bot, Settings, Sparkles } from 'lucide-react';
+import { Code2, MessageSquare, Bot, Settings } from 'lucide-react';
 import { SettingsModal } from './components/SettingsModal';
+import { Logo } from './components/Logo';
 import styles from './App.module.css';
 
 interface ToolCard {
@@ -64,7 +65,7 @@ function App() {
     <div className={styles.container}>
       <header className={styles.header}>
         <div className={styles.logo}>
-          <Sparkles size={28} className={styles.logoIcon} />
+          <Logo size={36} className={styles.logoIcon} />
           <h1>OpenCodeBrew</h1>
         </div>
         <p className={styles.tagline}>All-in-one AI tools for developers</p>
