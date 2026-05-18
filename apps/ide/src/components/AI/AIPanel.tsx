@@ -27,6 +27,7 @@ import {
   Globe,
   Clock,
   ExternalLink,
+  FileText,
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage } from '../../services/tauri';
 import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
@@ -395,6 +396,15 @@ interface FileOperation {
   newContent?: string;
   mode?: 'replace' | 'insert';
   line?: number;
+}
+
+interface PendingFileOperation {
+  operation: FileOperation;
+  messageId: string;
+  applied: boolean;
+  previousContent?: string;
+  previousExists?: boolean;
+  wasSkipped?: boolean;
 }
 
 // Detect actionable tasks in plan mode responses
@@ -1612,7 +1622,7 @@ function MessageBubble({ message, onOperationsChange }: {
         <div className={styles.fileOperations}>
           <div className={styles.fileOpsHeader}>
             <span className={styles.fileOpsTitle}>File Operations</span>
-            <span className={styles.fileOpsCount}>{pendingOps.length} pending</span>
+            <span className={styles.fileOpsCount}>{pendingOps.length} changes</span>
           </div>
           {pendingOps.map((op, idx) => (
             <FileOperationPreview
@@ -2685,7 +2695,7 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
   const [isExpanded, setIsExpanded] = useState(true);
   const [isCodeExpanded, setIsCodeExpanded] = useState(false);
   const codeRef = useRef<HTMLPreElement>(null);
-  const { openAIDiff } = useEditorStore();
+  const { openDiff } = useEditorStore();
 
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -2712,51 +2722,19 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
 
   const handleViewInEditor = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    
-    let oldContent = '';
-    let newContent = '';
-    let insertLine: number | undefined = undefined;
-    
-    if (operation.type === 'create') {
-      newContent = operation.content || '';
-    } else if (operation.type === 'edit') {
-      // Handle insert mode - no oldContent, just line number
-      if (operation.mode === 'insert') {
-        newContent = operation.newContent || '';
-        insertLine = operation.line;
-      } else {
-        // Check if oldContent/newContent already have proper content (no XML tags)
-        if (operation.oldContent && !operation.oldContent.includes('<old_content>')) {
-          oldContent = operation.oldContent;
-        }
-        if (operation.newContent && !operation.newContent.includes('<new_content>')) {
-          newContent = operation.newContent;
-        }
-        
-        // If content still contains XML tags, extract the actual content
-        if (!oldContent || !newContent) {
-          const rawContent = operation.newContent || operation.oldContent || '';
-          if (rawContent.includes('<old_content>')) {
-            const oldMatch = rawContent.match(/<old_content>([\s\S]*?)<\/old_content>/i);
-            if (oldMatch) oldContent = oldMatch[1].trim();
-          }
-          if (rawContent.includes('<new_content>')) {
-            const newMatch = rawContent.match(/<new_content>([\s\S]*?)<\/new_content>/i);
-            if (newMatch) newContent = newMatch[1].trim();
-          }
-        }
-      }
-    }
-    
-    // Use the new inline diff mode
-    const { openFileWithAIEdit } = useEditorStore.getState();
     const { currentWorkspace } = useWorkspaceStore.getState();
-    if (currentWorkspace) {
-      const fullPath = operation.path.startsWith('/') 
-        ? operation.path 
-        : `${currentWorkspace.rootPath}/${operation.path}`;
-      await openFileWithAIEdit(fullPath, oldContent, newContent, operation.type, insertLine);
-    }
+    if (!currentWorkspace) return;
+
+    const normalizedOpPath = operation.path.replace(/^\/+/, '');
+    const fullPath = operation.path.startsWith('/')
+      ? operation.path
+      : `${currentWorkspace.rootPath}/${normalizedOpPath}`;
+    const normalizedFullPath = fullPath.replace(/\/+/g, '/');
+    const relativePath = normalizedFullPath.startsWith(`${currentWorkspace.rootPath}/`)
+      ? normalizedFullPath.slice(currentWorkspace.rootPath.length + 1)
+      : normalizedOpPath;
+
+    openDiff(currentWorkspace.rootPath, relativePath, false);
   };
   
   const getLineStats = () => {
@@ -2819,10 +2797,10 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
         <button 
           className={styles.fileOpViewBtn}
           onClick={handleViewInEditor}
-          title="Open in editor"
+          title="Open git diff"
         >
           <ExternalLink size={12} />
-          View
+          View Diff
         </button>
         <span className={styles.fileOpExpand}>{isExpanded ? '▼' : '▶'}</span>
       </div>
@@ -2882,7 +2860,7 @@ function FileOperationsBar({
   onAcceptFile,
   onUndoFile
 }: { 
-  operations: Array<{operation: FileOperation; messageId: string; applied: boolean}>;
+  operations: PendingFileOperation[];
   expanded: boolean;
   onToggleExpanded: () => void;
   onKeepAll: () => void;
@@ -2958,9 +2936,9 @@ function FileOperationsBar({
             <button 
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
-              title="Dismiss"
+              title="Undo All"
             >
-              Dismiss
+              Undo All
             </button>
           </div>
         ) : showBatchActions && (
@@ -3069,6 +3047,8 @@ export function AIPanel() {
     clearAgentTasks,
     updateSessionUsage,
     resetSessionUsage,
+    summarizeConversation,
+    isSummarizing,
   } = useAIStore();
 
   const { currentWorkspace } = useWorkspaceStore();
@@ -3079,7 +3059,7 @@ export function AIPanel() {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [allPendingOps, setAllPendingOps] = useState<Array<{operation: FileOperation; messageId: string; applied: boolean}>>([]);
+  const [allPendingOps, setAllPendingOps] = useState<PendingFileOperation[]>([]);
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
   const [showProcessingIndicator, setShowProcessingIndicator] = useState(false);
   const [pendingResponse, setPendingResponse] = useState(false);
@@ -3091,11 +3071,25 @@ export function AIPanel() {
   const { deleteConversation, importConversationsFromPath } = useAIStore();
   const prevIsStreamingRef = useRef(false);
   const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutoSummaryMessageIdRef = useRef<string | null>(null);
+  const [summaryExpanded, setSummaryExpanded] = useState(true);
+  const autoApplyInFlightRef = useRef(false);
+  const lastAutoApplyKeyRef = useRef<string | null>(null);
   const hasQueuedPrompts = promptQueue.length > 0;
   const processingLabel = thinkingStatus?.trim()
     || (pendingResponse ? 'Waiting for model...' : (isStreaming ? 'Generating response...' : (hasQueuedPrompts ? `Queued prompt${promptQueue.length > 1 ? 's' : ''} pending...` : '')));
   const showProcessingStatus = Boolean(processingLabel);
   const showQueueIcon = showProcessingStatus && !isStreaming && !thinkingStatus && !pendingResponse && hasQueuedPrompts;
+
+  const getModelContextLimit = (model: string) => {
+    const lower = model.toLowerCase();
+    if (lower.includes('128k')) return 128000;
+    if (lower.includes('64k')) return 64000;
+    if (lower.includes('32k')) return 32000;
+    if (lower.includes('16k')) return 16000;
+    if (lower.includes('8k')) return 8000;
+    return 32000;
+  };
 
   useEffect(() => {
     if (processingTimerRef.current) {
@@ -3131,6 +3125,44 @@ export function AIPanel() {
     }
   }, [isStreaming, thinkingStatus]);
 
+  useEffect(() => {
+    if (isStreaming || autoApplyInFlightRef.current) return;
+    if (allPendingOps.length === 0) return;
+
+    const pending = allPendingOps.filter((op) => !op.applied);
+    if (pending.length === 0) return;
+
+    const applyKey = pending.map((op) => `${op.messageId}:${op.operation.type}:${op.operation.path}`).join('|');
+    if (lastAutoApplyKeyRef.current === applyKey) return;
+
+    lastAutoApplyKeyRef.current = applyKey;
+    autoApplyInFlightRef.current = true;
+
+    setTimeout(() => {
+      void handleKeepAllOperations().finally(() => {
+        autoApplyInFlightRef.current = false;
+      });
+    }, 200);
+  }, [allPendingOps, isStreaming]);
+
+  useEffect(() => {
+    if (!activeConversation || !lastMessageUsage) return;
+    if (isStreaming || isSummarizing) return;
+
+    const contextLimit = getModelContextLimit(config.model);
+    if (!contextLimit) return;
+
+    const usageRatio = lastMessageUsage.totalTokens / contextLimit;
+    const lastMessageId = activeConversation.messages[activeConversation.messages.length - 1]?.id;
+
+    if (!lastMessageId || lastAutoSummaryMessageIdRef.current === lastMessageId) return;
+
+    if (usageRatio >= 0.8) {
+      lastAutoSummaryMessageIdRef.current = lastMessageId;
+      summarizeConversation('auto');
+    }
+  }, [activeConversation, lastMessageUsage, isStreaming, isSummarizing, config.model, summarizeConversation]);
+
   // Verify and update applied status of pending operations based on actual file state
   useEffect(() => {
     if (!currentWorkspace || allPendingOps.length === 0) return;
@@ -3152,7 +3184,7 @@ export function AIPanel() {
             const exists = await fs.pathExists(fullPath);
             if (exists) {
               console.log(`Marking operation as applied (file exists): ${item.operation.path}`);
-              updatedOps[i] = { ...item, applied: true };
+              updatedOps[i] = { ...item, applied: true, previousExists: true, wasSkipped: true };
               hasChanges = true;
             }
           } catch (err) {
@@ -3601,6 +3633,95 @@ export function AIPanel() {
     setAttachments(attachments.filter(a => a.id !== id));
   };
 
+  const normalizeOperationPath = (opPath: string, workspaceRoot: string) => {
+    const normalizedOpPath = opPath.replace(/^\/+/, '');
+    const fullPath = `${workspaceRoot}/${normalizedOpPath}`.replace(/\/+/g, '/');
+    return { normalizedOpPath, fullPath };
+  };
+
+  const ensureParentDir = async (absoluteFilePath: string, relativePath: string) => {
+    const { currentWorkspace } = useWorkspaceStore.getState();
+    if (!currentWorkspace) return;
+
+    // Get parent directory from absolute file path
+    const lastSlash = absoluteFilePath.lastIndexOf('/');
+    if (lastSlash === -1) return;
+
+    const parentDir = absoluteFilePath.substring(0, lastSlash);
+
+    // Check if parent already exists
+    const exists = await fs.pathExists(parentDir);
+    if (exists) return;
+
+    // Get the relative path parts to build directories
+    const pathParts = relativePath.split('/');
+    pathParts.pop(); // Remove filename
+
+    // Build directories incrementally from workspace root
+    let currentRelativePath = '';
+    for (const part of pathParts) {
+      if (!part) continue;
+      currentRelativePath += (currentRelativePath ? '/' : '') + part;
+      const currentAbsolutePath = `${currentWorkspace.rootPath}/${currentRelativePath}`;
+
+      const dirExists = await fs.pathExists(currentAbsolutePath);
+      if (!dirExists) {
+        console.log(`Creating directory: ${currentAbsolutePath}`);
+        await fs.createDirectory(currentAbsolutePath);
+      }
+    }
+  };
+
+  const applyEditOperation = (currentContent: string, operation: FileOperation) => {
+    if (operation.mode === 'insert' && operation.line && operation.newContent) {
+      const lines = currentContent.split('\n');
+      const insertIdx = Math.max(0, Math.min(operation.line - 1, lines.length));
+      lines.splice(insertIdx, 0, operation.newContent);
+      const updatedContent = lines.join('\n');
+      return { updatedContent, changed: updatedContent !== currentContent };
+    }
+
+    const oldContent = operation.oldContent ?? '';
+    const newContent = operation.newContent ?? '';
+    const oldTrimmed = oldContent.trim();
+    const newTrimmed = newContent.trim();
+
+    const candidates: Array<{ oldText: string; newText: string }> = [];
+    if (oldContent && newContent) {
+      candidates.push({ oldText: oldContent, newText: newContent });
+    }
+    if (oldTrimmed && newTrimmed) {
+      candidates.push({ oldText: oldTrimmed, newText: newTrimmed });
+    }
+
+    for (const { oldText, newText } of candidates) {
+      if (currentContent.includes(oldText)) {
+        const updatedContent = currentContent.replace(oldText, newText);
+        return { updatedContent, changed: updatedContent !== currentContent };
+      }
+    }
+
+    const normalizedContent = currentContent.replace(/\r\n/g, '\n');
+    for (const { oldText, newText } of candidates) {
+      const normalizedOld = oldText.replace(/\r\n/g, '\n');
+      const normalizedNew = newText.replace(/\r\n/g, '\n');
+      if (normalizedOld && normalizedContent.includes(normalizedOld)) {
+        const updatedContent = normalizedContent.replace(normalizedOld, normalizedNew);
+        return { updatedContent, changed: updatedContent !== normalizedContent };
+      }
+    }
+
+    if (newTrimmed) {
+      if (currentContent.includes(newTrimmed)) {
+        return { updatedContent: currentContent, changed: false };
+      }
+      const updatedContent = `${currentContent}\n${newTrimmed}`;
+      return { updatedContent, changed: true };
+    }
+
+    return { updatedContent: currentContent, changed: false };
+  };
+
   const handleKeepAllOperations = async () => {
     const { currentWorkspace } = useWorkspaceStore.getState();
     const { openFile } = useEditorStore.getState();
@@ -3609,42 +3730,6 @@ export function AIPanel() {
       console.error('No workspace open');
       return;
     }
-
-    // Helper to ensure parent directory exists
-    const ensureParentDir = async (absoluteFilePath: string, relativePath: string) => {
-      // Get parent directory from absolute file path
-      const lastSlash = absoluteFilePath.lastIndexOf('/');
-      if (lastSlash === -1) return;
-      
-      const parentDir = absoluteFilePath.substring(0, lastSlash);
-      
-      try {
-        // Check if parent already exists
-        const exists = await fs.pathExists(parentDir);
-        if (exists) return;
-        
-        // Get the relative path parts to build directories
-        const pathParts = relativePath.split('/');
-        pathParts.pop(); // Remove filename
-        
-        // Build directories incrementally from workspace root
-        let currentRelativePath = '';
-        for (const part of pathParts) {
-          if (!part) continue;
-          currentRelativePath += (currentRelativePath ? '/' : '') + part;
-          const currentAbsolutePath = `${currentWorkspace.rootPath}/${currentRelativePath}`;
-          
-          const dirExists = await fs.pathExists(currentAbsolutePath);
-          if (!dirExists) {
-            console.log(`Creating directory: ${currentAbsolutePath}`);
-            await fs.createDirectory(currentAbsolutePath);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to ensure parent directory:', error);
-        throw error;
-      }
-    };
 
     let successCount = 0;
     let skippedCount = 0;
@@ -3660,8 +3745,7 @@ export function AIPanel() {
 
       try {
         // Normalize paths: remove leading slashes from operation path, normalize double slashes
-        const normalizedOpPath = item.operation.path.replace(/^\/+/, '');
-        const fullPath = `${currentWorkspace.rootPath}/${normalizedOpPath}`.replace(/\/+/g, '/');
+        const { normalizedOpPath, fullPath } = normalizeOperationPath(item.operation.path, currentWorkspace.rootPath);
         console.log(`[FileOps] Workspace root: ${currentWorkspace.rootPath}`);
         console.log(`[FileOps] Operation path (raw): ${item.operation.path}`);
         console.log(`[FileOps] Operation path (normalized): ${normalizedOpPath}`);
@@ -3673,13 +3757,13 @@ export function AIPanel() {
           if (fileExists) {
             console.log(`[FileOps] File already exists, skipping: ${item.operation.path}`);
             // Mark as applied even though we skipped it
-            updatedOps[i] = { ...updatedOps[i], applied: true };
+            updatedOps[i] = { ...updatedOps[i], applied: true, wasSkipped: true, previousExists: true };
             skippedCount++;
             continue;
           }
           
           // Ensure parent directory exists
-          await ensureParentDir(fullPath, item.operation.path);
+          await ensureParentDir(fullPath, normalizedOpPath);
           console.log(`[FileOps] Writing file: ${fullPath} (${(item.operation.content || '').length} bytes)`);
           await fs.writeFile(fullPath, item.operation.content || '');
           // Verify write succeeded by checking file exists now
@@ -3700,30 +3784,52 @@ export function AIPanel() {
           // Save to local history
           await history.save(item.operation.path, item.operation.content || '').catch(console.error);
           await openFile(fullPath);
+          updatedOps[i] = {
+            ...updatedOps[i],
+            applied: true,
+            previousExists: false,
+            previousContent: undefined,
+            wasSkipped: false,
+          };
         } else if (item.operation.type === 'edit') {
-          if (item.operation.mode === 'replace' && item.operation.oldContent && item.operation.newContent) {
-            const currentContent = await fs.readFile(fullPath);
-            const updatedContent = currentContent.replace(item.operation.oldContent, item.operation.newContent);
-            await fs.writeFile(fullPath, updatedContent);
-            // Save to local history
-            await history.save(item.operation.path, updatedContent).catch(console.error);
-            await openFile(fullPath);
-          } else if (item.operation.mode === 'insert' && item.operation.line && item.operation.newContent) {
-            const currentContent = await fs.readFile(fullPath);
-            const lines = currentContent.split('\n');
-            lines.splice(item.operation.line - 1, 0, item.operation.newContent);
-            const updatedContent = lines.join('\n');
-            await fs.writeFile(fullPath, updatedContent);
-            // Save to local history
-            await history.save(item.operation.path, updatedContent).catch(console.error);
-            await openFile(fullPath);
+          const previousContent = await fs.readFile(fullPath);
+          const { updatedContent, changed } = applyEditOperation(previousContent, item.operation);
+
+          if (!changed) {
+            updatedOps[i] = {
+              ...updatedOps[i],
+              applied: true,
+              previousExists: true,
+              previousContent,
+              wasSkipped: true,
+            };
+            skippedCount++;
+            continue;
           }
+
+          await fs.writeFile(fullPath, updatedContent);
+          // Save to local history
+          await history.save(item.operation.path, updatedContent).catch(console.error);
+          await openFile(fullPath);
+          updatedOps[i] = {
+            ...updatedOps[i],
+            applied: true,
+            previousExists: true,
+            previousContent,
+            wasSkipped: false,
+          };
         } else if (item.operation.type === 'delete') {
+          const previousContent = await fs.readFile(fullPath);
           await fs.deletePath(fullPath);
+          updatedOps[i] = {
+            ...updatedOps[i],
+            applied: true,
+            previousExists: true,
+            previousContent,
+            wasSkipped: false,
+          };
         }
 
-        // Mark as applied in our local array
-        updatedOps[i] = { ...updatedOps[i], applied: true };
         successCount++;
       } catch (error) {
         console.error('Failed to execute file operation:', error);
@@ -3755,12 +3861,12 @@ export function AIPanel() {
     }
   };
 
-  // Auto-apply file operations when streaming ends in agent mode
+  // Auto-apply file operations when streaming ends
   useEffect(() => {
     const wasStreaming = prevIsStreamingRef.current;
     prevIsStreamingRef.current = isStreaming;
 
-    if (wasStreaming && !isStreaming && agentMode === 'agent') {
+    if (wasStreaming && !isStreaming) {
       const pending = allPendingOps.filter(op => !op.applied);
       if (pending.length === 0) return;
       // Small delay to let parseFileOperations finish updating allPendingOps state
@@ -3769,11 +3875,61 @@ export function AIPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isStreaming]);
 
+  const revertOperation = async (item: PendingFileOperation) => {
+    const { currentWorkspace } = useWorkspaceStore.getState();
+    const { openFile } = useEditorStore.getState();
+    if (!currentWorkspace) return false;
+
+    if (item.wasSkipped) return false;
+
+    const { normalizedOpPath, fullPath } = normalizeOperationPath(
+      item.operation.path,
+      currentWorkspace.rootPath
+    );
+
+    if (item.operation.type === 'create') {
+      if (item.previousExists) return false;
+      await fs.deletePath(fullPath);
+      return true;
+    }
+
+    if (item.previousContent === undefined) return false;
+
+    await ensureParentDir(fullPath, normalizedOpPath);
+    await fs.writeFile(fullPath, item.previousContent);
+    await history.save(item.operation.path, item.previousContent).catch(console.error);
+    await openFile(fullPath);
+    return true;
+  };
+
   const handleUndoAllOperations = () => {
-    setAllPendingOps([]);
-    window.dispatchEvent(new CustomEvent('show-notification', {
-      detail: { message: 'Removed all pending file operations', type: 'info' }
-    }));
+    void (async () => {
+      const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      let undoneCount = 0;
+
+      for (const item of allPendingOps) {
+        if (item.applied) {
+          try {
+            const undone = await revertOperation(item);
+            if (undone) undoneCount++;
+          } catch (error) {
+            console.error('Failed to undo file operation:', error);
+          }
+        }
+      }
+
+      const operationIds = allPendingOps.map(item =>
+        `${item.messageId}:${item.operation.type}:${item.operation.path}`
+      );
+      if (operationIds.length > 0) {
+        unmarkFileOperationsAsKept(operationIds);
+      }
+
+      setAllPendingOps([]);
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: { message: undoneCount > 0 ? `Undid ${undoneCount} file(s)` : 'Removed all file operations', type: 'info' }
+      }));
+    })();
   };
 
   const handleAcceptFileOperation = async (index: number) => {
@@ -3788,46 +3944,9 @@ export function AIPanel() {
     const item = allPendingOps[index];
     if (!item || item.applied) return;
 
-    // Helper to ensure parent directory exists
-    const ensureParentDir = async (absoluteFilePath: string, relativePath: string) => {
-      // Get parent directory from absolute file path
-      const lastSlash = absoluteFilePath.lastIndexOf('/');
-      if (lastSlash === -1) return;
-      
-      const parentDir = absoluteFilePath.substring(0, lastSlash);
-      
-      try {
-        // Check if parent already exists
-        const exists = await fs.pathExists(parentDir);
-        if (exists) return;
-        
-        // Get the relative path parts to build directories
-        const pathParts = relativePath.split('/');
-        pathParts.pop(); // Remove filename
-        
-        // Build directories incrementally from workspace root
-        let currentRelativePath = '';
-        for (const part of pathParts) {
-          if (!part) continue;
-          currentRelativePath += (currentRelativePath ? '/' : '') + part;
-          const currentAbsolutePath = `${currentWorkspace.rootPath}/${currentRelativePath}`;
-          
-          const dirExists = await fs.pathExists(currentAbsolutePath);
-          if (!dirExists) {
-            console.log(`Creating directory: ${currentAbsolutePath}`);
-            await fs.createDirectory(currentAbsolutePath);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to ensure parent directory:', error);
-        throw error;
-      }
-    };
-
     try {
       // Normalize paths: remove leading slashes from operation path, normalize double slashes
-      const normalizedOpPath = item.operation.path.replace(/^\/+/, '');
-      const fullPath = `${currentWorkspace.rootPath}/${normalizedOpPath}`.replace(/\/+/g, '/');
+      const { normalizedOpPath, fullPath } = normalizeOperationPath(item.operation.path, currentWorkspace.rootPath);
       console.log(`[FileOps] Single accept - full path: ${fullPath}`);
       
       if (item.operation.type === 'create') {
@@ -3837,7 +3956,7 @@ export function AIPanel() {
           console.log(`[FileOps] File already exists, skipping: ${normalizedOpPath}`);
           // Mark as applied even though we skipped it
           setAllPendingOps(prev => prev.map((op, idx) => 
-            idx === index ? { ...op, applied: true } : op
+            idx === index ? { ...op, applied: true, wasSkipped: true, previousExists: true } : op
           ));
           window.dispatchEvent(new CustomEvent('show-notification', {
             detail: { message: `File already exists: ${normalizedOpPath}`, type: 'info' }
@@ -3854,32 +3973,37 @@ export function AIPanel() {
         // Save to local history
         await history.save(normalizedOpPath, item.operation.content || '').catch(console.error);
         await openFile(fullPath);
+        setAllPendingOps(prev => prev.map((op, idx) => 
+          idx === index ? { ...op, applied: true, previousExists: false, previousContent: undefined, wasSkipped: false } : op
+        ));
       } else if (item.operation.type === 'edit') {
-        if (item.operation.mode === 'replace' && item.operation.oldContent && item.operation.newContent) {
-          const currentContent = await fs.readFile(fullPath);
-          const updatedContent = currentContent.replace(item.operation.oldContent, item.operation.newContent);
-          await fs.writeFile(fullPath, updatedContent);
-          // Save to local history
-          await history.save(item.operation.path, updatedContent).catch(console.error);
-          await openFile(fullPath);
-        } else if (item.operation.mode === 'insert' && item.operation.line && item.operation.newContent) {
-          const currentContent = await fs.readFile(fullPath);
-          const lines = currentContent.split('\n');
-          lines.splice(item.operation.line - 1, 0, item.operation.newContent);
-          const updatedContent = lines.join('\n');
-          await fs.writeFile(fullPath, updatedContent);
-          // Save to local history
-          await history.save(item.operation.path, updatedContent).catch(console.error);
-          await openFile(fullPath);
-        }
-      } else if (item.operation.type === 'delete') {
-        await fs.deletePath(fullPath);
-      }
+        const previousContent = await fs.readFile(fullPath);
+        const { updatedContent, changed } = applyEditOperation(previousContent, item.operation);
 
-      // Mark as applied
-      setAllPendingOps(prev => prev.map((op, idx) => 
-        idx === index ? { ...op, applied: true } : op
-      ));
+        if (!changed) {
+          setAllPendingOps(prev => prev.map((op, idx) => 
+            idx === index ? { ...op, applied: true, previousExists: true, previousContent, wasSkipped: true } : op
+          ));
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: `No changes applied: ${item.operation.path}`, type: 'info' }
+          }));
+          return;
+        }
+
+        await fs.writeFile(fullPath, updatedContent);
+        // Save to local history
+        await history.save(item.operation.path, updatedContent).catch(console.error);
+        await openFile(fullPath);
+        setAllPendingOps(prev => prev.map((op, idx) => 
+          idx === index ? { ...op, applied: true, previousExists: true, previousContent, wasSkipped: false } : op
+        ));
+      } else if (item.operation.type === 'delete') {
+        const previousContent = await fs.readFile(fullPath);
+        await fs.deletePath(fullPath);
+        setAllPendingOps(prev => prev.map((op, idx) => 
+          idx === index ? { ...op, applied: true, previousExists: true, previousContent, wasSkipped: false } : op
+        ));
+      }
 
       // Mark operation as permanently kept in conversation history
       const { markFileOperationsAsKept } = useAIStore.getState();
@@ -3898,10 +4022,33 @@ export function AIPanel() {
   };
 
   const handleUndoFileOperation = (index: number) => {
-    setAllPendingOps(prev => prev.filter((_, idx) => idx !== index));
-    window.dispatchEvent(new CustomEvent('show-notification', {
-      detail: { message: 'Removed file operation', type: 'info' }
-    }));
+    void (async () => {
+      const item = allPendingOps[index];
+      if (!item) return;
+
+      const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      let undone = false;
+
+      if (item.applied) {
+        try {
+          undone = await revertOperation(item);
+        } catch (error) {
+          console.error('Failed to undo file operation:', error);
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: `Failed to undo ${item.operation.path}: ${error}`, type: 'error' }
+          }));
+          return;
+        }
+      }
+
+      const operationId = `${item.messageId}:${item.operation.type}:${item.operation.path}`;
+      unmarkFileOperationsAsKept([operationId]);
+
+      setAllPendingOps(prev => prev.filter((_, idx) => idx !== index));
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: { message: undone ? `Undid ${item.operation.path}` : 'Removed file operation', type: 'info' }
+      }));
+    })();
   };
 
   const handleReviewOperations = () => {
@@ -4021,6 +4168,14 @@ export function AIPanel() {
           >
             <Plus size={14} />
             <span>New Chat</span>
+          </button>
+          <button
+            className={styles.headerBtn}
+            onClick={() => summarizeConversation('manual')}
+            title="Summarize chat"
+            disabled={!activeConversation || isSummarizing}
+          >
+            {isSummarizing ? <Loader2 size={16} className={styles.spinning} /> : <FileText size={16} />}
           </button>
           <button
             className={`${styles.headerBtn} ${showHistory ? styles.active : ''}`}
@@ -4175,6 +4330,37 @@ export function AIPanel() {
                 </div>
               </div>
             )}
+            {activeConversation.summary && (
+              <div className={styles.summaryCard}>
+                <div
+                  className={styles.summaryHeader}
+                  onClick={() => setSummaryExpanded((prev) => !prev)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === 'Enter' && setSummaryExpanded((prev) => !prev)}
+                >
+                  <div className={styles.summaryHeaderLeft}>
+                    <FileText size={14} />
+                    <span className={styles.summaryTitle}>Conversation Summary</span>
+                  </div>
+                  <div className={styles.summaryHeaderRight}>
+                    {activeConversation.summaryUpdatedAt && (
+                      <span className={styles.summaryMeta}>
+                        {formatDate(activeConversation.summaryUpdatedAt)}
+                      </span>
+                    )}
+                    <span className={styles.summaryToggle}>
+                      {summaryExpanded ? 'Hide' : 'Show'}
+                    </span>
+                  </div>
+                </div>
+                {summaryExpanded && (
+                  <div className={styles.summaryContent}>
+                    <MarkdownRenderer content={activeConversation.summary} />
+                  </div>
+                )}
+              </div>
+            )}
             {(agentMode === 'agent' || agentMode === 'edit' || agentMode === 'plan') && (
               <div className={styles.modeBanner}>
                 <div className={styles.modeBannerIcon}>
@@ -4186,9 +4372,9 @@ export function AIPanel() {
                   </strong>
                   <p>
                     {agentMode === 'agent' 
-                      ? 'The AI can create, edit, and delete files in your workspace. All changes require your approval.'
+                      ? 'The AI can create, edit, and delete files in your workspace. Changes apply automatically, and you can undo them in File Operations.'
                       : agentMode === 'edit'
-                      ? 'The AI will help you edit existing files with precise changes. All edits require your approval.'
+                      ? 'The AI will help you edit existing files with precise changes. Edits apply automatically, and you can undo them in File Operations.'
                       : 'The AI will help you plan and design solutions before implementation. Focus on architecture, approaches, and breaking down tasks.'}
                   </p>
                 </div>
@@ -4208,7 +4394,7 @@ export function AIPanel() {
                   const { isFileOperationKept } = useAIStore.getState();
                   
                   // Check if operations are kept or if files already exist
-                  const opsWithStatus = await Promise.all(
+                  const opsWithStatus: PendingFileOperation[] = await Promise.all(
                     ops.map(async (op) => {
                       const operationId = `${message.id}:${op.type}:${op.path}`;
                       

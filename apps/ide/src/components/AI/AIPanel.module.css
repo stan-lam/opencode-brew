@@ -80,6 +80,11 @@
   color: var(--accent-blue);
 }
 
+.headerBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -3971,6 +3976,60 @@
   padding: 1px 5px;
   background: rgba(0, 122, 204, 0.15);
   border-radius: 3px;
+}
+
+/* Summary card */
+.summaryCard {
+  margin: 8px 12px 0;
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 8px;
+  background: var(--bg-secondary, #252526);
+  overflow: hidden;
+}
+
+.summaryHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text-secondary, #aaa);
+  background: var(--bg-tertiary, #1f1f1f);
+}
+
+.summaryHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.summaryHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.summaryTitle {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.summaryMeta {
+  font-size: 10px;
+  color: var(--text-muted, #888);
+}
+
+.summaryToggle {
+  font-size: 10px;
+  color: var(--text-muted, #888);
+}
+
+.summaryContent {
+  padding: 10px 12px 12px;
+  color: var(--text-secondary, #aaa);
+  font-size: 12px;
 }
 
 /* Per-message usage display */

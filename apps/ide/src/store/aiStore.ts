@@ -73,6 +73,9 @@ export interface AIConversation {
   createdAt: string;
   updatedAt: string;
   appliedFileOps?: string[]; // Array of operation identifiers that have been kept
+  summary?: string;
+  summaryMessageCount?: number;
+  summaryUpdatedAt?: string;
 }
 
 export interface CustomPricing {
@@ -124,6 +127,7 @@ interface AIState {
   mcpServerStates: MCPServerState[];
   sessionUsage: SessionUsage;
   lastMessageUsage: MessageUsage | null;
+  isSummarizing: boolean;
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
   updateSessionUsage: (usage: MessageUsage) => void;
@@ -153,7 +157,9 @@ interface AIState {
   importConversationsFromPath: (sourcePath: string) => Promise<{ imported: number; error?: string }>;
   exportConversation: (conversationId: string) => Promise<string | null>;
   markFileOperationsAsKept: (operationIds: string[]) => void;
+  unmarkFileOperationsAsKept: (operationIds: string[]) => void;
   isFileOperationKept: (operationId: string) => boolean;
+  summarizeConversation: (reason?: 'auto' | 'manual') => Promise<void>;
   addMCPServer: (config: MCPServerConfig) => void;
   removeMCPServer: (serverId: string) => void;
   updateMCPServer: (serverId: string, config: Partial<MCPServerConfig>) => void;
@@ -168,10 +174,49 @@ const SAVE_HISTORY_DEBOUNCE_MS = 2000;
 const MIN_SAVE_INTERVAL_MS = 8000;
 const STREAM_IDLE_TIMEOUT_MS = 90000;
 const STREAM_COMPLETION_TIMEOUT_MS = 12000;
+const SUMMARY_KEEP_MESSAGES = 8;
+const SUMMARY_MAX_TOKENS = 700;
+const SUMMARY_TIMEOUT_MS = 60000;
 let saveHistoryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let saveHistoryInFlight = false;
 let saveHistoryQueued = false;
 let lastHistorySaveAt = 0;
+
+const SUMMARY_SYSTEM_PROMPT = `You summarize developer conversations to preserve context while reducing tokens.
+Summarize in concise bullet points. Include:
+- Key decisions and constraints
+- Files or components touched
+- Any pending tasks or open questions
+- Important context needed to continue
+Keep it under 12 bullets and avoid speculation.`;
+
+function formatMessageForSummary(message: AIMessage): string {
+  const roleLabel = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Assistant' : 'System';
+  const attachmentText = message.attachments && message.attachments.length > 0
+    ? ` [attachments: ${message.attachments.map(att => att.name).join(', ')}]`
+    : '';
+  return `${roleLabel}: ${message.content}${attachmentText}`;
+}
+
+function buildSummaryPrompt(existingSummary: string | undefined, messages: AIMessage[]): string {
+  const formattedMessages = messages.map(formatMessageForSummary).join('\n');
+  if (existingSummary) {
+    return `Existing summary:\n${existingSummary}\n\nNew messages:\n${formattedMessages}`;
+  }
+  return `Messages:\n${formattedMessages}`;
+}
+
+function getConversationContext(conversation: AIConversation, excludeLastMessage: boolean) {
+  const summaryMessageCount = conversation.summaryMessageCount || 0;
+  const endIndex = excludeLastMessage
+    ? Math.max(0, conversation.messages.length - 1)
+    : conversation.messages.length;
+  const startIndex = Math.min(summaryMessageCount, endIndex);
+  return {
+    summary: conversation.summary,
+    messages: conversation.messages.slice(startIndex, endIndex),
+  };
+}
 
 /**
  * Converts a workspace filesystem path into a safe directory name by replacing
@@ -1205,6 +1250,7 @@ export const useAIStore = create<AIState>()(
         turnCount: 0,
       },
       lastMessageUsage: null,
+      isSummarizing: false,
 
       setConfig: (newConfig) => {
         set((state) => ({
@@ -1628,7 +1674,8 @@ export const useAIStore = create<AIState>()(
           set({ thinkingStatus: 'Gathering context from open files...' });
           
           // Build messages array for API call - use enhanced content for the actual API call
-          const conversationMessages = get().activeConversation!.messages;
+          const activeConversation = get().activeConversation!;
+          const { summary, messages: contextMessages } = getConversationContext(activeConversation, true);
           const { agentMode } = get();
           
           // Build system prompt based on mode
@@ -1661,7 +1708,8 @@ export const useAIStore = create<AIState>()(
           
           const messages = [
             { role: 'system', content: systemPrompt, attachments: undefined },
-            ...conversationMessages.slice(0, -1).map(m => ({
+            ...(summary ? [{ role: 'system' as const, content: `Conversation Summary:\n${summary}`, attachments: undefined }] : []),
+            ...contextMessages.map(m => ({
               role: m.role,
               content: m.content,
               attachments: m.attachments,
@@ -1896,9 +1944,11 @@ export const useAIStore = create<AIState>()(
                     }
                     
                     // Build continuation messages with web results as context
+                    const { summary, messages: contextMessages } = getConversationContext(conv, true);
                     const continuationMessages = [
                       { role: 'system', content: systemPrompt, attachments: undefined },
-                      ...conv.messages.slice(0, -1).map(m => ({
+                      ...(summary ? [{ role: 'system' as const, content: `Conversation Summary:\n${summary}`, attachments: undefined }] : []),
+                      ...contextMessages.map(m => ({
                         role: m.role,
                         content: m.content,
                         attachments: m.attachments,
@@ -2148,9 +2198,11 @@ export const useAIStore = create<AIState>()(
                       }
                       
                       // Build continuation messages with file contents
+                      const { summary, messages: contextMessages } = getConversationContext(conv, true);
                       const continuationMessages = [
                         { role: 'system', content: systemPrompt, attachments: undefined },
-                        ...conv.messages.slice(0, -1).map(m => ({
+                        ...(summary ? [{ role: 'system' as const, content: `Conversation Summary:\n${summary}`, attachments: undefined }] : []),
+                        ...contextMessages.map(m => ({
                           role: m.role,
                           content: m.content,
                           attachments: m.attachments,
@@ -2742,6 +2794,166 @@ export const useAIStore = create<AIState>()(
         });
         // Auto-save after marking operations
         get().saveWorkspaceHistory();
+      },
+
+      unmarkFileOperationsAsKept: (operationIds: string[]) => {
+        set((state) => {
+          const conv = state.activeConversation;
+          if (!conv || !conv.appliedFileOps) return state;
+
+          const updatedKept = conv.appliedFileOps.filter(
+            (opId) => !operationIds.includes(opId)
+          );
+
+          const updatedConversation = {
+            ...conv,
+            appliedFileOps: updatedKept,
+            updatedAt: new Date().toISOString(),
+          };
+
+          return {
+            activeConversation: updatedConversation,
+            conversations: state.conversations.map((c) =>
+              c.id === conv.id ? updatedConversation : c
+            ),
+          };
+        });
+        // Auto-save after unmarking operations
+        get().saveWorkspaceHistory();
+      },
+
+      summarizeConversation: async (reason = 'manual') => {
+        const { activeConversation, config, isSummarizing } = get();
+        if (!activeConversation || isSummarizing) return;
+
+        const summaryStartIndex = activeConversation.summaryMessageCount || 0;
+        const summaryEndIndex = Math.max(
+          activeConversation.messages.length - SUMMARY_KEEP_MESSAGES,
+          summaryStartIndex
+        );
+
+        if (summaryEndIndex <= summaryStartIndex) {
+          if (reason === 'manual') {
+            window.dispatchEvent(new CustomEvent('show-notification', {
+              detail: { message: 'Not enough new messages to summarize yet.', type: 'info' }
+            }));
+          }
+          return;
+        }
+
+        const messagesToSummarize = activeConversation.messages.slice(summaryStartIndex, summaryEndIndex);
+        if (messagesToSummarize.length === 0) return;
+
+        set({ isSummarizing: true });
+
+        let summaryUnlisten: (() => void) | null = null;
+        try {
+          const { ai } = await import('../services/tauri');
+          const summaryPrompt = buildSummaryPrompt(activeConversation.summary, messagesToSummarize);
+          const summaryMessages = [
+            { role: 'system', content: SUMMARY_SYSTEM_PROMPT, attachments: undefined },
+            { role: 'user', content: summaryPrompt, attachments: undefined },
+          ];
+
+          const summaryId = `summary-${activeConversation.id}-${Date.now()}`;
+          let summaryContent = '';
+          let resolveSummary: ((value: string) => void) | null = null;
+          let rejectSummary: ((reason?: Error) => void) | null = null;
+          const summaryPromise = new Promise<string>((resolve, reject) => {
+            resolveSummary = resolve;
+            rejectSummary = reject;
+          });
+
+          let timeoutId: ReturnType<typeof setTimeout> | null = null;
+          summaryUnlisten = await ai.onStreamChunk(summaryId, (chunk) => {
+            if (chunk.content) {
+              summaryContent += chunk.content;
+            }
+            if (chunk.done) {
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+              }
+              summaryUnlisten?.();
+              resolveSummary?.(summaryContent.trim());
+            }
+          });
+
+          timeoutId = setTimeout(() => {
+            summaryUnlisten?.();
+            rejectSummary?.(new Error('Summary generation timed out'));
+          }, SUMMARY_TIMEOUT_MS);
+
+          if (config.provider === 'ollama') {
+            await ai.chatOllama(
+              config.baseUrl || 'http://localhost:11434',
+              config.model,
+              summaryMessages,
+              0.2,
+              SUMMARY_MAX_TOKENS,
+              summaryId
+            );
+          } else if (config.provider === 'copilot') {
+            await ai.chatCopilot(
+              config.model,
+              summaryMessages,
+              0.2,
+              SUMMARY_MAX_TOKENS,
+              summaryId
+            );
+          } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
+            const baseUrl = config.provider === 'openai'
+              ? 'https://api.openai.com/v1'
+              : config.provider === 'claude'
+              ? 'https://api.anthropic.com/v1'
+              : config.baseUrl || '';
+
+            await ai.chatOpenAI(
+              baseUrl,
+              config.apiKey || '',
+              config.model,
+              summaryMessages,
+              0.2,
+              SUMMARY_MAX_TOKENS,
+              summaryId
+            );
+          }
+
+          const summary = await summaryPromise;
+          if (!summary) {
+            throw new Error('Summary was empty');
+          }
+
+          set((state) => {
+            const conv = state.activeConversation;
+            if (!conv) return state;
+            const updatedConversation: AIConversation = {
+              ...conv,
+              summary,
+              summaryMessageCount: summaryEndIndex,
+              summaryUpdatedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            return {
+              activeConversation: updatedConversation,
+              conversations: state.conversations.map((c) =>
+                c.id === conv.id ? updatedConversation : c
+              ),
+            };
+          });
+
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: 'Conversation summarized.', type: 'success' }
+          }));
+          get().saveWorkspaceHistory();
+        } catch (error) {
+          summaryUnlisten?.();
+          console.error('[aiStore] summary failed', error);
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: `Failed to summarize: ${error}`, type: 'error' }
+          }));
+        } finally {
+          set({ isSummarizing: false });
+        }
       },
 
       isFileOperationKept: (operationId: string) => {

@@ -362,7 +362,7 @@ export function GitPanel() {
           <button 
             className={styles.actionBtn} 
             onClick={handlePush}
-            disabled={isPulling || isPushing}
+            disabled={isPulling || isPushing || (stagedFiles.length === 0 && !commitMessage.trim())}
             title="Push"
           >
             {isPushing ? <RefreshCw size={16} className={styles.spinner} /> : <Upload size={16} />}
