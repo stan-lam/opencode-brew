@@ -1,17 +1,25 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type MouseEvent } from 'react';
 import {
   ChevronRight,
   ChevronDown,
   FolderPlus,
   FilePlus,
   RefreshCw,
+  Trash2,
+  Pencil,
+  Copy,
+  FolderOpen,
+  Terminal,
+  FileText,
 } from 'lucide-react';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useEditorStore } from '../../store/editorStore';
+import { useLayoutStore } from '../../store/layoutStore';
 import { fs, dialog, FileEntry, FileChangeEvent } from '../../services/tauri';
 import styles from './FileTree.module.css';
+import { ContextMenu, ContextMenuFileItem, ContextMenuItem, ContextMenuPosition } from './ContextMenu';
 
 interface TreeNode extends FileEntry {
   isDirectory: boolean;
@@ -330,10 +338,11 @@ interface TreeItemProps {
   depth: number;
   onToggle: (path: string) => void;
   onSelect: (node: TreeNode) => void;
+  onContextMenu: (event: MouseEvent<HTMLDivElement>, node: TreeNode) => void;
   selectedPath: string | null;
 }
 
-function TreeItem({ node, depth, onToggle, onSelect, selectedPath }: TreeItemProps) {
+function TreeItem({ node, depth, onToggle, onSelect, onContextMenu, selectedPath }: TreeItemProps) {
   const isSelected = selectedPath === node.path;
 
   const handleClick = () => {
@@ -356,6 +365,7 @@ function TreeItem({ node, depth, onToggle, onSelect, selectedPath }: TreeItemPro
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
+        onContextMenu={(event) => onContextMenu(event, node)}
       >
         <span className={styles.chevron}>
           {node.isDirectory && (
@@ -376,6 +386,7 @@ function TreeItem({ node, depth, onToggle, onSelect, selectedPath }: TreeItemPro
               depth={depth + 1}
               onToggle={onToggle}
               onSelect={onSelect}
+              onContextMenu={onContextMenu}
               selectedPath={selectedPath}
             />
           ))}
@@ -392,6 +403,12 @@ export function FileTree() {
   const [isLoading, setIsLoading] = useState(false);
   const [newItemType, setNewItemType] = useState<'file' | 'folder' | null>(null);
   const [newItemName, setNewItemName] = useState('');
+  const [contextMenu, setContextMenu] = useState<{
+    position: ContextMenuPosition;
+    fileItem: ContextMenuFileItem | null;
+  } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<ContextMenuFileItem | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
   const loadDirectory = useCallback(async (dirPath: string): Promise<TreeNode[]> => {
     try {
@@ -525,10 +542,58 @@ export function FileTree() {
 
   const handleSelect = (node: TreeNode) => {
     setSelectedPath(node.path);
+    setContextMenu(null);
+  };
+
+  const resolveAbsolutePath = useCallback((path: string): string => {
+    const rootPath = currentWorkspace?.rootPath;
+    if (!rootPath) return path;
+    if (path.startsWith(rootPath)) return path;
+    if (path.startsWith('/')) return path;
+    return `${rootPath}/${path}`.replace(/\/+/g, '/');
+  }, [currentWorkspace?.rootPath]);
+
+  const getRelativePath = useCallback((path: string): string => {
+    const rootPath = currentWorkspace?.rootPath;
+    if (!rootPath) return path;
+    const normalizedRoot = rootPath.replace(/\/$/, '');
+    const normalizedPath = path.replace(/\/$/, '');
+    if (normalizedPath === normalizedRoot) return '.';
+    if (normalizedPath.startsWith(`${normalizedRoot}/`)) {
+      return normalizedPath.slice(normalizedRoot.length + 1) || '.';
+    }
+    return normalizedPath;
+  }, [currentWorkspace?.rootPath]);
+
+  const getParentPathForTarget = (path: string, isDirectory: boolean): string => {
+    const absolutePath = resolveAbsolutePath(path);
+    if (isDirectory) return absolutePath;
+    const parts = absolutePath.split('/');
+    parts.pop();
+    return parts.join('/') || currentWorkspace?.rootPath || '';
+  };
+
+  const getParentDirectoryPath = (path: string): string => {
+    const absolutePath = resolveAbsolutePath(path);
+    const parts = absolutePath.split('/');
+    parts.pop();
+    return parts.join('/') || currentWorkspace?.rootPath || '';
+  };
+
+  const selectCreateTarget = (item: ContextMenuFileItem | null) => {
+    if (!currentWorkspace?.rootPath) return;
+    if (!item) {
+      setSelectedPath(currentWorkspace.rootPath);
+      return;
+    }
+    setSelectedPath(getParentPathForTarget(item.path, item.isDirectory));
   };
 
   const getParentPath = (): string => {
     if (selectedPath) {
+      if (selectedPath === currentWorkspace?.rootPath) {
+        return selectedPath;
+      }
       const selectedNode = findNode(tree, selectedPath);
       if (selectedNode?.isDirectory) {
         return selectedPath;
@@ -551,12 +616,266 @@ export function FileTree() {
     return null;
   };
 
+  const handleCopyToClipboard = async (text: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch (error) {
+      console.error('Failed to copy via clipboard API:', error);
+    }
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    } catch (error) {
+      console.error('Failed to copy via execCommand:', error);
+    }
+  };
+
+  const startRename = (item: ContextMenuFileItem) => {
+    setNewItemType(null);
+    setNewItemName('');
+    setContextMenu(null);
+    setRenameTarget(item);
+    setRenameValue(item.name);
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!renameTarget) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === renameTarget.name || trimmed.includes('/')) {
+      setRenameTarget(null);
+      setRenameValue('');
+      return;
+    }
+
+    const parentPath = getParentDirectoryPath(renameTarget.path);
+    const newPath = `${parentPath}/${trimmed}`;
+    const oldPath = resolveAbsolutePath(renameTarget.path);
+
+    try {
+      await fs.renamePath(oldPath, newPath);
+      if (!renameTarget.isDirectory) {
+        const editorStore = useEditorStore.getState();
+        editorStore.closeFile(oldPath);
+        editorStore.openFile(newPath);
+      }
+      setSelectedPath(newPath);
+      await loadWorkspace();
+    } catch (error) {
+      console.error('Failed to rename:', error);
+    }
+
+    setRenameTarget(null);
+    setRenameValue('');
+  };
+
+  const handleCancelRename = () => {
+    setRenameTarget(null);
+    setRenameValue('');
+  };
+
+  const handleRenameItem = (item: ContextMenuFileItem) => {
+    startRename(item);
+  };
+
+  const handleDeleteItem = async (item: ContextMenuFileItem) => {
+    const confirmed = window.confirm(
+      `Delete ${item.isDirectory ? 'folder' : 'file'} "${item.name}"?`
+    );
+    if (!confirmed) return;
+
+    try {
+      const targetPath = resolveAbsolutePath(item.path);
+      await fs.deletePath(targetPath);
+      if (!item.isDirectory) {
+        useEditorStore.getState().closeFile(targetPath);
+      }
+      if (selectedPath === item.path || selectedPath === targetPath) {
+        setSelectedPath(null);
+      }
+      await loadWorkspace();
+    } catch (error) {
+      console.error('Failed to delete:', error);
+    }
+  };
+
+  const handleRevealInFinder = async (path: string) => {
+    const revealPath = resolveAbsolutePath(path);
+    try {
+      await fs.revealInFinder(revealPath);
+    } catch (error) {
+      console.error('Failed to reveal in Finder:', error);
+    }
+  };
+
+  const handleOpenInTerminal = (item: ContextMenuFileItem | null) => {
+    const targetPath = item
+      ? getParentPathForTarget(item.path, item.isDirectory)
+      : currentWorkspace?.rootPath;
+    const resolvedPath = targetPath ? resolveAbsolutePath(targetPath) : targetPath;
+    if (!resolvedPath) return;
+
+    const escapedPath = resolvedPath.replace(/"/g, '\\"');
+    useLayoutStore.getState().setActiveBottomTab('terminal');
+    const terminalId = `file-tree-${Date.now()}`;
+    window.dispatchEvent(new CustomEvent('run-command', {
+      detail: {
+        terminalId,
+        command: `cd "${escapedPath}" && pwd`,
+        cwd: resolvedPath,
+        label: item ? `Terminal: ${item.name}` : 'Terminal',
+      },
+    }));
+  };
+
+  const handleOpenContextMenu = (event: MouseEvent<HTMLDivElement>, node?: TreeNode) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setRenameTarget(null);
+    setRenameValue('');
+    let item = node
+      ? { path: node.path, name: node.name, isDirectory: node.isDirectory }
+      : null;
+    if (!item && selectedPath) {
+      const selectedNode = findNode(tree, selectedPath);
+      if (selectedNode) {
+        item = { path: selectedNode.path, name: selectedNode.name, isDirectory: selectedNode.isDirectory };
+      }
+    }
+    if (item) {
+      setSelectedPath(item.path);
+    }
+    setContextMenu({
+      position: { x: event.clientX, y: event.clientY },
+      fileItem: item,
+    });
+  };
+
+  const buildContextMenuItems = (item: ContextMenuFileItem | null): ContextMenuItem[] => {
+    const rootPath = currentWorkspace?.rootPath;
+    const targetPath = item?.path || rootPath;
+    const resolvedTargetPath = targetPath ? resolveAbsolutePath(targetPath) : undefined;
+    const isRoot = Boolean(item && rootPath && item.path === rootPath);
+
+    const items: ContextMenuItem[] = [];
+    const addDivider = (id: string) => {
+      if (items.length > 0 && !items[items.length - 1].divider) {
+        items.push({ id, divider: true });
+      }
+    };
+
+    items.push(
+      {
+        id: 'new-file',
+        label: 'New File',
+        icon: <FilePlus size={14} />,
+        disabled: !rootPath,
+        action: () => {
+          selectCreateTarget(item);
+          handleNewFile();
+        },
+      },
+      {
+        id: 'new-folder',
+        label: 'New Folder',
+        icon: <FolderPlus size={14} />,
+        disabled: !rootPath,
+        action: () => {
+          selectCreateTarget(item);
+          handleNewFolder();
+        },
+      }
+    );
+    addDivider('divider-create');
+
+    if (item && !item.isDirectory) {
+      items.push({
+        id: 'open-file',
+        label: 'Open',
+        icon: <FileText size={14} />,
+        action: () => useEditorStore.getState().openFile(item.path),
+      });
+    }
+
+    if (item) {
+      items.push(
+        {
+          id: 'rename',
+          label: 'Rename',
+          icon: <Pencil size={14} />,
+          disabled: isRoot,
+          action: () => handleRenameItem(item),
+        },
+        {
+          id: 'delete',
+          label: 'Delete',
+          icon: <Trash2 size={14} />,
+          danger: true,
+          disabled: isRoot,
+          action: () => handleDeleteItem(item),
+        }
+      );
+    }
+
+    if (resolvedTargetPath) {
+      addDivider('divider-path');
+      items.push(
+        {
+          id: 'copy-path',
+          label: 'Copy Path',
+          icon: <Copy size={14} />,
+          action: () => handleCopyToClipboard(resolvedTargetPath),
+        },
+        {
+          id: 'copy-relative-path',
+          label: 'Copy Relative Path',
+          icon: <Copy size={14} />,
+          action: () => handleCopyToClipboard(getRelativePath(resolvedTargetPath)),
+        },
+        {
+          id: 'reveal-finder',
+          label: 'Reveal in Finder',
+          icon: <FolderOpen size={14} />,
+          action: () => handleRevealInFinder(resolvedTargetPath),
+        },
+        {
+          id: 'open-terminal',
+          label: 'Open in Terminal',
+          icon: <Terminal size={14} />,
+          action: () => handleOpenInTerminal(item),
+        },
+        {
+          id: 'refresh',
+          label: 'Refresh',
+          icon: <RefreshCw size={14} />,
+          action: () => void loadWorkspace(),
+        }
+      );
+    }
+
+    return items;
+  };
+
   const handleNewFile = () => {
+    setRenameTarget(null);
+    setRenameValue('');
     setNewItemType('file');
     setNewItemName('');
   };
 
   const handleNewFolder = () => {
+    setRenameTarget(null);
+    setRenameValue('');
     setNewItemType('folder');
     setNewItemName('');
   };
@@ -649,7 +968,27 @@ export function FileTree() {
           <button onClick={handleCancelCreate} className={styles.cancelBtn}>Cancel</button>
         </div>
       )}
-      <div className={styles.treeContent}>
+      {renameTarget && (
+        <div className={styles.newItemInput}>
+          <input
+            type="text"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleRenameSubmit();
+              if (e.key === 'Escape') handleCancelRename();
+            }}
+            placeholder={renameTarget.isDirectory ? 'folder name' : 'filename.ext'}
+            autoFocus
+          />
+          <button onClick={handleRenameSubmit} className={styles.createBtn}>Rename</button>
+          <button onClick={handleCancelRename} className={styles.cancelBtn}>Cancel</button>
+        </div>
+      )}
+      <div
+        className={styles.treeContent}
+        onContextMenu={(event) => handleOpenContextMenu(event)}
+      >
         {isLoading ? (
           <div className={styles.loading}>Loading...</div>
         ) : (
@@ -660,11 +999,19 @@ export function FileTree() {
               depth={0}
               onToggle={handleToggle}
               onSelect={handleSelect}
+              onContextMenu={handleOpenContextMenu}
               selectedPath={selectedPath}
             />
           ))
         )}
       </div>
+      {contextMenu && (
+        <ContextMenu
+          position={contextMenu.position}
+          items={buildContextMenuItems(contextMenu.fileItem)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }

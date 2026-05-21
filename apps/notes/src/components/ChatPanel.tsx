@@ -4,6 +4,7 @@ import { useNotesStore, Message } from '../store/notesStore';
 import styles from './ChatPanel.module.css';
 
 const SETTINGS_KEY = 'opencodebrew-notes-settings';
+const GLOBAL_SETTINGS_KEY = 'opencodebrew-settings';
 
 interface AISettings {
   aiProvider: 'ollama' | 'openai' | 'anthropic' | 'copilot' | 'custom';
@@ -149,9 +150,42 @@ function getAISettings(): AISettings {
   
   try {
     const stored = localStorage.getItem(SETTINGS_KEY);
+    const globalStored = localStorage.getItem(GLOBAL_SETTINGS_KEY);
+    const globalSettings = globalStored ? JSON.parse(globalStored) : null;
     if (stored) {
       const settings = { ...defaults, ...JSON.parse(stored) };
-      return migrateMCPSettings(settings);
+      const mergedSettings = globalSettings
+        ? {
+            ...settings,
+            aiProvider: globalSettings.aiProvider ?? settings.aiProvider,
+            model: globalSettings.model ?? settings.model,
+            ollamaUrl: globalSettings.ollamaUrl ?? settings.ollamaUrl,
+            openaiKey: globalSettings.openaiKey ?? settings.openaiKey,
+            anthropicKey: globalSettings.anthropicKey ?? settings.anthropicKey,
+            customBaseUrl: globalSettings.customBaseUrl ?? settings.customBaseUrl,
+            customApiKey: globalSettings.customApiKey ?? settings.customApiKey,
+            temperature: globalSettings.temperature ?? settings.temperature,
+            maxTokens: globalSettings.maxTokens ?? settings.maxTokens,
+            mcpServers: globalSettings.mcpServers ?? settings.mcpServers,
+          }
+        : settings;
+      return migrateMCPSettings(mergedSettings);
+    }
+    if (globalSettings) {
+      const mergedSettings = {
+        ...defaults,
+        aiProvider: globalSettings.aiProvider ?? defaults.aiProvider,
+        model: globalSettings.model ?? defaults.model,
+        ollamaUrl: globalSettings.ollamaUrl ?? defaults.ollamaUrl,
+        openaiKey: globalSettings.openaiKey ?? defaults.openaiKey,
+        anthropicKey: globalSettings.anthropicKey ?? defaults.anthropicKey,
+        customBaseUrl: globalSettings.customBaseUrl ?? defaults.customBaseUrl,
+        customApiKey: globalSettings.customApiKey ?? defaults.customApiKey,
+        temperature: globalSettings.temperature ?? defaults.temperature,
+        maxTokens: globalSettings.maxTokens ?? defaults.maxTokens,
+        mcpServers: globalSettings.mcpServers ?? defaults.mcpServers,
+      };
+      return migrateMCPSettings(mergedSettings);
     }
   } catch (e) {
     console.error('Failed to load AI settings:', e);
@@ -2090,15 +2124,22 @@ export function ChatPanel() {
             // Update THINKING panel only (not response) while summarizing
             setRawThinkingContent(cleanedContent + '\n\n*Analyzing results...*');
 
-            // Send results back to AI for summarization
-            setWebStatus('Summarizing results...');
-            const summarizedContent = await summarizeWithAI(
-              invoke,
-              settings,
-              userMessage,
-              webResults,
-              conversationId + '-summary'
-            );
+            const hasStockOps = webOps.some(op => op.type === 'get_stock_quote' || op.type === 'get_market_movers');
+            let summarizedContent = webResults;
+
+            if (hasStockOps) {
+              setWebStatus('Using verified stock data...');
+            } else {
+              // Send results back to AI for summarization
+              setWebStatus('Summarizing results...');
+              summarizedContent = await summarizeWithAI(
+                invoke,
+                settings,
+                userMessage,
+                webResults,
+                conversationId + '-summary'
+              );
+            }
             
             // Update thinking with full content (for thinking panel)
             const fullThinkingContent = cleanedContent 

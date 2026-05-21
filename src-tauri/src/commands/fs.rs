@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tauri::{command, Emitter, Manager, Window};
@@ -176,6 +177,57 @@ pub async fn delete_path(path: String) -> Result<(), String> {
 #[command]
 pub async fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     fs::rename(&old_path, &new_path).map_err(|e| format!("Failed to rename: {}", e))
+}
+
+#[command]
+pub async fn reveal_in_finder(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("open");
+        if p.is_dir() {
+            cmd.arg(&path);
+        } else {
+            cmd.arg("-R").arg(&path);
+        }
+        cmd.status().map_err(|e| format!("Failed to reveal in Finder: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("explorer");
+        if p.is_dir() {
+            cmd.arg(&path);
+        } else {
+            cmd.arg(format!("/select,{}", &path));
+        }
+        cmd.status().map_err(|e| format!("Failed to reveal in Explorer: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = Command::new("xdg-open");
+        let open_target = if p.is_dir() {
+            path.clone()
+        } else {
+            p.parent()
+                .and_then(|parent| parent.to_str())
+                .unwrap_or(&path)
+                .to_string()
+        };
+        cmd.arg(open_target);
+        cmd.status().map_err(|e| format!("Failed to reveal in file manager: {}", e))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Reveal in Finder is not supported on this platform".to_string())
 }
 
 #[command]

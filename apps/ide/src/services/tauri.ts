@@ -224,6 +224,11 @@ export const fs = {
     const invoke = await getInvoke();
     return invoke('rename_path', { oldPath, newPath });
   },
+
+  revealInFinder: async (path: string): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('reveal_in_finder', { path });
+  },
   
   getFileInfo: async (path: string): Promise<FileInfo> => {
     const invoke = await getInvoke();
@@ -301,6 +306,11 @@ export const shell = {
   openExternal: async (url: string): Promise<void> => {
     const { open } = await getShell();
     await open(url);
+  },
+  runCommand: async (program: string, args: string[] = []): Promise<void> => {
+    const { Command } = await getShell();
+    const command = Command.create(program, args);
+    await command.execute();
   },
 };
 

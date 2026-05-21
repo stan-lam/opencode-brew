@@ -66,6 +66,7 @@ const greeting = "Hi there";
 
 IMPORTANT:
 - Always use relative paths from the workspace root
+- Parent directories are created automatically; nested paths can create folders
 - Explain what you're doing before each operation
 - For edits, include enough context in old_content to uniquely identify the location
 - Multiple operations are allowed in a single response

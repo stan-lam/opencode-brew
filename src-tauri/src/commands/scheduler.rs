@@ -83,8 +83,8 @@ async fn validate_against_live_data(symbols_prices: Vec<(String, f64)>) -> (Vec<
             Ok(quote) => {
                 let real_price = quote.price;
                 
-                // Price tolerance: allow 10% difference (for delayed data, rounding, etc.)
-                let tolerance = real_price * 0.10;
+                // Price tolerance: allow 2% or $0.50 difference (for delayed data/rounding)
+                let tolerance = (real_price * 0.02).max(0.50);
                 let diff = (claimed_price - real_price).abs();
                 
                 if diff > tolerance && diff > 5.0 {
@@ -119,7 +119,37 @@ async fn validate_against_live_data(symbols_prices: Vec<(String, f64)>) -> (Vec<
     (fake_symbols, wrong_prices)
 }
 
-// Validate AI response and add warning if fake data detected
+async fn fetch_valid_quotes(symbols: &[String]) -> (Vec<web::StockQuote>, Vec<String>) {
+    let mut quotes = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen = HashSet::new();
+
+    for symbol in symbols.iter().take(25) {
+        let symbol_upper = symbol.to_uppercase();
+        if !seen.insert(symbol_upper.clone()) {
+            continue;
+        }
+
+        match web::get_stock_quote(symbol_upper.clone()).await {
+            Ok(quote) => quotes.push(quote),
+            Err(_) => failures.push(symbol_upper),
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    (quotes, failures)
+}
+
+fn format_quote_line(quote: &web::StockQuote) -> String {
+    let sign = if quote.change_percent >= 0.0 { "+" } else { "" };
+    format!(
+        "- {} ${:.2} ({}{:.2}%)",
+        quote.symbol, quote.price, sign, quote.change_percent
+    )
+}
+
+// Validate AI response and replace when fake data detected
 async fn validate_and_warn_fake_data(response: &str) -> String {
     // Extract all symbols and their claimed prices
     let symbols_prices = extract_symbols_and_prices(response);
@@ -134,8 +164,8 @@ async fn validate_and_warn_fake_data(response: &str) -> String {
         symbols_prices.iter().map(|(s, p)| format!("{}=${:.2}", s, p)).collect::<Vec<_>>()
     );
     
-    // Limit validation to first 10 symbols to avoid too many API calls
-    let to_validate: Vec<_> = symbols_prices.into_iter().take(10).collect();
+    // Validate up to 50 symbols for accuracy
+    let to_validate: Vec<_> = symbols_prices.clone().into_iter().take(50).collect();
     
     // Validate against live market data
     let (fake_symbols, wrong_prices) = validate_against_live_data(to_validate).await;
@@ -145,29 +175,48 @@ async fn validate_and_warn_fake_data(response: &str) -> String {
         return response.to_string();
     }
     
-    // Build warning message
-    let mut warning = String::from("\n\n---\n⚠️ **DATA VALIDATION WARNING** ⚠️\n\n");
-    warning.push_str("Live market data check found discrepancies:\n\n");
-    
-    if !fake_symbols.is_empty() {
-        warning.push_str(&format!("**Invalid symbols (not found in market):** {}\n\n", fake_symbols.join(", ")));
-    }
-    
-    if !wrong_prices.is_empty() {
-        warning.push_str("**Incorrect prices:**\n");
-        for wp in &wrong_prices {
-            warning.push_str(&format!("- {}\n", wp));
+    println!("[validator] Fake/incorrect data detected, rebuilding report with live quotes");
+
+    let symbols: Vec<String> = symbols_prices.iter().map(|(s, _)| s.clone()).collect();
+    let (quotes, failures) = fetch_valid_quotes(&symbols).await;
+
+    let mut corrected = String::from("⚠️ **Stock data validation failed**\n\n");
+    corrected.push_str("The original report contained invalid symbols or inaccurate prices. ");
+    corrected.push_str("Below is a verified list of live quotes for the symbols detected.\n\n");
+
+    if !quotes.is_empty() {
+        corrected.push_str("**✅ Verified Quotes**\n");
+        for quote in &quotes {
+            corrected.push_str(&format!("{}\n", format_quote_line(quote)));
         }
-        warning.push_str("\n");
+        corrected.push_str("\n");
+    } else {
+        corrected.push_str("**✅ Verified Quotes**\nData unavailable.\n\n");
     }
-    
-    warning.push_str("*The AI generated inaccurate data. Prices shown above are from live market data.*\n");
-    warning.push_str("---\n");
-    
-    println!("[validator] Added warning for {} fake symbols, {} wrong prices", 
-        fake_symbols.len(), wrong_prices.len());
-    
-    format!("{}{}", response, warning)
+
+    if !failures.is_empty() {
+        corrected.push_str(&format!(
+            "**⚠️ Symbols with no live quote:** {}\n\n",
+            failures.join(", ")
+        ));
+    }
+
+    if !wrong_prices.is_empty() {
+        corrected.push_str("**Incorrect prices detected:**\n");
+        for wp in &wrong_prices {
+            corrected.push_str(&format!("- {}\n", wp));
+        }
+        corrected.push_str("\n");
+    }
+
+    if !fake_symbols.is_empty() {
+        corrected.push_str(&format!(
+            "**Invalid symbols detected:** {}\n",
+            fake_symbols.join(", ")
+        ));
+    }
+
+    corrected
 }
 
 // ============= Default AI System Prompt (with web access capabilities) =============

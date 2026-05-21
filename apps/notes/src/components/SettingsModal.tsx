@@ -60,6 +60,7 @@ interface SettingsModalProps {
 }
 
 const STORAGE_KEY = 'opencodebrew-notes-settings';
+const GLOBAL_SETTINGS_KEY = 'opencodebrew-settings';
 
 const BUILT_IN_MCP_SERVERS: MCPServer[] = [
   {
@@ -129,6 +130,31 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [loadingModels, setLoadingModels] = useState(false);
   const [usageStats, setUsageStats] = useState<OverallStats | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
+
+  const mergeGlobalAISettings = useCallback((base: Settings) => {
+    const stored = localStorage.getItem(GLOBAL_SETTINGS_KEY);
+    if (!stored) return base;
+    try {
+      const global = JSON.parse(stored);
+      return {
+        ...base,
+        aiProvider: global.aiProvider ?? base.aiProvider,
+        model: global.model ?? base.model,
+        ollamaUrl: global.ollamaUrl ?? base.ollamaUrl,
+        openaiKey: global.openaiKey ?? base.openaiKey,
+        anthropicKey: global.anthropicKey ?? base.anthropicKey,
+        customBaseUrl: global.customBaseUrl ?? base.customBaseUrl,
+        customApiKey: global.customApiKey ?? base.customApiKey,
+        temperature: global.temperature ?? base.temperature,
+        maxTokens: global.maxTokens ?? base.maxTokens,
+        thinkAloud: global.thinkAloud ?? base.thinkAloud,
+        mcpServers: global.mcpServers ?? base.mcpServers,
+      };
+    } catch (error) {
+      console.error('[Notes] Failed to parse global settings:', error);
+      return base;
+    }
+  }, []);
 
   const fetchOllamaModels = useCallback(async (baseUrl: string) => {
     setLoadingModels(true);
@@ -219,11 +245,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           return { ...server, args: newArgs };
         });
         
-        const newSettings = {
+        const newSettings = mergeGlobalAISettings({
           ...settings,
           ...parsed,
           mcpServers,
-        };
+        });
         
         setSettings(newSettings);
         
@@ -235,8 +261,27 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       } catch (e) {
         console.error('Failed to parse settings:', e);
       }
+    } else {
+      const merged = mergeGlobalAISettings(settings);
+      if (merged !== settings) {
+        setSettings(merged);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+      }
     }
-  }, []);
+  }, [mergeGlobalAISettings]);
+
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== GLOBAL_SETTINGS_KEY) return;
+      setSettings((prev) => {
+        const merged = mergeGlobalAISettings(prev);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+        return merged;
+      });
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [mergeGlobalAISettings]);
 
   useEffect(() => {
     if (settings.theme === 'system') {
@@ -250,6 +295,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   const handleSave = () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    const globalStored = localStorage.getItem(GLOBAL_SETTINGS_KEY);
+    const globalSettings = globalStored ? JSON.parse(globalStored) : {};
+    localStorage.setItem(GLOBAL_SETTINGS_KEY, JSON.stringify({
+      ...globalSettings,
+      aiProvider: settings.aiProvider,
+      model: settings.model,
+      ollamaUrl: settings.ollamaUrl,
+      openaiKey: settings.openaiKey,
+      anthropicKey: settings.anthropicKey,
+      customBaseUrl: settings.customBaseUrl,
+      customApiKey: settings.customApiKey,
+      temperature: settings.temperature,
+      maxTokens: settings.maxTokens,
+      thinkAloud: settings.thinkAloud,
+      mcpServers: settings.mcpServers,
+    }));
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };

@@ -1,0 +1,84 @@
+
+.menu {
+  position: fixed;
+  min-width: 220px;
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  z-index: 1000;
+  user-select: none;
+  backdrop-filter: blur(8px);
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--transition-fast);
+}
+
+.menuItem:hover:not(.disabled) {
+  background-color: var(--accent-blue);
+  color: white;
+}
+
+.menuItem.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.menuItem.danger {
+  color: var(--text-danger);
+}
+
+.menuItem.danger:hover {
+  background-color: #c62828;
+  color: white;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shortcut {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+.menuItem:hover:not(.disabled) .shortcut {
+  color: rgba(255, 255, 255, 0.7);
+  opacity: 0.8;
+}
+
+.divider {
+  height: 1px;
+  background-color: var(--border-color);
+  margin: 4px 8px;
+}

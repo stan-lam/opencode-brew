@@ -15,6 +15,28 @@ A modern, cross-platform desktop IDE built with Tauri (Rust) + React + TypeScrip
 - **Plugin System**: Extend functionality with JavaScript/TypeScript plugins
 - **Cross-Platform**: macOS, Windows, Linux support via Tauri
 
+## Screenshots
+
+**Launcher hub**
+
+![OpenCodeBrew launcher](docs/screenshots/landing.png)
+
+**IDE workspace with AI assistant**
+
+![OpenCodeBrew IDE](docs/screenshots/ide.png)
+
+**OpenCodeNotes**
+
+![OpenCodeNotes](docs/screenshots/notes.png)
+
+**OpenCodeAssistant — Agents**
+
+![OpenCodeAssistant agents](docs/screenshots/assistant-agents.png)
+
+**OpenCodeAssistant — History**
+
+![OpenCodeAssistant history](docs/screenshots/assistant-history.png)
+
 ## Architecture
 
 ```
@@ -118,4 +140,4 @@ The IDE remembers recent workspaces. Open folders via:
 
 ## License
 
-MIT
+Apache-2.0

@@ -177,6 +177,14 @@ const STREAM_COMPLETION_TIMEOUT_MS = 12000;
 const SUMMARY_KEEP_MESSAGES = 8;
 const SUMMARY_MAX_TOKENS = 700;
 const SUMMARY_TIMEOUT_MS = 60000;
+const AUTO_CONTINUE_PROMPT = 'Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.';
+const CHAT_FILE_OPS_PROMPT = `
+## FILE OPERATIONS (CHAT MODE)
+
+If the user explicitly asks you to create, edit, or delete files, you MAY use the XML file operation tags.
+Parent directories are created automatically when using <create_file>, so nested paths can create folders as needed.
+Use file operations only when the user asks for changes; otherwise respond normally.
+`;
 let saveHistoryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let saveHistoryInFlight = false;
 let saveHistoryQueued = false;
@@ -1114,19 +1122,20 @@ const defaultConfig: AIProviderConfig = {
 **🚨 ZERO HALLUCINATION POLICY 🚨**
 You must NEVER fabricate, invent, or hallucinate any factual information.
 - For real-world data (prices, news, stats, dates, figures): USE WEB TOOLS to fetch actual data
-- For code questions: ONLY reference code that is explicitly provided in the context
+- For code questions: ONLY reference code you have in context OR after you read/search files using the file tools
 - If you cannot verify something: SAY SO clearly - "I don't have data on this" or "I couldn't find this information"
 - NEVER make up numbers, prices, dates, statistics, or any factual claims
 - When web tools fail: Tell the user "I tried to fetch [X] but the search returned no results" - don't fill in with guesses
 
-**IMPORTANT: YOU HAVE FULL CODEBASE ACCESS**
+**IMPORTANT: YOU HAVE FULL WORKSPACE ACCESS**
 The user's project context is included directly in their messages under "[Context from IDE]":
 - **REPOSITORY STRUCTURE** - Full directory tree of the project
 - **OPEN FILES** - Complete content of files open in the editor  
 - **RELEVANT CODE** - Semantically searched code snippets most relevant to the user's question (with relevance scores)
 
 You DO have access to this information - it is embedded in the message via semantic vector search.
-- Do NOT claim you cannot access files or the repository - the code is RIGHT THERE
+- You can ALSO access any file in the workspace using the file tool tags (read/search/create/edit/delete).
+- Do NOT claim you cannot access files or the repository.
 - The "RELEVANT CODE" section contains code automatically found based on the user's question
 - Use these results to give accurate, specific answers about their codebase
 
@@ -1588,6 +1597,8 @@ export const useAIStore = create<AIState>()(
           }
         }
 
+        const isAutoContinueRequest = content.trim() === AUTO_CONTINUE_PROMPT;
+
         // Enhance the user message with context if it seems like a code question
         const enhancedContent = contextInfo 
           ? `${content}\n\n[Context from IDE]${contextInfo}`
@@ -1694,6 +1705,8 @@ export const useAIStore = create<AIState>()(
             systemPrompt += getPrompt(PROMPT_NAMES.EDIT_MODE);
           } else if (agentMode === 'plan') {
             systemPrompt += getPrompt(PROMPT_NAMES.PLAN_MODE);
+          } else {
+            systemPrompt += CHAT_FILE_OPS_PROMPT;
           }
 
           // Add web access capability for all modes (with current date)
@@ -2294,10 +2307,18 @@ export const useAIStore = create<AIState>()(
                           if (currentConv) {
                             const lastMsg = currentConv.messages[currentConv.messages.length - 1];
                             const contResponseContent = lastMsg?.role === 'assistant' ? lastMsg.content : '';
-                            if (autoContinueCount < MAX_AUTO_CONTINUES && shouldAutoContinue(contResponseContent)) {
+                            const lastUserMessage = [...currentConv.messages].reverse().find(m => m.role === 'user');
+                            const promptQueue = get().promptQueue;
+                            const shouldQueueAutoContinue = !isAutoContinueRequest
+                              && autoContinueCount < MAX_AUTO_CONTINUES
+                              && shouldAutoContinue(contResponseContent)
+                              && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
+                              && !promptQueue.includes(AUTO_CONTINUE_PROMPT);
+
+                            if (shouldQueueAutoContinue) {
                               autoContinueCount++;
                               console.log('[aiStore] auto-continue queued after continuation', { conversationId, attempt: autoContinueCount, max: MAX_AUTO_CONTINUES });
-                              get().queuePrompt('Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.');
+                              get().queuePrompt(AUTO_CONTINUE_PROMPT);
                             }
                           }
                           
@@ -2421,16 +2442,27 @@ export const useAIStore = create<AIState>()(
                     get().advanceAgentTask();
                   }
 
-                  if (autoContinueCount < MAX_AUTO_CONTINUES && shouldAutoContinue(responseContent)) {
+                  const activeConv = get().activeConversation;
+                  const lastUserMessage = activeConv
+                    ? [...activeConv.messages].reverse().find(m => m.role === 'user')
+                    : undefined;
+                  const queuedPrompts = get().promptQueue;
+                  const shouldQueueAutoContinue = !isAutoContinueRequest
+                    && autoContinueCount < MAX_AUTO_CONTINUES
+                    && shouldAutoContinue(responseContent)
+                    && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
+                    && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
+
+                  if (shouldQueueAutoContinue) {
                     autoContinueCount++;
                     console.log('[aiStore] auto-continue queued', { conversationId, attempt: autoContinueCount, max: MAX_AUTO_CONTINUES });
-                    get().queuePrompt('Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.');
+                    get().queuePrompt(AUTO_CONTINUE_PROMPT);
                   }
 
                   // Process next queued prompt if any
-                  const { promptQueue } = get();
-                  if (promptQueue.length > 0) {
-                    const [nextPrompt, ...remaining] = promptQueue;
+                  const { promptQueue: pendingPrompts } = get();
+                  if (pendingPrompts.length > 0) {
+                    const [nextPrompt, ...remaining] = pendingPrompts;
                     set({ promptQueue: remaining });
                     setTimeout(() => get().sendMessage(nextPrompt), 100);
                   }
@@ -2605,9 +2637,12 @@ export const useAIStore = create<AIState>()(
 
       queuePrompt: (content: string) => {
         console.log('[aiStore] queuePrompt', { contentLen: content.length });
-        set((state) => ({
-          promptQueue: [...state.promptQueue, content],
-        }));
+        set((state) => {
+          if (content.trim() === AUTO_CONTINUE_PROMPT && state.promptQueue.includes(AUTO_CONTINUE_PROMPT)) {
+            return state;
+          }
+          return { promptQueue: [...state.promptQueue, content] };
+        });
       },
 
       clearQueue: () => {

@@ -304,6 +304,7 @@ pub fn run() {
             commands::fs::create_directory,
             commands::fs::delete_path,
             commands::fs::rename_path,
+            commands::fs::reveal_in_finder,
             commands::fs::get_file_info,
             commands::fs::path_exists,
             commands::fs::watch_directory,

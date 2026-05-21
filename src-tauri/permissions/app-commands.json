@@ -13,6 +13,7 @@
       "create_directory",
       "delete_path",
       "rename_path",
+      "reveal_in_finder",
       "get_file_info",
       "path_exists",
       "watch_directory",

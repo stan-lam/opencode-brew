@@ -31,7 +31,16 @@
     "dialog:allow-ask",
     "dialog:allow-confirm",
     "shell:default",
-    "shell:allow-open",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "http://*" },
+        { "url": "mailto://*" },
+        { "url": "tel://*" },
+        { "url": "file://*" }
+      ]
+    },
     "process:default",
     "process:allow-exit",
     "process:allow-restart",

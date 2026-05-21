@@ -106,6 +106,7 @@ const greeting = "Hi there";
 
 IMPORTANT:
 - Always use relative paths from the workspace root
+- Parent directories are created automatically; nested paths can create folders
 - Output tool calls as RAW XML - never inside code blocks
 - Explain what you're doing before each operation
 - For edits, include enough context in old_content to uniquely identify the location

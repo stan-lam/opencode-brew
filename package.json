@@ -23,5 +23,6 @@
     "@types/node": "^20.14.0",
     "concurrently": "^9.2.1",
     "typescript": "^5.5.0"
-  }
+  },
+  "license": "Apache-2.0"
 }
