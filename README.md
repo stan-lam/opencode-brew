@@ -19,23 +19,23 @@ A modern, cross-platform desktop IDE built with Tauri (Rust) + React + TypeScrip
 
 **Launcher hub**
 
-OpenCodeBrew launcher
+![OpenCodeBrew launcher](docs/screenshots/landing.jpg)
 
 **IDE workspace with AI assistant**
 
-OpenCodeBrew IDE
+![OpenCodeBrew IDE](docs/screenshots/ide.jpg)
 
 **OpenCodeNotes**
 
-OpenCodeNotes
+![OpenCodeNotes](docs/screenshots/notes.jpg)
 
 **OpenCodeAssistant — Agents**
 
-OpenCodeAssistant agents
+![OpenCodeAssistant agents](docs/screenshots/assistant-agents.jpg)
 
 **OpenCodeAssistant — History**
 
-OpenCodeAssistant history
+![OpenCodeAssistant history](docs/screenshots/assistant-history.jpg)
 
 ## Architecture
 
