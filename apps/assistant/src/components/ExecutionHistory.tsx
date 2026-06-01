@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle, XCircle, Loader2, Clock, ChevronRight, ChevronDown, RefreshCw, Layers, Zap } from 'lucide-react';
+import { Ban, CheckCircle, XCircle, Loader2, Clock, ChevronRight, ChevronDown, RefreshCw, Layers, Zap } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAssistantStore, ExecutionLog, ActionLog } from '../store/assistantStore';
@@ -118,6 +118,7 @@ export function ExecutionHistory() {
   } | null>(null);
   const [expandedStages, setExpandedStages] = useState<Set<number>>(new Set([0]));
   const [fullOutputExpanded, setFullOutputExpanded] = useState(true);
+  const [isCancelling, setIsCancelling] = useState(false);
 
   const toggleStage = (index: number) => {
     setExpandedStages(prev => {
@@ -186,6 +187,8 @@ export function ExecutionHistory() {
         return <XCircle size={16} className={styles.statusFailed} />;
       case 'running':
         return <Loader2 size={16} className={styles.statusRunning} />;
+      case 'cancelled':
+        return <Ban size={16} className={styles.statusCancelled} />;
       default:
         return <Clock size={16} className={styles.statusPending} />;
     }
@@ -201,6 +204,21 @@ export function ExecutionHistory() {
     if (ms < 1000) return `${ms}ms`;
     if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
     return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+  };
+
+  const handleCancelExecution = async () => {
+    if (!executionDetails) return;
+    setIsCancelling(true);
+    try {
+      const invoke = await getInvoke();
+      await invoke('cancel_execution', { executionId: executionDetails.execution.id });
+      await loadExecutionDetails(executionDetails.execution.id);
+      await loadExecutions();
+    } catch (error) {
+      console.error('Failed to cancel execution:', error);
+    } finally {
+      setIsCancelling(false);
+    }
   };
 
   return (
@@ -247,11 +265,23 @@ export function ExecutionHistory() {
         {executionDetails ? (
           <>
             <div className={styles.detailHeader}>
-              <div>
-                <h3>{getAgentName(executionDetails.execution.agent_id)}</h3>
-                <span className={`${styles.statusBadge} ${styles[executionDetails.execution.status]}`}>
-                  {executionDetails.execution.status}
-                </span>
+              <div className={styles.detailHeaderRow}>
+                <div>
+                  <h3>{getAgentName(executionDetails.execution.agent_id)}</h3>
+                  <span className={`${styles.statusBadge} ${styles[executionDetails.execution.status]}`}>
+                    {executionDetails.execution.status}
+                  </span>
+                </div>
+                {executionDetails.execution.status === 'running' && (
+                  <button
+                    className={styles.cancelExecutionBtn}
+                    onClick={handleCancelExecution}
+                    disabled={isCancelling}
+                  >
+                    <Ban size={14} />
+                    {isCancelling ? 'Cancelling...' : 'Cancel'}
+                  </button>
+                )}
               </div>
               <div className={styles.detailMeta}>
                 <span>Started: {formatTime(executionDetails.execution.started_at)}</span>

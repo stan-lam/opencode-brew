@@ -279,6 +279,13 @@ export const useGitStore = create<GitState>((set, get) => ({
     }
   },
 
+  refreshAll: async () => {
+    await get().refreshStatus();
+    await get().fetchBranches();
+    await get().fetchCommitHistory();
+    await get().fetchStashes();
+  },
+
   fetch: async (remoteName?: string) => {
     const repoPath = getWorkspacePath();
     if (!repoPath) return;

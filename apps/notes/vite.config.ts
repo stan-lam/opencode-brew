@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react()],
   clearScreen: false,
+  base: command === 'build' ? '/notes/' : '/',
   server: {
     port: 5175,
     strictPort: true,
@@ -15,4 +16,4 @@ export default defineConfig({
     sourcemap: !!process.env.TAURI_DEBUG,
     outDir: 'dist',
   },
-});
+}));

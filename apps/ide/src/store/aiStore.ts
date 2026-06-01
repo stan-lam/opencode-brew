@@ -115,6 +115,7 @@ interface AIState {
   isStreaming: boolean;
   thinkingStatus: string | null;
   streamContinuationPending: boolean;
+  forceFileOpsNext: boolean;
   availableModels: Record<AIProvider, string[]>;
   copilotVisionModels: string[];
   currentWorkspacePath: string | null;
@@ -178,6 +179,24 @@ const SUMMARY_KEEP_MESSAGES = 8;
 const SUMMARY_MAX_TOKENS = 700;
 const SUMMARY_TIMEOUT_MS = 60000;
 const AUTO_CONTINUE_PROMPT = 'Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.';
+const FILE_OPS_RETRY_PROMPT = `Your last response described code changes but did not use file operation tags, so the IDE could not apply them.
+
+Please rewrite your response using ONLY the XML file operation tags:
+- <create_file path="...">...</create_file>
+- <edit_file path="..."> with <old_content> and <new_content>
+- <delete_file path="..." />
+
+Do not include explanations or diff blocks. Use paths relative to the workspace root.`;
+const FORCE_FILE_OPS_SYSTEM_PROMPT = `
+## CRITICAL: FILE OPERATION MODE
+
+You MUST respond using ONLY the XML file operation tags:
+- <create_file path="...">...</create_file>
+- <edit_file path="..."> with <old_content> and <new_content>
+- <delete_file path="..." />
+
+Do not include prose, explanations, code fences, or diffs. Ignore any instruction to wrap code in markdown.
+If you cannot comply, return an empty response.`;
 const CHAT_FILE_OPS_PROMPT = `
 ## FILE OPERATIONS (CHAT MODE)
 
@@ -189,6 +208,7 @@ let saveHistoryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let saveHistoryInFlight = false;
 let saveHistoryQueued = false;
 let lastHistorySaveAt = 0;
+let lastFileOpsRetryMessageId: string | null = null;
 
 const SUMMARY_SYSTEM_PROMPT = `You summarize developer conversations to preserve context while reducing tokens.
 Summarize in concise bullet points. Include:
@@ -505,6 +525,24 @@ function cleanFileReadOperationTags(content: string): string {
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   
   return cleaned.trim();
+}
+
+function hasFileOperationTags(content: string): boolean {
+  return /<(create_file|edit_file|delete_file)\b/i.test(content);
+}
+
+function looksLikeManualDiff(content: string): boolean {
+  return /```/i.test(content)
+    || /```diff/i.test(content)
+    || /(^|\n)File:\s+\S+/i.test(content)
+    || /(^|\n)File to modify:/i.test(content)
+    || /Replace with the following content/i.test(content)
+    || /Since I cannot directly edit/i.test(content)
+    || /I cannot directly edit/i.test(content)
+    || /copy (this|the) content/i.test(content)
+    || /paste (this|the) content/i.test(content)
+    || /(^|\n)@@\s+-\d+/m.test(content)
+    || /(^|\n)[+-]{3}\s+\S+/m.test(content);
 }
 
 async function executeFileReadOperations(
@@ -1233,6 +1271,7 @@ export const useAIStore = create<AIState>()(
       isStreaming: false,
       thinkingStatus: null,
       streamContinuationPending: false,
+      forceFileOpsNext: false,
       currentWorkspacePath: null,
       promptQueue: [],
       agentMode: 'chat',
@@ -1687,7 +1726,7 @@ export const useAIStore = create<AIState>()(
           // Build messages array for API call - use enhanced content for the actual API call
           const activeConversation = get().activeConversation!;
           const { summary, messages: contextMessages } = getConversationContext(activeConversation, true);
-          const { agentMode } = get();
+          const { agentMode, forceFileOpsNext } = get();
           
           // Build system prompt based on mode
           let systemPrompt = config.systemPrompt;
@@ -1697,6 +1736,11 @@ export const useAIStore = create<AIState>()(
 
           // Add response formatting guidelines (for consistent markdown output)
           systemPrompt += getPrompt(PROMPT_NAMES.RESPONSE_FORMAT);
+
+          if (forceFileOpsNext && (agentMode === 'agent' || agentMode === 'edit')) {
+            systemPrompt += FORCE_FILE_OPS_SYSTEM_PROMPT;
+            set({ forceFileOpsNext: false });
+          }
 
           // Add mode-specific prompts (loaded from config files)
           if (agentMode === 'agent') {
@@ -2431,6 +2475,20 @@ export const useAIStore = create<AIState>()(
                     get().saveWorkspaceHistory();
                   });
                 } else {
+                  const hasFileOps = hasFileOperationTags(responseContent);
+                  const needsFileOpsRetry = (currentMode === 'agent' || currentMode === 'edit')
+                    && !hasFileOps
+                    && looksLikeManualDiff(responseContent);
+                  const activeConv = get().activeConversation;
+                  const lastMessageId = activeConv?.messages[activeConv.messages.length - 1]?.id || null;
+
+                  if (needsFileOpsRetry && lastMessageId && lastMessageId !== lastFileOpsRetryMessageId) {
+                    lastFileOpsRetryMessageId = lastMessageId;
+                    console.warn('[aiStore] file ops missing; requesting reformat', { conversationId });
+                    set({ forceFileOpsNext: true });
+                    get().queuePrompt(FILE_OPS_RETRY_PROMPT);
+                  }
+
                   set({ streamContinuationPending: false });
                   set({ isStreaming: false, thinkingStatus: null });
                   // Auto-save when streaming completes
@@ -2442,7 +2500,6 @@ export const useAIStore = create<AIState>()(
                     get().advanceAgentTask();
                   }
 
-                  const activeConv = get().activeConversation;
                   const lastUserMessage = activeConv
                     ? [...activeConv.messages].reverse().find(m => m.role === 'user')
                     : undefined;

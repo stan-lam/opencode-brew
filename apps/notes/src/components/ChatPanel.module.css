@@ -224,6 +224,7 @@
 
 .input {
   flex: 1;
+  min-height: 24px;
   background: transparent;
   border: none;
   color: var(--text-primary);
@@ -232,6 +233,10 @@
   resize: none;
   outline: none;
   max-height: 150px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  overflow-y: auto;
 }
 
 .input::placeholder {

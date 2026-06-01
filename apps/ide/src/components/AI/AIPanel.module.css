@@ -1309,6 +1309,9 @@
   outline: none;
   scrollbar-width: none;
   cursor: text;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .input::-webkit-scrollbar {

@@ -61,6 +61,15 @@ function App() {
     }
   };
 
+  const handleOpenDocs = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('plugin:shell|open', { path: 'https://github.com/stan-lam/opencode-brew/tree/main/docs/user-guide' });
+    } catch (error) {
+      console.error('Failed to open docs:', error);
+    }
+  };
+
   return (
     <div className={styles.container}>
       <header className={styles.header}>
@@ -124,11 +133,11 @@ function App() {
         <div className={styles.footerContent}>
           <span className={styles.version}>v0.1.0</span>
           <span className={styles.divider}>|</span>
-          <a href="https://github.com/opencodebrew" target="_blank" rel="noopener noreferrer">
+          <a href="https://github.com/stan-lam/opencode-brew" target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
           <span className={styles.divider}>|</span>
-          <a href="#" onClick={(e) => { e.preventDefault(); }}>
+          <a href="#" onClick={(e) => { e.preventDefault(); handleOpenDocs(); }}>
             Documentation
           </a>
         </div>

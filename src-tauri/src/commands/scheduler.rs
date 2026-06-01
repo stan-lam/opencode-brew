@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Manager};
 use chrono::{Utc, Timelike, Datelike};
 use uuid::Uuid;
 use regex::Regex;
+use lazy_static::lazy_static;
+use std::time::Duration;
 
 use crate::commands::web;
 use crate::commands::usage;
@@ -457,6 +460,40 @@ pub struct ActionLog {
     pub error: Option<String>,
 }
 
+const DEFAULT_ACTION_TIMEOUT_SECS: i32 = 300;
+
+lazy_static! {
+    static ref CANCELLED_EXECUTIONS: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+}
+
+fn is_execution_cancelled(execution_id: &str) -> bool {
+    CANCELLED_EXECUTIONS
+        .lock()
+        .map(|set| set.contains(execution_id))
+        .unwrap_or(false)
+}
+
+fn mark_execution_cancelled(execution_id: &str) {
+    if let Ok(mut set) = CANCELLED_EXECUTIONS.lock() {
+        set.insert(execution_id.to_string());
+    }
+}
+
+fn clear_execution_cancelled(execution_id: &str) {
+    if let Ok(mut set) = CANCELLED_EXECUTIONS.lock() {
+        set.remove(execution_id);
+    }
+}
+
+async fn wait_for_cancel(execution_id: &str) -> Result<String, String> {
+    loop {
+        if is_execution_cancelled(execution_id) {
+            return Err("Execution cancelled".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 // ============= Database Connection =============
 
 fn get_scheduler_db_path(app: &AppHandle) -> PathBuf {
@@ -521,6 +558,13 @@ pub async fn init_scheduler_db(app: AppHandle) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_executions_agent ON execution_logs(agent_id);
         CREATE INDEX IF NOT EXISTS idx_executions_started ON execution_logs(started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_action_logs_execution ON action_logs(execution_id);
+
+        CREATE TABLE IF NOT EXISTS agent_run_summaries (
+            agent_id TEXT PRIMARY KEY,
+            summary TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+        );
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -766,16 +810,49 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
     let mut output_parts = Vec::new();
     let mut has_error = false;
     let mut error_msg = None;
+    let mut cancelled = false;
     
     // Context for variable substitution between stages/actions
     let mut context: HashMap<String, String> = HashMap::new();
     let mut previous_output = String::new();
+
+    let execution_summary = if trigger_type == "cron" {
+        load_execution_summary(&conn, &agentId).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let recent_runs = if trigger_type == "cron" {
+        build_recent_runs_context(&conn, &agentId, &execution_id, 1, 4000).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if !execution_summary.is_empty() {
+        context.insert("execution_history".to_string(), execution_summary.clone());
+        context.insert("previous_runs".to_string(), execution_summary.clone());
+        context.insert("execution_summary".to_string(), execution_summary.clone());
+        context.insert("previous_runs_summary".to_string(), execution_summary.clone());
+    }
+    if !recent_runs.is_empty() {
+        context.insert("recent_runs".to_string(), recent_runs.clone());
+        context.insert("previous_runs_raw".to_string(), recent_runs.clone());
+    }
+    let execution_context = ExecutionContext {
+        trigger_type: trigger_type.to_string(),
+        execution_summary,
+        recent_runs,
+        summary_model_settings: Arc::new(Mutex::new(None)),
+    };
     
     // Get effective stages (handles migration from legacy actions format)
     let stages = agent.get_stages();
     
     // Execute stages sequentially
     for (stage_index, stage) in stages.iter().enumerate() {
+        if is_execution_cancelled(&execution_id) {
+            cancelled = true;
+            output_parts.push("Execution cancelled by user.".to_string());
+            break;
+        }
         output_parts.push(format!("=== Stage {}: {} ===", stage_index + 1, stage.name));
         
         // Execute all actions within the stage in parallel
@@ -785,6 +862,7 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
             let previous_output_clone = previous_output.clone();
             let action_clone = action.clone();
             let execution_id_clone = execution_id.clone();
+            let execution_context_clone = execution_context.clone();
             
             async move {
                 let action_log_id = Uuid::new_v4().to_string();
@@ -798,9 +876,34 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
                     );
                 }
                 
+                if is_execution_cancelled(&execution_id_clone) {
+                    let err = "Execution cancelled".to_string();
+                    let action_finished = Utc::now().to_rfc3339();
+                    if let Ok(conn) = get_connection(&app_clone).await {
+                        let _ = conn.execute(
+                            "UPDATE action_logs SET finished_at = ?1, status = 'failed', error = ?2 WHERE id = ?3",
+                            params![&action_finished, &err, &action_log_id],
+                        );
+                    }
+                    return (action_clone.name.clone(), Err(err));
+                }
+
                 // Substitute variables in action before execution
                 let substituted_action = substitute_variables(&action_clone.action_type, &context_clone, &previous_output_clone);
-                let result = execute_action(&app_clone, &substituted_action).await;
+                let timeout_secs = action_clone
+                    .timeout_seconds
+                    .unwrap_or(DEFAULT_ACTION_TIMEOUT_SECS)
+                    .max(1);
+                let result = tokio::select! {
+                    action_result = tokio::time::timeout(
+                        Duration::from_secs(timeout_secs as u64),
+                        execute_action(&app_clone, &substituted_action, &execution_context_clone)
+                    ) => match action_result {
+                        Ok(inner) => inner,
+                        Err(_) => Err(format!("Action timed out after {}s", timeout_secs)),
+                    },
+                    cancel_result = wait_for_cancel(&execution_id_clone) => cancel_result,
+                };
                 
                 let action_finished = Utc::now().to_rfc3339();
                 
@@ -831,7 +934,7 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
         
         // Process results and combine based on strategy
         let mut stage_outputs: Vec<(String, String)> = Vec::new();
-        let mut stage_has_error = false;
+        let mut _stage_has_error = false;
         let mut should_stop = false;
         
         for (action_name, result) in &results {
@@ -856,9 +959,13 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
                 }
                 Err(err) => {
                     output_parts.push(format!("  [{}] Error: {}", action_name, err));
-                    stage_has_error = true;
+                    _stage_has_error = true;
                     has_error = true;
                     error_msg = Some(err.clone());
+                    if err.contains("Execution cancelled") {
+                        cancelled = true;
+                        should_stop = true;
+                    }
                     
                     // Check if any action in this stage has on_error = "stop"
                     for action in &stage.actions {
@@ -881,20 +988,58 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
         
         // Stop execution if any action with on_error="stop" failed
         if should_stop {
-            output_parts.push(format!("  Stopping workflow due to error in stage {}", stage.name));
+            if cancelled {
+                output_parts.push("  Stopping workflow due to cancellation.".to_string());
+            } else {
+                output_parts.push(format!("  Stopping workflow due to error in stage {}", stage.name));
+            }
             break;
         }
     }
     
     let finished_at = Utc::now().to_rfc3339();
-    let status = if has_error { "failed" } else { "success" };
+    let status = if cancelled {
+        "cancelled"
+    } else if has_error {
+        "failed"
+    } else {
+        "success"
+    };
     let output = output_parts.join("\n");
+    
+    // Add full output to context so it can be used in Discord/Slack notifications
+    // This preserves all stage outputs with their detailed data
+    context.insert("full_output".to_string(), output.clone());
+    context.insert("output".to_string(), output.clone());
+    context.insert("all_outputs".to_string(), output.clone());
+
+    if status == "cancelled" {
+        error_msg = Some("Execution cancelled by user.".to_string());
+    }
+
+    if trigger_type == "cron" && status == "success" {
+        let summary_settings = execution_context
+            .summary_model_settings
+            .lock()
+            .unwrap()
+            .clone();
+        match summarize_execution_output(&app, &execution_context.execution_summary, &output, summary_settings.as_ref()).await {
+            Ok(summary) => {
+                let _ = upsert_execution_summary(&conn, &agentId, &summary, &finished_at);
+            }
+            Err(err) => {
+                println!("[scheduler] Failed to summarize execution output: {}", err);
+            }
+        }
+    }
     
     conn.execute(
         "UPDATE execution_logs SET finished_at = ?1, status = ?2, output = ?3, error = ?4 WHERE id = ?5",
         params![&finished_at, status, &output, &error_msg, &execution_id],
     )
     .map_err(|e| e.to_string())?;
+
+    clear_execution_cancelled(&execution_id);
     
     Ok(ExecutionLog {
         id: execution_id,
@@ -1015,7 +1160,133 @@ fn substitute_variables(
     }
 }
 
-async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<String, String> {
+#[derive(Clone)]
+struct ExecutionContext {
+    trigger_type: String,
+    execution_summary: String,
+    recent_runs: String,
+    summary_model_settings: Arc<Mutex<Option<ModelSettings>>>,
+}
+
+fn load_execution_summary(conn: &Connection, agent_id: &str) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare("SELECT summary FROM agent_run_summaries WHERE agent_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let result = stmt
+        .query_row([agent_id], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(result.unwrap_or_default())
+}
+
+fn build_recent_runs_context(
+    conn: &Connection,
+    agent_id: &str,
+    current_execution_id: &str,
+    limit: i64,
+    max_chars: usize,
+) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT started_at, output
+             FROM execution_logs
+             WHERE agent_id = ?1 AND id != ?2 AND status = 'success'
+             ORDER BY started_at DESC
+             LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![agent_id, current_execution_id, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut parts = Vec::new();
+    for (idx, row) in rows.enumerate() {
+        let (started_at, output) = row.map_err(|e| e.to_string())?;
+        let output_text = output.unwrap_or_default();
+        let trimmed = if output_text.len() > max_chars {
+            // Find a valid UTF-8 char boundary to avoid panics on multi-byte chars
+            let mut end = max_chars;
+            while end > 0 && !output_text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}... [truncated]", &output_text[..end])
+        } else {
+            output_text
+        };
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        parts.push(format!("Run {} ({})\n{}", idx + 1, started_at, trimmed));
+    }
+
+    Ok(parts.join("\n\n"))
+}
+
+fn upsert_execution_summary(
+    conn: &Connection,
+    agent_id: &str,
+    summary: &str,
+    updated_at: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO agent_run_summaries (agent_id, summary, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(agent_id) DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at",
+        params![agent_id, summary, updated_at],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+const RUN_SUMMARY_SYSTEM_PROMPT: &str = "You summarize recurring cron run outputs for an agent. \
+CRITICAL: You MUST preserve ALL specific numeric data including: \
+- Stock symbols with their exact prices (e.g., NVDA: $215.78) \
+- Percentage changes (e.g., +4.71%, -15.74%) \
+- Index values (e.g., S&P 500: 7,585 points) \
+- Volume/activity metrics \
+Format as: SYMBOL: $PRICE (CHANGE%) for each stock mentioned. \
+Keep it concise (max 15 bullets) but NEVER omit specific prices or percentages. \
+Highlight the top gainers, top losers, and most active with their exact values. \
+If data is missing or unavailable, explicitly state 'Data not available'.";
+
+async fn summarize_execution_output(
+    app: &AppHandle,
+    previous_summary: &str,
+    latest_output: &str,
+    model_settings: Option<&ModelSettings>,
+) -> Result<String, String> {
+    const MAX_OUTPUT_CHARS: usize = 12000;
+    let trimmed_output = if latest_output.len() > MAX_OUTPUT_CHARS {
+        // Find a valid UTF-8 char boundary to avoid panics on multi-byte chars
+        let mut end = MAX_OUTPUT_CHARS;
+        while end > 0 && !latest_output.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &latest_output[..end])
+    } else {
+        latest_output.to_string()
+    };
+
+    let prompt = format!(
+        "Previous summary:\n{prev}\n\nLatest run output:\n{latest}\n\nUpdate the summary using only the latest run data. Keep it concise.",
+        prev = if previous_summary.trim().is_empty() { "None" } else { previous_summary },
+        latest = trimmed_output
+    );
+
+    execute_ai_prompt(app, &prompt, Some(RUN_SUMMARY_SYSTEM_PROMPT), model_settings).await
+}
+
+async fn execute_action(
+    app: &AppHandle,
+    action_type: &ActionType,
+    execution_context: &ExecutionContext,
+) -> Result<String, String> {
     match action_type {
         ActionType::CliCommand { command, args, cwd } => {
             execute_cli_command(command, args, cwd.as_deref()).await
@@ -1044,7 +1315,32 @@ async fn execute_action(app: &AppHandle, action_type: &ActionType) -> Result<Str
             execute_mcp_tool(app, server_id, tool_name, arguments).await
         }
         ActionType::AiPrompt { prompt, system_prompt, model_settings } => {
-            execute_ai_prompt_with_tools(app, prompt, system_prompt.as_deref(), model_settings.as_ref()).await
+            if let Some(settings) = model_settings {
+                let mut guard = execution_context.summary_model_settings.lock().unwrap();
+                if guard.is_none() {
+                    *guard = Some(settings.clone());
+                }
+            }
+            let mut effective_prompt = prompt.clone();
+            if execution_context.trigger_type == "cron" && !execution_context.execution_summary.is_empty() {
+                let mut context_block = format!(
+                    "Previous runs summary:\n{summary}",
+                    summary = execution_context.execution_summary
+                );
+                if !execution_context.recent_runs.is_empty() {
+                    context_block = format!(
+                        "{summary}\n\nMost recent run(s) (raw):\n{recent}",
+                        summary = context_block,
+                        recent = execution_context.recent_runs
+                    );
+                }
+                effective_prompt = format!(
+                    "{prompt}\n\n---\n{context}\n\nUse the summary to avoid duplicates and the recent raw run(s) for exact values.",
+                    prompt = prompt,
+                    context = context_block
+                );
+            }
+            execute_ai_prompt_with_tools(app, &effective_prompt, system_prompt.as_deref(), model_settings.as_ref()).await
         }
         ActionType::SaveFile { path, content, append } => {
             execute_save_file(path, content, append.unwrap_or(false)).await
@@ -1712,7 +2008,7 @@ async fn execute_ai_prompt_with_tools(
     
     let mut current_prompt = prompt.to_string();
     let mut iteration = 0;
-    let mut final_response = String::new();
+    let final_response;
     
     loop {
         iteration += 1;
@@ -1745,7 +2041,7 @@ async fn execute_ai_prompt_with_tools(
         println!("[scheduler::tools] AI response contains tool calls, executing and continuing...");
         
         // Execute tools and get results
-        let (response_with_markers, tool_results) = execute_tools_in_response_with_results(&response).await;
+        let (_response_with_markers, tool_results) = execute_tools_in_response_with_results(&response).await;
         
         if tool_results.is_empty() {
             println!("[scheduler::tools] No tool results collected, returning response as-is");
@@ -2121,7 +2417,7 @@ fn convert_markdown_for_discord(content: &str) -> String {
     let mut in_pipe_table = false;
     let mut in_tab_table = false;
     let mut is_header_row = true;
-    let mut consecutive_tab_lines = 0;
+    let mut _consecutive_tab_lines = 0;
     
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
@@ -2182,12 +2478,12 @@ fn convert_markdown_for_discord(content: &str) -> String {
             if !in_tab_table {
                 in_tab_table = true;
                 is_header_row = true;
-                consecutive_tab_lines = 1;
+                _consecutive_tab_lines = 1;
                 i += 1;
                 continue;
             }
             
-            consecutive_tab_lines += 1;
+            _consecutive_tab_lines += 1;
             
             // Format data row
             result.push_str(&format_table_row_for_discord(&cells));
@@ -2201,7 +2497,7 @@ fn convert_markdown_for_discord(content: &str) -> String {
             in_pipe_table = false;
             in_tab_table = false;
             is_header_row = true;
-            consecutive_tab_lines = 0;
+            _consecutive_tab_lines = 0;
         }
         
         result.push_str(line);
@@ -2417,6 +2713,28 @@ pub async fn get_execution_details(app: AppHandle, executionId: String) -> Resul
         .collect();
     
     Ok((execution, action_logs))
+}
+
+#[command]
+#[allow(non_snake_case)]
+pub async fn cancel_execution(app: AppHandle, executionId: String) -> Result<(), String> {
+    let conn = get_connection(&app).await?;
+    let finished_at = Utc::now().to_rfc3339();
+    let error_msg = "Execution cancelled by user.";
+
+    let updated = conn.execute(
+        "UPDATE execution_logs SET finished_at = ?1, status = 'cancelled', error = ?2 WHERE id = ?3 AND status = 'running'",
+        params![&finished_at, &error_msg, &executionId],
+    )
+    .map_err(|e| e.to_string())?;
+
+    if updated > 0 {
+        mark_execution_cancelled(&executionId);
+    } else {
+        clear_execution_cancelled(&executionId);
+    }
+
+    Ok(())
 }
 
 #[command]

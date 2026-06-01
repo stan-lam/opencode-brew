@@ -108,6 +108,7 @@ struct CopilotApiTokenResponse {
     token: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 struct CopilotModel {
     id: Option<String>,

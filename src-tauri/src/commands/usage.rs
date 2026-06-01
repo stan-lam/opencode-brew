@@ -339,6 +339,7 @@ pub async fn get_recent_usage(app: AppHandle, limit: i32) -> Result<Vec<TokenUsa
 // ============= Helper Functions =============
 
 /// Estimate token count from text (approximately 4 characters per token)
+#[allow(dead_code)]
 pub fn estimate_tokens(text: &str) -> i64 {
     (text.len() as f64 / 4.0).ceil() as i64
 }

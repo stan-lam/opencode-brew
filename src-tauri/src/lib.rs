@@ -371,6 +371,7 @@ pub fn run() {
             commands::web::get_market_movers,
             commands::web::get_market_indices,
             commands::web::get_mlb_standings,
+            commands::web::get_weather,
             commands::mcp::mcp_start_server,
             commands::mcp::mcp_stop_server,
             commands::mcp::mcp_list_tools,
@@ -413,6 +414,7 @@ pub fn run() {
             commands::scheduler::execute_agent,
             commands::scheduler::list_executions,
             commands::scheduler::get_execution_details,
+            commands::scheduler::cancel_execution,
             commands::scheduler::clear_execution_history,
             // Settings
             commands::settings::save_ai_settings,

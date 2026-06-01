@@ -16,7 +16,7 @@ export interface ContextMenuFileItem {
 
 export interface ContextMenuItem {
   id: string;
-  label: string;
+  label?: string;
   icon?: ReactNode;
   shortcut?: string;
   disabled?: boolean;

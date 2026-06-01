@@ -103,6 +103,9 @@
 .textarea {
   resize: vertical;
   min-height: 60px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .hint {

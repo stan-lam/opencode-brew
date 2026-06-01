@@ -1296,12 +1296,12 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
                     <button
                       onClick={() => {
                         const existing = (action.action_type as any).headers || {};
-                        const entries = Object.entries(existing);
+                        const entries: [string, string][] = Object.entries(existing).map(([k, v]) => [k, String(v)]);
                         entries.push(['', '']);
                         onUpdate({
                           action_type: {
                             ...action.action_type,
-                            headers: Object.fromEntries(entries),
+                            headers: Object.fromEntries(entries) as Record<string, string>,
                           }
                         });
                       }}
@@ -1333,12 +1333,12 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
                           value={key}
                           onChange={(e) => {
                             const newHeaders = { ...((action.action_type as any).headers || {}) };
-                            const entries = Object.entries(newHeaders);
+                            const entries: [string, string][] = Object.entries(newHeaders).map(([k, v]) => [k, String(v)]);
                             entries[i] = [e.target.value, entries[i][1]];
                             onUpdate({
                               action_type: {
                                 ...action.action_type,
-                                headers: Object.fromEntries(entries),
+                                headers: Object.fromEntries(entries) as Record<string, string>,
                               }
                             });
                           }}
@@ -1348,15 +1348,15 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
                         />
                         <input
                           type="text"
-                          value={value}
+                          value={String(value)}
                           onChange={(e) => {
                             const newHeaders = { ...((action.action_type as any).headers || {}) };
-                            const entries = Object.entries(newHeaders);
+                            const entries: [string, string][] = Object.entries(newHeaders).map(([k, v]) => [k, String(v)]);
                             entries[i] = [entries[i][0], e.target.value];
                             onUpdate({
                               action_type: {
                                 ...action.action_type,
-                                headers: Object.fromEntries(entries),
+                                headers: Object.fromEntries(entries) as Record<string, string>,
                               }
                             });
                           }}

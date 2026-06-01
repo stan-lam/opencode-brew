@@ -2,12 +2,12 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "OpenCodeBrew",
   "version": "0.1.0",
-  "identifier": "com.opencodebrew.app",
+  "identifier": "com.opencodebrew.ide",
   "build": {
-    "frontendDist": "../apps/launcher/dist",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev:all",
-    "beforeBuildCommand": "npm run build:launcher"
+    "beforeBuildCommand": "npm run build:all"
   },
   "app": {
     "windows": [
@@ -44,7 +44,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15",
-      "bundleName": "OpenCodeBrew"
+      "bundleName": "OpenCodeBrew",
+      "entitlements": "./Entitlements.plist"
     },
     "windows": {
       "webviewInstallMode": {

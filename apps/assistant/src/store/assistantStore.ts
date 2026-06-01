@@ -79,8 +79,7 @@ export interface ActionType {
   path?: string;
   content?: string;
   append?: boolean;
-  // send_email
-  body?: string;
+  // send_email (body is shared with api)
   from?: string;
   to?: string;
   subject?: string;
@@ -93,9 +92,7 @@ export interface ActionType {
   channel?: string;
   message?: string;
   username?: string;
-  // send_discord
-  username?: string;
-  content?: string;
+  // send_discord (username and content shared above)
   avatar_url?: string;
 }
 

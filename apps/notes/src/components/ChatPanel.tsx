@@ -242,40 +242,35 @@ If you need to think, put it ONLY inside <think>...</think> tags. Everything out
 - OR a brief acknowledgment + action suggestion (e.g., "I can search for that.\n\n[ACTION:search_web:query:Search]")
 - NOTHING ELSE - especially no fake results after an action tag
 
-## CRITICAL OUTPUT FORMAT
+## WHEN TO AUTO-SEARCH vs SHOW ACTION BUTTON
 
-**Be concise. Suggest actions. Let the user decide.**
+**AUTO-EXECUTE (just do it):** For simple factual queries, execute automatically using XML tags:
+- Weather queries: "weather in seattle" → <get_weather location="Seattle, WA" />
+- Stock prices: "aapl price" → <get_stock_quote symbol="AAPL" />
+- Simple facts: "who won the superbowl" → <search_web query="superbowl winner 2026" />
+- Current events: "latest news on X" → <search_web query="X news ${shortDate}" />
 
-When the user asks for data (stocks, sports, web search), DO NOT automatically fetch it. Instead:
-1. Briefly acknowledge their request (1 sentence max)
-2. Suggest the action using the [ACTION:...] format
-3. Wait for user to confirm
+**SHOW ACTION BUTTON:** For complex/ambiguous requests that might need refinement:
+- Product research: User might want to clarify which product
+- Vague queries: "find me something good" needs more context
+- Expensive operations: Large data fetches the user should confirm
 
-**SUGGESTING ACTIONS:**
-Use this format to suggest an action the user can approve:
-- For tools without parameters: [ACTION:tool_name:Button Label]
-- For tools with parameters: [ACTION:tool_name:parameter:Button Label]
-
-**CRITICAL: After outputting an [ACTION:...] tag, STOP IMMEDIATELY. Do NOT generate any additional content, fake results, or explanations. The action will be executed when the user clicks the button.**
-
-Examples:
+**ACTION BUTTON FORMAT:**
+- [ACTION:tool_name:parameter:Button Label]
 - [ACTION:get_mlb_standings:Get MLB Standings]
 - [ACTION:get_stock_quote:AAPL:Get Apple Quote]
-- [ACTION:search_web:TRP EVOX brake price:Search for price]
 
-**Example - CORRECT:**
-User: "What are the MLB standings?"
-Assistant: I can fetch the current MLB standings for you.
+**CRITICAL: After outputting an [ACTION:...] tag, STOP IMMEDIATELY. Do NOT add fake results.**
 
-[ACTION:get_mlb_standings:Get MLB Standings]
+**Example - AUTO-EXECUTE (weather):**
+User: "weather in issaquah wa"
+<get_weather location="Issaquah, WA" />
 
-**Example - CORRECT:**
+**Example - AUTO-SEARCH (stock):**
 User: "How's AMD doing?"
-Assistant: I can get the current AMD stock price.
+<get_stock_quote symbol="AMD" />
 
-[ACTION:get_stock_quote:AMD:Get AMD Quote]
-
-**Example - CORRECT (web search for product):**
+**Example - ACTION BUTTON (ambiguous):**
 User: "What's this brake and how much?"
 Assistant: I can search for this product's information and price.
 
@@ -326,6 +321,10 @@ Write the XML tags directly — do NOT describe them.
 
 **Get MLB standings (baseball):**
 <get_mlb_standings />
+
+**Get weather for a location:**
+<get_weather location="Seattle, WA" />
+Use this for any weather query - it returns real temperature data.
 
 **Search the web (use concise keyword queries, not sentences):**
 <search_web query="topic keywords ${shortDate}" />
@@ -443,60 +442,58 @@ Even if you already fetched data earlier, if the user asks another question abou
 }
 
 function getSummarizationPrompt(): string {
-  return `You are a helpful AI assistant. Summarize the following web search results or data concisely.
+  return `You are a helpful assistant. Give a DIRECT, CONCISE answer to the user's question based on the search results.
 
-## 🚫 ABSOLUTELY FORBIDDEN OUTPUT - NEVER DO THIS:
+## OUTPUT FORMAT
 
-**NEVER create a table of sources/links like this:**
-| Source | Details |
-|--------|---------|
-| Nasdaq | Link to Nasdaq |
-| MarketBeat | Link to MarketBeat |
+**For WEATHER queries:**
+🌤️ **[Location] Weather**
+- Current: [temp]°F, [conditions]
+- High/Low: [high]°F / [low]°F
+- [Any relevant details like rain chance, wind]
 
-**This is USELESS. The user asked for DATA, not a list of websites to visit.**
+**For FACTUAL questions:**
+Answer directly in 1-3 sentences with the key facts.
 
-## CRITICAL - OUTPUT RULES
-**NEVER show your thinking process, analysis steps, or planning.**
-**NEVER say "Thinking Process:", "Analyze the Request:", "Here's my thinking", "Self-Correction", or similar.**
-**NEVER use numbered analysis steps like "1. Analyze... 2. Determine..."**
-**Output ONLY the final summary with ACTUAL DATA - nothing else.**
+**For RANKINGS/LISTS:**
+1. [Item] - [key detail]
+2. [Item] - [key detail]
+...
 
-## WHAT TO DO INSTEAD:
+**For PRODUCTS/PRICES:**
+**[Product Name]** - $[price]
+[1-2 sentence description]
 
-1. **EXTRACT actual data** from the search results (numbers, facts, dates, prices)
-2. **PRESENT the data directly** - not links to where data can be found
-3. If search results contain earnings: show EPS, revenue, guidance numbers
-4. If search results contain rankings: show the actual rankings
-5. If search results have no useful data: say "The search didn't return specific data about [X]"
+## RULES
 
-**EXAMPLE - WRONG (link table):**
-| Source | Details |
-| Nasdaq | Earnings reports |
-| CNBC | Financial data |
+1. **BE DIRECT** - Start with the answer, not "Based on the search results..."
+2. **EXTRACT DATA** - Pull actual numbers, facts, temperatures from the results
+3. **KEEP IT SHORT** - 2-5 lines for simple queries, more for complex topics
+4. **NO LINK LISTS** - Don't just list websites to visit
+5. **NO THINKING** - Never show "Thinking Process:", "Analysis:", numbered steps
 
-**EXAMPLE - CORRECT (actual data):**
-**CELH Q1 2026 Earnings:**
-- Revenue: $412M (+18% YoY)
-- EPS: $0.23 (beat estimate of $0.19)
-- Guidance: Raised FY outlook to $1.8B
+## IF DATA NOT FOUND
 
-FORMAT FOR RANKINGS (ATP, NFL, NBA, etc.):
-| Rank | Player/Team | Details |
-|------|-------------|---------|
-| 1 | Name | Actual stats |
+Say briefly: "I couldn't find specific [weather/price/etc.] data for [topic]. You might try [suggestion]."
 
-WRONG (Never do this):
-Thinking Process:
-1. Analyze the Request...
+## EXAMPLES
 
-CORRECT:
-[Just provide the actual data directly]`;
+**User asks about weather:**
+☀️ **Issaquah, WA Weather**
+- Currently: 68°F, Partly Cloudy
+- High: 72°F / Low: 54°F  
+- 10% chance of rain this afternoon
+
+**User asks about a product:**
+**Sony WH-1000XM5** - $348
+Premium noise-cancelling headphones with 30-hour battery life and multipoint connection.`;
 }
 
 interface WebOperation {
-  type: 'search_web' | 'get_stock_quote' | 'get_market_movers' | 'get_mlb_standings';
+  type: 'search_web' | 'get_stock_quote' | 'get_market_movers' | 'get_mlb_standings' | 'get_weather';
   query?: string;
   symbol?: string;
+  location?: string;
 }
 
 interface MLBTeamStanding {
@@ -514,6 +511,16 @@ interface MLBTeamStanding {
 interface MLBStandings {
   season: number;
   standings: MLBTeamStanding[];
+}
+
+interface WeatherData {
+  location: string;
+  current_temp: string;
+  condition: string;
+  feels_like: string;
+  humidity: string;
+  wind: string;
+  forecast: string;
 }
 
 interface SuggestedAction {
@@ -547,16 +554,44 @@ function stripActionTags(content: string): string {
 }
 
 function cleanSearchQuery(query: string): string {
-  return query
+  const original = query;
+  const cleaned = query
+    // Remove malformed brackets, braces, and special chars from AI output errors
+    .replace(/[\[\]{}()<>]/g, '')
+    // Remove XML/HTML-like fragments that might leak through
+    .replace(/<[^>]*>/g, '')
+    // Remove escape sequences
+    .replace(/\\[nrt"']/g, ' ')
     // Remove conversational filler phrases
     .replace(/\b(?:for you|for me|please|can you|could you|i need|i want)\b/gi, '')
     // Remove question words at start
     .replace(/^(?:what|who|where|when|how|which|why)\s+(?:are|is|were|was|do|does|did)?\s*/i, '')
     // Remove "the" at start
     .replace(/^the\s+/i, '')
+    // Remove trailing punctuation that shouldn't be in queries
+    .replace(/[.,;:!?]+$/g, '')
+    // Remove quotes that might wrap the query
+    .replace(/^["']+|["']+$/g, '')
     // Clean up whitespace
     .replace(/\s+/g, ' ')
     .trim();
+  
+  // Log if significant cleaning occurred
+  if (original !== cleaned && original.length - cleaned.length > 2) {
+    console.log(`[Notes] Cleaned malformed query: "${original}" -> "${cleaned}"`);
+  }
+  
+  return cleaned;
+}
+
+function isValidSearchQuery(query: string): boolean {
+  // Reject empty or too short queries
+  if (!query || query.length < 2) return false;
+  // Reject queries that are only special characters
+  if (!/[a-zA-Z0-9]/.test(query)) return false;
+  // Reject queries that look like code/JSON fragments
+  if (/^[{}\[\]()]+$/.test(query)) return false;
+  return true;
 }
 
 function parseWebOperations(content: string): WebOperation[] {
@@ -569,10 +604,20 @@ function parseWebOperations(content: string): WebOperation[] {
   
   let match;
   while ((match = searchRegexDouble.exec(content)) !== null) {
-    operations.push({ type: 'search_web', query: cleanSearchQuery(match[1]) });
+    const cleanedQuery = cleanSearchQuery(match[1]);
+    if (isValidSearchQuery(cleanedQuery)) {
+      operations.push({ type: 'search_web', query: cleanedQuery });
+    } else {
+      console.warn(`[Notes] Rejected invalid search query: "${match[1]}" -> "${cleanedQuery}"`);
+    }
   }
   while ((match = searchRegexSingle.exec(content)) !== null) {
-    operations.push({ type: 'search_web', query: cleanSearchQuery(match[1]) });
+    const cleanedQuery = cleanSearchQuery(match[1]);
+    if (isValidSearchQuery(cleanedQuery)) {
+      operations.push({ type: 'search_web', query: cleanedQuery });
+    } else {
+      console.warn(`[Notes] Rejected invalid search query: "${match[1]}" -> "${cleanedQuery}"`);
+    }
   }
   
   // Same for stock quotes
@@ -597,9 +642,43 @@ function parseWebOperations(content: string): WebOperation[] {
     operations.push({ type: 'get_mlb_standings' });
   }
   
+  // Weather
+  const weatherRegexDouble = /<get_weather\s+location="([^"]+)"[^>]*\/?>/gi;
+  const weatherRegexSingle = /<get_weather\s+location='([^']+)'[^>]*\/?>/gi;
+  
+  while ((match = weatherRegexDouble.exec(content)) !== null) {
+    operations.push({ type: 'get_weather', location: match[1] });
+  }
+  while ((match = weatherRegexSingle.exec(content)) !== null) {
+    operations.push({ type: 'get_weather', location: match[1] });
+  }
+  
+  // Convert web searches for weather to get_weather
+  // E.g., <search_web query="seattle weather" /> should become get_weather
+  let searchOps = operations.filter(o => o.type === 'search_web');
+  for (const searchOp of searchOps) {
+    if (searchOp.query) {
+      // Match patterns like "seattle weather", "weather in seattle", "issaquah wa weather"
+      const weatherQueryMatch = searchOp.query.match(/^(?:weather\s+(?:in\s+)?)?(.+?)(?:\s+weather)?(?:\s+today)?$/i);
+      const isWeatherQuery = /weather/i.test(searchOp.query);
+      if (isWeatherQuery && weatherQueryMatch) {
+        // Extract location from the query
+        let location = weatherQueryMatch[1].replace(/\bweather\b/gi, '').replace(/\btoday\b/gi, '').replace(/\bin\b/gi, '').trim();
+        if (location) {
+          console.log(`[Notes] Converting search_web "${searchOp.query}" to get_weather "${location}"`);
+          const idx = operations.indexOf(searchOp);
+          if (idx > -1) operations.splice(idx, 1);
+          if (!operations.find(o => o.type === 'get_weather' && o.location === location)) {
+            operations.push({ type: 'get_weather', location });
+          }
+        }
+      }
+    }
+  }
+  
   // Convert web searches for stock prices to get_stock_quote
   // E.g., <search_web query="himx price" /> should become get_stock_quote for HIMX
-  const searchOps = operations.filter(o => o.type === 'search_web');
+  searchOps = operations.filter(o => o.type === 'search_web');
   for (const searchOp of searchOps) {
     if (searchOp.query) {
       const stockQueryMatch = searchOp.query.match(/^([a-z]{2,5})\s+(?:price|stock|quote|share)s?$/i);
@@ -659,7 +738,12 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
   // Look for patterns like: search_web with query "dinner ideas"
   const searchQueryMatch = content.match(/search_web.*?(?:query|with)\s*["']([^"']+)["']/i);
   if (searchQueryMatch && searchQueryMatch[1]) {
-    operations.push({ type: 'search_web', query: cleanSearchQuery(searchQueryMatch[1]) });
+    const cleanedQuery = cleanSearchQuery(searchQueryMatch[1]);
+    if (isValidSearchQuery(cleanedQuery)) {
+      operations.push({ type: 'search_web', query: cleanedQuery });
+    } else {
+      console.warn(`[Notes] Rejected invalid search query from intent: "${searchQueryMatch[1]}"`);
+    }
   }
   
   // If no search operation found yet, try to extract from natural language
@@ -691,9 +775,13 @@ function parseWebOperationsFromIntent(content: string): WebOperation[] {
             const finalQuery = /ranking|player|athlete|team/i.test(query) 
               ? `${cleanSearchQuery(query)} ${new Date().getFullYear()}` 
               : cleanSearchQuery(query);
-            operations.push({ type: 'search_web', query: finalQuery });
-            console.log('[Notes] Extracted search query from intent:', finalQuery);
-            break;
+            if (isValidSearchQuery(finalQuery)) {
+              operations.push({ type: 'search_web', query: finalQuery });
+              console.log('[Notes] Extracted search query from intent:', finalQuery);
+              break;
+            } else {
+              console.warn(`[Notes] Rejected invalid extracted query: "${query}"`);
+            }
           }
         }
       }
@@ -762,7 +850,7 @@ function stripVerboseReasoning(content: string): string {
   let cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
   
   // Remove all tool XML tags
-  cleaned = cleaned.replace(/<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|fetch_url)[^>]*\/?>/gi, '');
+  cleaned = cleaned.replace(/<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|get_weather|fetch_url)[^>]*\/?>/gi, '');
   
   // AGGRESSIVE: Remove everything from start through "Thinking Process" sections
   cleaned = cleaned.replace(/^[\s\S]*?Thinking Process:[\s\S]*?(?=\n\n(?:The search results|Based on|Here are|The current|The top|\*\*[A-Z]|#{1,3}\s))/gi, '');
@@ -809,9 +897,10 @@ function cleanWebOperationTags(content: string): string {
     .replace(/<get_stock_quote[^>]*\/?>/gi, '')
     .replace(/<get_market_movers[^>]*\/?>/gi, '')
     .replace(/<get_mlb_standings[^>]*\/?>/gi, '')
+    .replace(/<get_weather[^>]*\/?>/gi, '')
     .replace(/<fetch_url[^>]*\/?>/gi, '')
     // Remove tool mentions in backticks (e.g., `<get_stock_quote>`)
-    .replace(/`<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|fetch_url)[^`]*>`/gi, 'the tool')
+    .replace(/`<(?:search_web|get_stock_quote|get_market_movers|get_mlb_standings|get_weather|fetch_url)[^`]*>`/gi, 'the tool')
     // Remove "Analyzing results..." status lines
     .replace(/^\s*Analyzing results\.{3}\s*$/gim, '')
     .trim();
@@ -1059,11 +1148,15 @@ async function formatSearchResults(results: WebSearchResult[], autoFetchTop: boo
   });
   
   // Auto-fetch the top result to get actual content
-  if (autoFetchTop && results.length > 0) {
+  // Skip fetching for weather sites - snippets are more useful than scraped JS content
+  const weatherSites = ['weather.com', 'accuweather.com', 'wunderground.com', 'weather.gov', 'theweathernetwork.com', 'foxweather.com'];
+  const isWeatherQuery = results.some(r => weatherSites.some(site => r.url.includes(site)));
+  
+  if (autoFetchTop && results.length > 0 && !isWeatherQuery) {
     const topUrl = results[0].url;
     console.log(`[Notes] Auto-fetching top search result: ${topUrl}`);
     
-    // Use headless browser for JS-heavy sites like ESPN, ATP Tour
+    // Use headless browser for JS-heavy sites
     const jsHeavySites = ['espn.com', 'atptour.com', 'sofascore.com', 'flashscore.com'];
     const needsRendering = jsHeavySites.some(site => topUrl.includes(site));
     
@@ -1083,6 +1176,8 @@ async function formatSearchResults(results: WebSearchResult[], autoFetchTop: boo
         : content.content;
       formatted += truncated;
     }
+  } else if (isWeatherQuery) {
+    console.log('[Notes] Weather query detected - using snippets only (weather sites are JS-heavy)');
   }
   
   return formatted;
@@ -1173,6 +1268,29 @@ function formatMLBStandings(data: MLBStandings): string {
   
   result += `\n*Data from MLB Stats API*`;
   return result;
+}
+
+function formatWeather(weather: WeatherData): string {
+  const conditionEmoji = getWeatherEmoji(weather.condition);
+  return `${conditionEmoji} **${weather.location} Weather**
+
+- **Currently:** ${weather.current_temp}, ${weather.condition}
+- **Feels Like:** ${weather.feels_like}
+- **${weather.forecast}**
+- **Humidity:** ${weather.humidity}
+- **Wind:** ${weather.wind}`;
+}
+
+function getWeatherEmoji(condition: string): string {
+  const c = condition.toLowerCase();
+  if (c.includes('sun') || c.includes('clear')) return '☀️';
+  if (c.includes('cloud') && c.includes('part')) return '⛅';
+  if (c.includes('cloud') || c.includes('overcast')) return '☁️';
+  if (c.includes('rain') || c.includes('drizzle')) return '🌧️';
+  if (c.includes('thunder') || c.includes('storm')) return '⛈️';
+  if (c.includes('snow')) return '❄️';
+  if (c.includes('fog') || c.includes('mist')) return '🌫️';
+  return '🌤️';
 }
 
 async function getInvoke() {
@@ -1662,6 +1780,19 @@ export function ChatPanel() {
     console.log('[Notes] Attachments state changed:', attachments.length, attachments.map(a => ({ id: a.id, type: a.type, preview: a.preview?.substring(0, 50) })));
   }, [attachments]);
 
+  // Auto-resize textarea on window resize
+  useEffect(() => {
+    const resizeTextarea = () => {
+      if (inputRef.current && input) {
+        inputRef.current.style.height = 'auto';
+        inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 150) + 'px';
+      }
+    };
+
+    window.addEventListener('resize', resizeTextarea);
+    return () => window.removeEventListener('resize', resizeTextarea);
+  }, [input]);
+
   const executeWebOperations = async (operations: WebOperation[]): Promise<string> => {
     const results: string[] = [];
     
@@ -1697,6 +1828,13 @@ export function ChatPanel() {
           const standings = await invoke<MLBStandings>('get_mlb_standings', {});
           console.log('[Notes] MLB standings:', standings);
           return formatMLBStandings(standings);
+        } else if (op.type === 'get_weather' && op.location) {
+          setWebStatus(`Getting weather for ${op.location}...`);
+          console.log('[Notes] Executing weather for:', op.location);
+          const invoke = await getInvoke();
+          const weather = await invoke<WeatherData>('get_weather', { location: op.location });
+          console.log('[Notes] Weather data:', weather);
+          return formatWeather(weather);
         }
         return null;
       } catch (error) {
@@ -1719,6 +1857,10 @@ export function ChatPanel() {
     const currentAttachments = [...attachments];
     setInput('');
     setAttachments([]);
+    // Reset textarea height
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+    }
     setIsLoading(true);
 
     try {
@@ -2461,10 +2603,8 @@ export function ChatPanel() {
           
           console.log('[Notes] Tauri drag-drop event:', event.payload.type);
           
-          if (event.payload.type === 'over') {
+          if (event.payload.type === 'over' || event.payload.type === 'enter') {
             setIsDragOver(true);
-          } else if (event.payload.type === 'leave' || event.payload.type === 'cancel') {
-            setIsDragOver(false);
           } else if (event.payload.type === 'drop') {
             setIsDragOver(false);
             const paths = event.payload.paths;
@@ -2551,6 +2691,9 @@ export function ChatPanel() {
                 handleFileSelectRef.current(dataTransfer.files, 'tauri-drop', sourcePaths);
               }
             }
+          } else {
+            // Any other event type (leave, cancel, etc.)
+            setIsDragOver(false);
           }
         });
         
@@ -2616,8 +2759,30 @@ export function ChatPanel() {
           // Use param if available, otherwise fall back to label as the search query
           const query = action.param || action.label;
           if (query) {
+            setWebStatus(`Searching: ${query}`);
             const searchResults = await webSearchWithMCP(query);
-            result = await formatSearchResults(searchResults);
+            const formattedResults = await formatSearchResults(searchResults);
+            
+            // Summarize the results with AI for a clean response
+            setWebStatus('Summarizing results...');
+            const currentSettings = getAISettings();
+            const summarized = await summarizeWithAI(
+              invoke,
+              currentSettings,
+              query,
+              formattedResults,
+              activeConversationId || 'action-summary'
+            );
+            result = summarized || formattedResults;
+          }
+          break;
+        }
+        case 'get_weather': {
+          const location = action.param || action.label;
+          if (location) {
+            setWebStatus(`Getting weather for ${location}...`);
+            const weather = await invoke<WeatherData>('get_weather', { location });
+            result = formatWeather(weather);
           }
           break;
         }
@@ -2803,7 +2968,12 @@ export function ChatPanel() {
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // Auto-resize textarea
+              e.target.style.height = 'auto';
+              e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
+            }}
             onKeyDown={handleKeyDown}
             placeholder={isDragOver ? "Drop files here..." : "Ask anything... (supports images, PDFs, web search & stocks)"}
             className={styles.input}
@@ -3043,6 +3213,7 @@ function MessageBubble({ message, showDate = true, thinking, hasResponse, thinki
         case 'get_mlb_standings': return '⚾';
         case 'get_stock_quote': return '📈';
         case 'get_market_movers': return '📊';
+        case 'get_weather': return '🌤️';
         case 'search_web': return '🔍';
         default: return '▶️';
       }

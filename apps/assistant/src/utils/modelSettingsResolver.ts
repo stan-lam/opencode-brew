@@ -20,7 +20,7 @@ export interface ValidationResult {
  * @returns Merged ModelSettings
  */
 export function resolveModelSettings(
-  ...sources: (ModelSettings | undefined | null)[]
+  ...sources: (ModelSettings | Partial<ModelSettings> | undefined | null)[]
 ): ModelSettings {
   const result: ModelSettings = { ...DEFAULT_MODEL_SETTINGS };
 
@@ -29,7 +29,7 @@ export function resolveModelSettings(
 
     for (const [key, value] of Object.entries(source)) {
       if (value !== undefined && value !== null) {
-        (result as Record<string, unknown>)[key] = value;
+        (result as unknown as Record<string, unknown>)[key] = value;
       }
     }
   }
@@ -113,7 +113,6 @@ export function validateModelSettings(settings: ModelSettings): ValidationResult
   }
 
   return {
-    error: errors.length === 0,
     errors,
     warnings,
   };

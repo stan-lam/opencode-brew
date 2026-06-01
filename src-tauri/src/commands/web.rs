@@ -50,6 +50,17 @@ pub struct MLBStandings {
     pub standings: Vec<MLBTeamStanding>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherData {
+    pub location: String,
+    pub current_temp: String,
+    pub condition: String,
+    pub feels_like: String,
+    pub humidity: String,
+    pub wind: String,
+    pub forecast: String,
+}
+
 fn create_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(USER_AGENT)
@@ -177,59 +188,215 @@ pub async fn get_mlb_standings(season: Option<i32>) -> Result<MLBStandings, Stri
     })
 }
 
-// Search the web using multiple sources IN PARALLEL
-// First successful result wins, others are canceled
-// Tier 1 (fast): Brave API, Bing, DuckDuckGo, Google - race in parallel
-// Tier 2 (slow): Headless browser, Lynx - sequential fallback only if Tier 1 fails
+/// Get weather data for a location using wttr.in
+#[command]
+pub async fn get_weather(location: String) -> Result<WeatherData, String> {
+    let client = create_client()?;
+    
+    // URL encode the location
+    let encoded_location = urlencoding::encode(&location);
+    
+    // wttr.in format: ?format=j1 returns JSON
+    let url = format!("https://wttr.in/{}?format=j1", encoded_location);
+    
+    println!("[web::weather] Fetching weather for: {} -> {}", location, url);
+    
+    let response = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Weather request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Weather API failed with status: {}", response.status()));
+    }
+    
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse weather response: {}", e))?;
+    
+    // Extract current conditions
+    let current = json.get("current_condition")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| "No current weather data".to_string())?;
+    
+    let area = json.get("nearest_area")
+        .and_then(|a| a.as_array())
+        .and_then(|arr| arr.first());
+    
+    let location_name = area
+        .and_then(|a| a.get("areaName"))
+        .and_then(|n| n.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&location);
+    
+    let region = area
+        .and_then(|a| a.get("region"))
+        .and_then(|n| n.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    
+    let full_location = if region.is_empty() {
+        location_name.to_string()
+    } else {
+        format!("{}, {}", location_name, region)
+    };
+    
+    let temp_f = current.get("temp_F")
+        .and_then(|t| t.as_str())
+        .unwrap_or("N/A");
+    
+    let feels_like_f = current.get("FeelsLikeF")
+        .and_then(|t| t.as_str())
+        .unwrap_or("N/A");
+    
+    let humidity = current.get("humidity")
+        .and_then(|h| h.as_str())
+        .unwrap_or("N/A");
+    
+    let wind_mph = current.get("windspeedMiles")
+        .and_then(|w| w.as_str())
+        .unwrap_or("0");
+    
+    let wind_dir = current.get("winddir16Point")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
+    
+    let condition = current.get("weatherDesc")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    
+    // Get forecast from weather array
+    let forecast = json.get("weather")
+        .and_then(|w| w.as_array())
+        .and_then(|arr| arr.first())
+        .map(|today| {
+            let max_f = today.get("maxtempF").and_then(|t| t.as_str()).unwrap_or("N/A");
+            let min_f = today.get("mintempF").and_then(|t| t.as_str()).unwrap_or("N/A");
+            format!("High {}°F / Low {}°F", max_f, min_f)
+        })
+        .unwrap_or_else(|| "Forecast unavailable".to_string());
+    
+    println!("[web::weather] Got weather for {}: {}°F, {}", full_location, temp_f, condition);
+    
+    Ok(WeatherData {
+        location: full_location,
+        current_temp: format!("{}°F", temp_f),
+        condition: condition.to_string(),
+        feels_like: format!("{}°F", feels_like_f),
+        humidity: format!("{}%", humidity),
+        wind: format!("{} mph {}", wind_mph, wind_dir),
+        forecast,
+    })
+}
+
+// Search the web using tiered fallback strategy
+// Tier 1 (reliable): Text browsers (lynx, w3m) - fast, bypass JS/captchas
+// Tier 2 (API): Brave Search API - if key configured
+// Tier 3 (slow): Headless browser - slow but sometimes works
+// Tier 4 (last resort): HTTP scraping (Bing, DDG, Google) - usually fails due to captchas/JS
 #[command]
 pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<SearchResult>, String> {
     let max = max_results.unwrap_or(5).min(10) as usize;
-    let client = create_client()?;
     
-    println!("[web::search_web] Searching for: {} (PARALLEL)", query);
+    println!("[web::search_web] Searching for: {}", query);
     
-    // Per-source timeout for fast sources
-    let fast_timeout = Duration::from_secs(8);
+    // TIER 1: Text browsers - fast and reliable (~1s each)
+    // These bypass JavaScript rendering and captcha issues
+    let text_browser_timeout = Duration::from_secs(5);
     
-    // Get Brave API key if available
+    // Try lynx first (most common, fastest)
+    println!("[web::search_web] Tier 1: Trying lynx...");
+    match timeout(text_browser_timeout, search_with_text_browser(&query, max, "lynx")).await {
+        Ok(Ok(results)) if !results.is_empty() => {
+            println!("[web::search_web] Lynx found {} results", results.len());
+            return Ok(results);
+        }
+        Ok(Ok(_)) => println!("[web::search_web] Lynx returned empty results"),
+        Ok(Err(e)) => println!("[web::search_web] Lynx failed: {}", e),
+        Err(_) => println!("[web::search_web] Lynx timed out"),
+    }
+    
+    // Try w3m as backup
+    println!("[web::search_web] Tier 1: Trying w3m...");
+    match timeout(text_browser_timeout, search_with_text_browser(&query, max, "w3m")).await {
+        Ok(Ok(results)) if !results.is_empty() => {
+            println!("[web::search_web] w3m found {} results", results.len());
+            return Ok(results);
+        }
+        Ok(Ok(_)) => println!("[web::search_web] w3m returned empty results"),
+        Ok(Err(e)) => println!("[web::search_web] w3m failed: {}", e),
+        Err(_) => println!("[web::search_web] w3m timed out"),
+    }
+    
+    println!("[web::search_web] Text browsers unavailable or failed, trying API/fallbacks...");
+    
+    // TIER 2: Brave Search API - if configured
     let brave_api_key = std::env::var("BRAVE_SEARCH_API_KEY").ok()
         .filter(|k| !k.is_empty());
     
-    // Use a channel to receive results from parallel tasks
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<SearchResult>)>(4);
-    
-    // TIER 1: Fast sources - race in parallel
-    let fast_sources: Vec<(&str, bool)> = vec![
-        ("Brave API", brave_api_key.is_some()),
-        ("Bing", true),
-        ("DuckDuckGo", true),
-        ("Google", true),
-    ];
-    
-    let mut spawned = 0;
-    for (source_name, enabled) in fast_sources {
-        if !enabled {
-            continue;
-        }
+    if let Some(api_key) = brave_api_key {
+        let client = create_client()?;
+        let api_timeout = Duration::from_secs(8);
         
+        println!("[web::search_web] Tier 2: Trying Brave Search API...");
+        match timeout(api_timeout, search_brave_api(&client, &query, max, &api_key)).await {
+            Ok(Ok(results)) if !results.is_empty() => {
+                println!("[web::search_web] Brave API found {} results", results.len());
+                return Ok(results);
+            }
+            Ok(Ok(_)) => println!("[web::search_web] Brave API returned empty results"),
+            Ok(Err(e)) => println!("[web::search_web] Brave API failed: {}", e),
+            Err(_) => println!("[web::search_web] Brave API timed out"),
+        }
+    }
+    
+    // TIER 3: Headless browser - slow but may work
+    let slow_timeout = Duration::from_secs(30);
+    
+    println!("[web::search_web] Tier 3: Trying headless browser...");
+    match timeout(slow_timeout, search_with_headless_browser(&query, max)).await {
+        Ok(Ok(results)) if !results.is_empty() => {
+            println!("[web::search_web] Headless browser found {} results", results.len());
+            return Ok(results);
+        }
+        Ok(Ok(_)) => println!("[web::search_web] Headless browser returned empty results"),
+        Ok(Err(e)) => println!("[web::search_web] Headless browser failed: {}", e),
+        Err(_) => println!("[web::search_web] Headless browser timed out after {}s", slow_timeout.as_secs()),
+    }
+    
+    // TIER 4: HTTP scraping - last resort, usually fails due to captchas/JS
+    // Run in parallel since they're all likely to fail anyway
+    println!("[web::search_web] Tier 4: Trying HTTP scraping (last resort)...");
+    
+    let client = create_client()?;
+    let scrape_timeout = Duration::from_secs(8);
+    
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<SearchResult>)>(3);
+    
+    let scrape_sources = vec!["Bing", "DuckDuckGo", "Google"];
+    
+    for source_name in &scrape_sources {
         let client = client.clone();
         let query = query.clone();
         let tx = tx.clone();
         let source_name = source_name.to_string();
-        let api_key = brave_api_key.clone();
         
         tokio::spawn(async move {
             let result = match source_name.as_str() {
-                "Brave API" => {
-                    if let Some(key) = api_key {
-                        timeout(fast_timeout, search_brave_api(&client, &query, max, &key)).await
-                    } else {
-                        return;
-                    }
-                }
-                "Bing" => timeout(fast_timeout, search_bing(&client, &query, max)).await,
-                "DuckDuckGo" => timeout(fast_timeout, search_duckduckgo(&client, &query, max)).await,
-                "Google" => timeout(fast_timeout, search_google(&client, &query, max)).await,
+                "Bing" => timeout(scrape_timeout, search_bing(&client, &query, max)).await,
+                "DuckDuckGo" => timeout(scrape_timeout, search_duckduckgo(&client, &query, max)).await,
+                "Google" => timeout(scrape_timeout, search_google(&client, &query, max)).await,
                 _ => return,
             };
             
@@ -254,48 +421,22 @@ pub async fn search_web(query: String, max_results: Option<u32>) -> Result<Vec<S
             
             let _ = tx.send((source_name, results)).await;
         });
-        spawned += 1;
     }
     
-    // Drop our sender so the channel closes when all tasks complete
     drop(tx);
     
-    // Wait for first valid result from Tier 1
+    // Wait for first valid result from HTTP scraping
     let mut received = 0;
     while let Some((source, results)) = rx.recv().await {
         received += 1;
         if !results.is_empty() {
             println!("[web::search_web] Using {} results from {} (received {}/{} responses)", 
-                results.len(), source, received, spawned);
+                results.len(), source, received, scrape_sources.len());
             return Ok(results);
         }
     }
     
-    println!("[web::search_web] All {} fast sources failed, trying slow fallbacks...", received);
-    
-    // TIER 2: Slow fallbacks - only if all fast sources failed
-    // These are expensive (headless browser) so we run them sequentially
-    let slow_timeout = Duration::from_secs(30);
-    
-    // Try headless browser
-    println!("[web::search_web] Trying headless browser...");
-    if let Ok(Ok(results)) = timeout(slow_timeout, search_with_headless_browser(&query, max)).await {
-        if !results.is_empty() {
-            println!("[web::search_web] Headless browser found {} results", results.len());
-            return Ok(results);
-        }
-    }
-    
-    // Try text browser (lynx) as last resort
-    println!("[web::search_web] Trying text browser (lynx)...");
-    if let Ok(Ok(results)) = timeout(slow_timeout, search_with_text_browser(&query, max)).await {
-        if !results.is_empty() {
-            println!("[web::search_web] Lynx found {} results", results.len());
-            return Ok(results);
-        }
-    }
-    
-    println!("[web::search_web] All sources failed, returning empty results");
+    println!("[web::search_web] All {} tiers failed, returning empty results", 4);
     Ok(vec![])
 }
 
@@ -482,20 +623,20 @@ async fn search_with_headless_browser(query: &str, max: usize) -> Result<Vec<Sea
     Ok(results)
 }
 
-async fn search_with_text_browser(query: &str, max: usize) -> Result<Vec<SearchResult>, String> {
+async fn search_with_text_browser(query: &str, max: usize, browser: &str) -> Result<Vec<SearchResult>, String> {
     use std::process::Command;
     
-    // Check if lynx is available
-    let lynx_check = Command::new("which")
-        .arg("lynx")
+    // Check if the specified browser is available
+    let browser_check = Command::new("which")
+        .arg(browser)
         .output();
     
-    if lynx_check.is_err() || !lynx_check.unwrap().status.success() {
-        println!("[web::text_browser] lynx not installed. Install with: brew install lynx");
+    if browser_check.is_err() || !browser_check.unwrap().status.success() {
+        println!("[web::text_browser] {} not installed", browser);
         return Ok(Vec::new());
     }
     
-    println!("[web::text_browser] Using lynx for: {}", query);
+    println!("[web::text_browser] Using {} for: {}", browser, query);
     
     // Use DuckDuckGo lite which serves simple HTML to text browsers
     let search_url = format!(
@@ -503,34 +644,47 @@ async fn search_with_text_browser(query: &str, max: usize) -> Result<Vec<SearchR
         urlencoding::encode(query)
     );
     
-    // Run lynx in dump mode - outputs plain text
-    let output = Command::new("lynx")
-        .args(&[
-            "-dump",           // Output plain text
-            "-nolist",         // Don't append link list at end
-            "-width=200",      // Wide output to avoid wrapping
-            "-accept_all_cookies",
-            "-useragent=Lynx/2.8.9rel.1 libwww-FM/2.14",
-            &search_url
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run lynx: {}", e))?;
+    // Run text browser in dump mode - outputs plain text
+    // Both lynx and w3m produce similar output format
+    let output = match browser {
+        "lynx" => Command::new("lynx")
+            .args(&[
+                "-dump",           // Output plain text
+                "-nolist",         // Don't append link list at end
+                "-width=200",      // Wide output to avoid wrapping
+                "-accept_all_cookies",
+                "-useragent=Lynx/2.8.9rel.1 libwww-FM/2.14",
+                &search_url
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run lynx: {}", e))?,
+        "w3m" => Command::new("w3m")
+            .args(&[
+                "-dump",           // Output plain text
+                "-cols", "200",    // Wide output to avoid wrapping
+                &search_url
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run w3m: {}", e))?,
+        _ => return Err(format!("Unsupported browser: {}", browser)),
+    };
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        println!("[web::text_browser] lynx failed: {}", stderr);
+        println!("[web::text_browser] {} failed: {}", browser, stderr);
         return Ok(Vec::new());
     }
     
     let text = String::from_utf8_lossy(&output.stdout);
     println!("[web::text_browser] Got {} bytes of text output", text.len());
     
-    // Parse the lynx output for search results
+    // Parse the text browser output for search results
     // DDG lite format: "1.  Title\n    Description\n    www.domain.com"
+    // Both lynx and w3m produce compatible output with this format
     let mut results = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     
-    // Look for numbered results pattern: "1.  Title"
+    // Look for numbered results pattern: "1.  Title" (handles variable leading whitespace)
     let numbered_pattern = regex::Regex::new(r"^\s*(\d+)\.\s+(.+)$").ok();
     // URL pattern - domain with optional path (no http prefix in DDG lite)
     let url_pattern = regex::Regex::new(r"^\s*((?:www\.)?[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:/[^\s]*)?)\s*$").ok();
@@ -978,22 +1132,53 @@ pub async fn fetch_url(url: String) -> Result<WebContent, String> {
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
     
-    let document = Html::parse_document(&html);
+    // Extract title and content in a block so `document` is dropped before any await
+    let (title, content) = {
+        let document = Html::parse_document(&html);
+        
+        let title = document
+            .select(&Selector::parse("title").unwrap())
+            .next()
+            .map(|el| el.text().collect::<String>())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        
+        let content = extract_text_content(&document);
+        (title, content)
+    };
     
-    let title = document
-        .select(&Selector::parse("title").unwrap())
-        .next()
-        .map(|el| el.text().collect::<String>())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    
-    let content = extract_text_content(&document);
-    
-    let truncated_content = if content.len() > MAX_CONTENT_LENGTH {
-        format!("{}... [truncated]", &content[..MAX_CONTENT_LENGTH])
+    // If HTTP fetch returned very little content, try text browser fallback
+    // This helps with JS-heavy sites that don't render well without JavaScript
+    let final_content = if content.len() < 100 {
+        println!("[web::fetch_url] HTTP fetch returned only {} chars, trying text browser fallback...", content.len());
+        match fetch_with_text_browser(&url).await {
+            Ok(text_content) if text_content.len() > content.len() => {
+                println!("[web::fetch_url] Text browser returned {} chars", text_content.len());
+                text_content
+            }
+            Ok(_) => {
+                println!("[web::fetch_url] Text browser didn't improve results, using original");
+                content
+            }
+            Err(e) => {
+                println!("[web::fetch_url] Text browser fallback failed: {}", e);
+                content
+            }
+        }
     } else {
         content
+    };
+    
+    let truncated_content = if final_content.len() > MAX_CONTENT_LENGTH {
+        // Find a valid UTF-8 char boundary to avoid panics on multi-byte chars
+        let mut end = MAX_CONTENT_LENGTH;
+        while end > 0 && !final_content.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &final_content[..end])
+    } else {
+        final_content
     };
     
     println!("[web::fetch_url] Extracted {} characters", truncated_content.len());
@@ -1004,6 +1189,52 @@ pub async fn fetch_url(url: String) -> Result<WebContent, String> {
         content: truncated_content,
         content_type,
     })
+}
+
+async fn fetch_with_text_browser(url: &str) -> Result<String, String> {
+    use std::process::Command;
+    
+    // Try lynx first
+    let lynx_check = Command::new("which").arg("lynx").output();
+    if lynx_check.is_ok() && lynx_check.unwrap().status.success() {
+        println!("[web::fetch_text_browser] Using lynx for: {}", url);
+        let output = Command::new("lynx")
+            .args(&[
+                "-dump",
+                "-nolist",
+                "-width=200",
+                "-accept_all_cookies",
+                url
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run lynx: {}", e))?;
+        
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            if text.len() > 100 {
+                return Ok(text);
+            }
+        }
+    }
+    
+    // Try w3m as fallback
+    let w3m_check = Command::new("which").arg("w3m").output();
+    if w3m_check.is_ok() && w3m_check.unwrap().status.success() {
+        println!("[web::fetch_text_browser] Using w3m for: {}", url);
+        let output = Command::new("w3m")
+            .args(&["-dump", "-cols", "200", url])
+            .output()
+            .map_err(|e| format!("Failed to run w3m: {}", e))?;
+        
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            if text.len() > 100 {
+                return Ok(text);
+            }
+        }
+    }
+    
+    Err("No text browser available or fetch failed".to_string())
 }
 
 #[command]
@@ -1115,7 +1346,12 @@ pub async fn fetch_url_rendered(url: String) -> Result<WebContent, String> {
     });
     
     let truncated_content = if content.len() > MAX_CONTENT_LENGTH {
-        format!("{}... [truncated]", &content[..MAX_CONTENT_LENGTH])
+        // Find a valid UTF-8 char boundary to avoid panics on multi-byte chars
+        let mut end = MAX_CONTENT_LENGTH;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &content[..end])
     } else {
         content
     };
@@ -1217,19 +1453,35 @@ pub struct MarketIndices {
     pub timestamp: String,
 }
 
-// Helper to validate a stock quote result
+// Helper to validate a stock quote result with sanity checks
 fn validate_quote(result: Result<StockQuote, String>, symbol: &str, source: &str) -> Option<StockQuote> {
     match result {
         Ok(quote) if quote.price > 0.0 => {
-            if quote.symbol.to_uppercase() == symbol.to_uppercase() {
-                println!("[web::get_stock_quote] SUCCESS from {}: {} @ ${:.2} ({:+.2}%)", 
-                    source, quote.symbol, quote.price, quote.change_percent);
-                Some(quote)
-            } else {
+            if quote.symbol.to_uppercase() != symbol.to_uppercase() {
                 println!("[web::get_stock_quote] {} SYMBOL MISMATCH: requested '{}', got '{}'", 
                     source, symbol, quote.symbol);
-                None
+                return None;
             }
+            
+            // Sanity check: reject obviously wrong prices
+            // Most US stocks are under $5000 (except BRK.A which is special)
+            let max_price = if symbol.to_uppercase().starts_with("BRK") { 1_000_000.0 } else { 5000.0 };
+            if quote.price > max_price {
+                println!("[web::get_stock_quote] {} PRICE SANITY FAIL: {} @ ${:.2} exceeds max ${:.0}", 
+                    source, symbol, quote.price, max_price);
+                return None;
+            }
+            
+            // Sanity check: daily change > 100% is very suspicious (circuit breakers usually prevent this)
+            if quote.change_percent.abs() > 100.0 {
+                println!("[web::get_stock_quote] {} CHANGE SANITY FAIL: {} has {:+.2}% change (>100%)", 
+                    source, symbol, quote.change_percent);
+                return None;
+            }
+            
+            println!("[web::get_stock_quote] SUCCESS from {}: {} @ ${:.2} ({:+.2}%)", 
+                source, quote.symbol, quote.price, quote.change_percent);
+            Some(quote)
         }
         Ok(_) => {
             println!("[web::get_stock_quote] {} returned zero price", source);
@@ -1717,11 +1969,11 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
     // Method 2: Parse from page content using regex
     if price == 0.0 {
         // Look for the main price which appears prominently
+        // Use tighter patterns that require $ prefix to avoid matching random numbers
         let price_patterns = [
-            r#">\$(\d{1,6}(?:,\d{3})*\.\d{2})<"#,
-            r#"\$(\d{1,6}(?:,\d{3})*\.\d{2})"#,
-            r#""regularMarketPrice":\{"raw":(\d+\.?\d*)"#,
-            r#""price":\s*"?(\d+\.?\d*)"#,
+            r#">\$(\d{1,4}(?:,\d{3})*\.\d{2})<"#,  // Price in HTML tags with $ prefix
+            r#""regularMarketPrice":\{"raw":(\d+\.?\d*)"#,  // JSON structured data
+            r#""price":\s*"?(\d+\.?\d*)"#,  // JSON price field
         ];
         
         for pattern in price_patterns {
@@ -1730,7 +1982,8 @@ fn parse_google_finance_html(html: &str, symbol: &str) -> Result<StockQuote, Str
                     if let Some(m) = caps.get(1) {
                         let price_str = m.as_str().replace(",", "");
                         if let Ok(p) = price_str.parse::<f64>() {
-                            if p > 0.0 && p < 1000000.0 {
+                            // Most stocks are under $5000 (this matches validate_quote's sanity check)
+                            if p > 0.0 && p < 5000.0 {
                                 price = p;
                                 println!("[web::google] Parsed price via regex: ${:.2}", price);
                                 break;
@@ -2072,14 +2325,16 @@ async fn fetch_tradingview_quote(client: &Client, symbol: &str) -> Result<StockQ
             }
         }
         
-        // Fallback: find price-like values
+        // Fallback: find price-like values with $ prefix (much safer than matching any number)
         if price == 0.0 {
-            if let Ok(re) = regex::Regex::new(r#"(\d{1,5}(?:,\d{3})*\.\d{2})"#) {
+            // Only match numbers that have a $ sign directly before them - avoids grabbing volume/market cap
+            if let Ok(re) = regex::Regex::new(r#"\$(\d{1,4}(?:,\d{3})*\.\d{2})"#) {
                 for caps in re.captures_iter(&html) {
                     if let Some(m) = caps.get(1) {
                         let price_str = m.as_str().replace(",", "");
                         if let Ok(p) = price_str.parse::<f64>() {
-                            if p > 1.0 && p < 50000.0 {
+                            // Tighter range: most stocks are $1-$2000 (excludes BRK.A which needs explicit handling)
+                            if p > 1.0 && p < 2000.0 {
                                 price = p;
                                 println!("[web::tradingview] Parsed price (fallback): ${:.2}", price);
                                 break;
@@ -2230,35 +2485,61 @@ pub async fn get_market_movers() -> Result<MarketMovers, String> {
         }
     }
     
-    // Enrich ALL stocks with accurate quotes using multi-source approach
-    // The scraped percentage data from MarketWatch is often wrong
-    async fn enrich_stocks(stocks: &mut Vec<StockQuote>) {
+    // STEP 1: Collect all unique symbols across all lists to avoid duplicate API calls
+    let mut all_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stock in gainers.iter().chain(losers.iter()).chain(most_active.iter()) {
+        all_symbols.insert(stock.symbol.clone());
+    }
+    
+    println!("[web::get_market_movers] Fetching quotes for {} unique symbols", all_symbols.len());
+    
+    // STEP 2: Fetch quotes for all unique symbols ONCE and store in a map
+    let mut quote_cache: std::collections::HashMap<String, StockQuote> = std::collections::HashMap::new();
+    
+    for symbol in &all_symbols {
+        println!("[web::enrich] Fetching quote for {} from multiple sources", symbol);
+        if let Ok(quote) = get_stock_quote(symbol.clone()).await {
+            println!("[web::enrich] Got quote for {}: ${:.2} ({:+.2}%)", 
+                symbol, quote.price, quote.change_percent);
+            quote_cache.insert(symbol.clone(), quote);
+        } else {
+            println!("[web::enrich] Failed to get quote for {}", symbol);
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    
+    // STEP 3: Apply cached quotes to each list with cross-validation
+    fn apply_quotes(stocks: &mut Vec<StockQuote>, cache: &std::collections::HashMap<String, StockQuote>) {
         for stock in stocks.iter_mut() {
-            // Always fetch fresh quote data - scraped percentages are unreliable
-            println!("[web::enrich] Fetching accurate quote for {} from multiple sources", stock.symbol);
-            // Use the main get_stock_quote which tries Yahoo, Google, StockTwits, MarketWatch in parallel
-            if let Ok(quote) = get_stock_quote(stock.symbol.clone()).await {
-                println!("[web::enrich] Got accurate quote for {}: ${:.2} ({:+.2}%)", 
-                    stock.symbol, quote.price, quote.change_percent);
+            if let Some(quote) = cache.get(&stock.symbol) {
+                let original_price = stock.price;
+                
+                // Cross-validation: if original price was > 0 and enriched price differs by > 10x, log warning
+                if original_price > 0.0 {
+                    let ratio = if quote.price > original_price { 
+                        quote.price / original_price 
+                    } else { 
+                        original_price / quote.price 
+                    };
+                    if ratio > 10.0 {
+                        println!("[web::enrich] WARNING: {} price changed drastically: ${:.2} -> ${:.2} ({}x)", 
+                            stock.symbol, original_price, quote.price, ratio);
+                    }
+                }
+                
                 stock.price = quote.price;
                 stock.change = quote.change;
                 stock.change_percent = quote.change_percent;
                 if !quote.name.is_empty() {
-                    stock.name = quote.name;
+                    stock.name = quote.name.clone();
                 }
-            } else {
-                println!("[web::enrich] Failed to get quote for {}", stock.symbol);
             }
-            // Small delay to avoid overwhelming sources
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
     
-    // Enrich ALL stocks with accurate data from multiple sources
-    println!("[web::get_market_movers] Enriching stocks with accurate quotes...");
-    enrich_stocks(&mut gainers).await;
-    enrich_stocks(&mut losers).await;
-    enrich_stocks(&mut most_active).await;
+    apply_quotes(&mut gainers, &quote_cache);
+    apply_quotes(&mut losers, &quote_cache);
+    apply_quotes(&mut most_active, &quote_cache);
     
     // Remove any stocks that still have no valid price
     gainers.retain(|s| s.price > 0.0);
@@ -2456,7 +2737,7 @@ async fn fetch_marketwatch_movers(client: &Client, category: &str) -> Result<Vec
     
     // MarketWatch market-data page has sections for gainers/losers/actives
     // Look for the relevant section based on category
-    let section_title = match category {
+    let _section_title = match category {
         "gainers" => "Gainers",
         "losers" => "Losers", 
         "actives" => "Most Active",
@@ -2466,7 +2747,7 @@ async fn fetch_marketwatch_movers(client: &Client, category: &str) -> Result<Vec
     // Try to find tables with market data
     let table_selector = Selector::parse("table.table--primary tbody tr").unwrap();
     let symbol_selector = Selector::parse("td.table__cell a.link").unwrap();
-    let change_selector = Selector::parse("td.table__cell--percent li").unwrap();
+    let _change_selector = Selector::parse("td.table__cell--percent li").unwrap();
     
     // Parse each table looking for our data
     for row in document.select(&table_selector).take(20) {
@@ -2577,6 +2858,7 @@ async fn fetch_quote_from_google(client: &Client, symbol: &str) -> Result<StockQ
 }
 
 
+#[allow(dead_code)]
 fn format_market_cap(cap: f64) -> String {
     if cap >= 1_000_000_000_000.0 {
         format!("{:.2}T", cap / 1_000_000_000_000.0)

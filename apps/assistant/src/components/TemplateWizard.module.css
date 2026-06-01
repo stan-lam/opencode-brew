@@ -183,6 +183,9 @@
 .textarea {
   resize: vertical;
   min-height: 80px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .fieldRow {

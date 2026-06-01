@@ -273,11 +273,7 @@ const inputGroups: TemplateInputGroup[] = [
           { value: 'first', label: 'First Class' },
         ],
         defaultValue: 'economy',
-        dependsOn: [
-          { field: 'travelMethod', value: 'flight' },
-          { field: 'travelMethodMulti', value: 'flight' },
-          { field: 'travelMethodCruise', value: 'flight' },
-        ],
+        dependsOn: { field: 'travelMethod', value: 'flight' },
       },
       {
         id: 'directOnly',
@@ -285,11 +281,31 @@ const inputGroups: TemplateInputGroup[] = [
         type: 'checkbox',
         required: false,
         defaultValue: false,
-        dependsOn: [
-          { field: 'travelMethod', value: 'flight' },
-          { field: 'travelMethodMulti', value: 'flight' },
-          { field: 'travelMethodCruise', value: 'flight' },
+        dependsOn: { field: 'travelMethod', value: 'flight' },
+      },
+      {
+        id: 'carType',
+        label: 'Car Type',
+        type: 'select',
+        required: false,
+        options: [
+          { value: 'own', label: '🚙 Own Car' },
+          { value: 'rental', label: '🚗 Rental Car' },
         ],
+        defaultValue: 'rental',
+        helpText: 'Choose whether to use your own car or rent one',
+        dependsOn: { field: 'travelMethod', value: 'car' },
+      },
+      {
+        id: 'carMpg',
+        label: 'Car Fuel Efficiency (MPG)',
+        type: 'number',
+        required: false,
+        defaultValue: 30,
+        min: 10,
+        max: 100,
+        helpText: 'Miles per gallon for gas cost estimation',
+        dependsOn: { field: 'travelMethod', value: 'car' },
       },
     ],
   },
@@ -548,6 +564,8 @@ function generateSingleDestinationPrompts(config: Record<string, any>) {
     travelMethod,
     classPreference,
     directOnly,
+    carType,
+    carMpg,
     lodgingType,
     starRating,
     lodgingBudget,
@@ -603,7 +621,53 @@ ${specialNeeds ? `6. **Special Requirements**\n   - Information for: ${specialNe
 
 After searching, provide a well-organized summary with practical, actionable information.`;
 
-  const travelSearchPrompt = `Search for ${TRAVEL_METHODS.find(t => t.value === travelMethod)?.label || travelMethod} options from ${origin} to ${destination}:
+  const travelSearchPrompt = travelMethod === 'car' 
+    ? `Plan driving route from ${origin} to ${destination}:
+
+**Road Trip Details:**
+- Departure: ${startDate}
+- Return: ${endDate}
+- Travelers: ${travelerDesc}
+- Car: ${carType === 'own' ? 'Using own vehicle' : 'Rental car needed'}
+- Fuel efficiency: ${carMpg || 30} MPG
+
+<search_web query="driving distance ${origin} to ${destination} route" />
+<search_web query="average gas price ${origin.split(',')[0]} today" />
+
+Provide:
+1. **Driving Distance & Time**
+   - Total miles one-way
+   - Estimated driving time
+   - Recommended route
+   - Round-trip total miles
+
+2. **Current Gas Prices**
+   - Average gas price found for the area
+   - Use this for fuel cost calculation
+
+3. **Fuel Cost Estimate**
+   - Calculate: (Total round-trip miles / ${carMpg || 30} MPG) × [current gas price from search]
+   - Show the math and final estimated gas cost
+
+4. **Route Highlights**
+   - Scenic stops worth making
+   - Good rest/food stops
+   - Road conditions or construction alerts
+
+${carType === 'rental' ? `5. **Rental Car Options**
+   <search_web query="car rental ${origin} ${startDate} prices" />
+   - Best rental deals from ${origin}
+   - Recommended car type for the trip
+   - Estimated rental cost for the duration` : `5. **Vehicle Prep**
+   - Pre-trip checklist for your own car
+   - Suggested maintenance before long drive`}
+
+6. **Total Transportation Cost**
+   - Gas: $[calculated amount using searched price]
+   ${carType === 'rental' ? '- Rental: $[found price]' : '- Vehicle wear estimate: ~$0.10/mile'}
+   - Tolls (if applicable)
+   - **Total estimated cost**`
+    : `Search for ${TRAVEL_METHODS.find(t => t.value === travelMethod)?.label || travelMethod} options from ${origin} to ${destination}:
 
 **Travel Details:**
 - Departure: ${startDate} (flexible ±${flexibility || 0} days)
@@ -639,7 +703,42 @@ Provide:
 3. Price comparison across platforms
 4. Booking tips and potential discounts`;
 
-  const priceTrackingPrompt = `Check current prices for trip to ${destination}:
+  const priceTrackingPrompt = travelMethod === 'car'
+    ? `Check current costs for road trip to ${destination}:
+
+**Trip Summary:**
+- From: ${origin}
+- Dates: ${startDate} to ${endDate}
+- Travelers: ${travelerDesc}
+- Travel: Road trip (${carType === 'own' ? 'own car' : 'rental'})
+- Car MPG: ${carMpg || 30}
+- Lodging: ${lodgingList}
+
+<search_web query="driving distance ${origin} to ${destination}" />
+<search_web query="average gas price ${origin.split(',')[0]} today" />
+${carType === 'rental' ? `<search_web query="car rental ${origin} ${startDate} deals" />` : ''}
+<search_web query="${lodgingList} ${destination} ${startDate} deals" />
+
+Report:
+1. **Driving Costs**
+   - Total round-trip distance (miles)
+   - Current average gas price (from search)
+   - Estimated fuel cost: (miles / ${carMpg || 30}) × [searched gas price]
+   ${carType === 'rental' ? '- Current rental car prices' : '- Vehicle wear: ~$0.10/mile'}
+   - Toll estimates if applicable
+
+2. **Accommodation Costs**
+   - Current best prices
+   - Total lodging estimate
+
+3. **Total Trip Cost Estimate**
+   - Transportation: $[gas ${carType === 'rental' ? '+ rental' : '+ wear'}]
+   - Lodging: $[amount]
+   - **TOTAL: $[sum]**
+
+4. Price changes since last check
+5. Recommended action`
+    : `Check current prices for trip to ${destination}:
 
 **Trip Summary:**
 - From: ${origin}

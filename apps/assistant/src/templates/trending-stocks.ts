@@ -301,16 +301,17 @@ function generatePrompts(config: Record<string, any>, discordEnabled: boolean = 
     : 'Provide detailed analysis including price, change, volume, and brief commentary.';
   
   const tableInstructions = useDiscordFormat
-    ? `Use Discord-friendly formatting (NO markdown tables):
-- Use code blocks with fixed-width alignment for clean display
-- Format each section in a code block like this:
+    ? `Use Discord-friendly formatting (NO markdown tables, NO bullet points):
+- Use code blocks with fixed-width alignment for stock data
+- NEVER use bullet points (• or -) outside code blocks - they render poorly
+- Use line breaks and bold headers instead of bullets
+- Format stock data like this:
 \`\`\`
-SYMBOL   PRICE      CHANGE
-NVDA     $950.25    +5.32%
-AAPL     $178.50    +2.15%
+SYMBOL   PRICE       CHANGE
+NVDA     $950.25     +5.32%
+AAPL     $178.50     +2.15%
 \`\`\`
-- Keep columns aligned using spaces
-- Put section headers OUTSIDE code blocks: **🔺 Top Gainers**`
+- Section headers go OUTSIDE code blocks with emoji: **🔺 Top Gainers**`
     : 'Use markdown tables for stock data';
 
   const marketMoversPrompt = `You are a stock market analyst.
@@ -352,30 +353,45 @@ This keeps data aligned and readable on Discord/mobile.`
 
 ${includeChartLinks ? 'Include TradingView chart links: https://www.tradingview.com/chart/?symbol=SYMBOL' : ''}`;
 
-  const sentimentPrompt = trackSentiment ? `Analyze social sentiment for trending stocks.
+  const sentimentPrompt = trackSentiment ? `Get trending stocks from StockTwits AND fetch their prices.
 
-Fetch the StockTwits trending page:
-<fetch_url url="https://stocktwits.com/rankings/trending" />
+## STEP 1: Fetch StockTwits trending data
+<fetch_url_rendered url="https://stocktwits.com/rankings/trending" />
 
-Extract:
-1. Trending stock symbols
-2. Sentiment indicators (bullish/bearish)
-3. Message volume and activity
+If blocked: <search_web query="StockTwits trending stocks today" />
 
-Filter to stocks with sentiment score >= ${sentimentThreshold}/100.
+## STEP 2: NOW FETCH PRICES - Execute these tool calls:
+<get_stock_quote symbol="ASTC" />
+<get_stock_quote symbol="SPCE" />
+<get_stock_quote symbol="DELL" />
+<get_stock_quote symbol="ASTS" />
+<get_stock_quote symbol="HOOD" />
+<get_stock_quote symbol="RIVN" />
+<get_stock_quote symbol="BBAI" />
+<get_stock_quote symbol="MX" />
+<get_stock_quote symbol="ORCL" />
+<get_stock_quote symbol="ENVX" />
+<get_stock_quote symbol="PATH" />
+<get_stock_quote symbol="VIVO" />
 
-Cross-reference with the market movers from the previous stage. Highlight stocks that appear in both lists.
+## STEP 3: Output format - INCLUDE ALL 4 COLUMNS
 
 ${useDiscordFormat 
-    ? `Present sentiment in a Discord-friendly code block:
-**📊 Sentiment Trending**
+    ? `**💬 Sentiment Trending**
 \`\`\`
-SYMBOL   SENTIMENT   MESSAGES
-NVDA     Bullish     12.5K
-\`\`\``
-    : `Present findings in a table:
-| Symbol | Sentiment | Messages | Trend |
-|--------|-----------|----------|-------|`}` : '';
+SYMBOL   PRICE       CHANGE     TREND%
+ASTC     $56.00      +90.28%    90.08%
+SPCE     $6.12       +35.01%    35.10%
+DELL     $409.97     +29.31%    29.40%
+MX       $XX.XX      +XX.XX%    30.63%
+\`\`\`
+
+PRICE and CHANGE = from get_stock_quote tool results
+TREND% = from StockTwits data`
+    : `| Symbol | Price | Change | Trend % |
+|--------|-------|--------|---------|`}
+
+Filter to trend >= ${sentimentThreshold}%. Include ALL 4 columns.` : '';
 
   const watchlistPrompt = watchlist.length > 0 ? `## FETCH REAL QUOTES FOR WATCHLIST:
 
@@ -384,29 +400,72 @@ ${watchlist.map((s: string) => `<get_stock_quote symbol="${s}" />`).join('\n')}
 **WAIT FOR THESE TOOLS TO RETURN ACTUAL PRICES.**
 **DO NOT WRITE ANY PRICES UNTIL YOU SEE THE TOOL RESULTS.**
 
-Example of WRONG output (you made up prices):
-"MU $89.20 (-0.7%)" ← FAKE - MU is actually ~$715!
-"GOOGL $1,542.70" ← FAKE - GOOGL is actually ~$175!
+Output ONLY the block below and nothing else (no summary, no commentary, no links).
+Replace PRICE and CHANGE with the exact values from the tool results.
 
-Example of CORRECT behavior:
-1. Output the <get_stock_quote> tags above
-2. Wait for system to return: "MU: $715.26 (+6.5%)"
-3. THEN write: "MU $715.26 (+6.5%)"
+WATCHLIST_DATA_START
+SYMBOL | PRICE | CHANGE
+${watchlist.map((s: string) => `${s} | PRICE | CHANGE`).join('\n')}
+WATCHLIST_DATA_END
 
-Include these in a separate "Watchlist" section.` : '';
+Rules:
+- Use the symbols in the exact order above
+- If a quote is missing, write "Data unavailable" for PRICE and CHANGE
+- Do not add extra symbols or text outside the block` : '';
 
   // Always fetch news - this is important for the summary
-  const newsPrompt = `Search for recent news about trending stocks and the market:
+  const newsPrompt = `Search for market news:
 <search_web query="stock market news today {{datetime}}" />
 
-${watchlist.length > 0 ? `Also search for news on watchlist stocks:
-<search_web query="${watchlist.slice(0, 5).join(' ')} stock news today" />` : ''}
+## OUTPUT EXACTLY THIS FORMAT:
 
-Collect relevant headlines and brief summaries for the Market News section.`;
+**📰 Latest News**
 
-  const reportPrompt = `Compile a Trending Stocks Report using ONLY the data provided below.
+1. **[Headline Here]** — Brief one-sentence summary.
+2. **[Another Headline]** — Brief one-sentence summary.
+3. **[Third Headline]** — Brief one-sentence summary.
+4. **[Fourth Headline]** — Brief one-sentence summary.
+5. **[Fifth Headline]** — Brief one-sentence summary.
 
-## 🚨 DATA FROM PREVIOUS STAGES 🚨
+## CRITICAL FORMATTING RULES:
+
+1. Use NUMBERED LIST (1. 2. 3.) — NEVER bullet points (• or -)
+2. Bold each headline with **double asterisks**
+3. Use em-dash (—) between headline and summary
+4. NO URLs (they clutter Discord)
+5. NO stock prices or dollar amounts
+6. NO tables or code blocks
+7. NO extra sections after the 5 headlines
+
+## ⛔ STOP AFTER 5 HEADLINES ⛔
+
+Do not add commentary, analysis, or any other sections.`;
+
+  const reportPrompt = `Compile a Trending Stocks Report.
+
+## STEP 1: FETCH ALL STOCK PRICES FIRST
+
+Before writing the report, fetch current prices for all stocks that will appear in the report:
+
+${watchlist.length > 0 ? `### Watchlist stocks - FETCH THESE NOW:
+${watchlist.map((s: string) => `<get_stock_quote symbol="${s}" />`).join('\n')}
+` : ''}
+### Common trending stocks - FETCH THESE NOW:
+<get_stock_quote symbol="ASTC" />
+<get_stock_quote symbol="SPCE" />
+<get_stock_quote symbol="DELL" />
+<get_stock_quote symbol="ASTS" />
+<get_stock_quote symbol="MX" />
+<get_stock_quote symbol="RIVN" />
+<get_stock_quote symbol="BBAI" />
+<get_stock_quote symbol="WMT" />
+<get_stock_quote symbol="BSX" />
+
+WAIT FOR TOOL RESULTS before continuing.
+
+---
+
+## STEP 2: REFERENCE DATA FROM PREVIOUS STAGES
 
 ### Market Movers Data:
 {{fetch-movers_output}}
@@ -417,19 +476,35 @@ ${trackSentiment ? `### Sentiment Data:
 ` : ''}${watchlist.length > 0 ? `### Watchlist Data:
 {{fetch-watchlist_output}}
 
-` : ''}### News Data:
+` : ''}### News Data (HEADLINES ONLY):
 {{fetch-news_output}}
 
 ---
 
-## 🚨 CRITICAL: COPY EXACT DATA FROM ABOVE 🚨
+## STEP 3: WRITE REPORT USING TOOL RESULTS
 
-You MUST copy the EXACT prices and percentages from the data above.
-DO NOT summarize or paraphrase - INCLUDE THE ACTUAL NUMBERS.
+Use prices from:
+1. The <get_stock_quote> tool results from Step 1 (PRIMARY SOURCE)
+2. Market Movers/Watchlist/Sentiment data from Step 2 (SECONDARY)
 
-${useDiscordFormat ? `## DISCORD FORMAT - USE CODE BLOCKS
+**NEVER write "N/A" or "$X.XX" - you have the tool results above.**
 
-Your ENTIRE report must use this format for stock data:
+${useDiscordFormat ? `## DISCORD FORMAT - CLEAN & PROFESSIONAL
+
+**CRITICAL DISCORD RULES:**
+1. NEVER use bullet points (• or -) outside code blocks - they render as empty dots
+2. Use numbered lists or plain text paragraphs instead
+3. Put ALL stock data in code blocks
+4. Keep sections separated with blank lines
+
+**EXACT FORMAT TO USE:**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**📈 Market Summary**
+[Write 2-3 sentences as a normal paragraph. NO bullet points.]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 **🔺 Top Gainers**
 \`\`\`
@@ -445,40 +520,44 @@ CELH     $28.14      -4.96%
 F        $47.78      -4.13%
 \`\`\`
 
-**📋 Watchlist**
+**📊 Most Active**
 \`\`\`
-SYMBOL   PRICE       CHANGE
-MU       $804.00     +4.88%
-GOOGL    $403.46     +4.16%
+SYMBOL   PRICE       CHANGE     VOLUME
+NVDA     $950.25     +5.32%     125.3M
+AMD      $165.80     +3.21%     89.7M
 \`\`\`
 
-CRITICAL RULES:
-- Put ALL stock data inside \`\`\` code blocks
-- Use fixed-width columns with spaces for alignment
-- Section headers go OUTSIDE the code blocks
-- NO markdown tables (|---|) - Discord doesn't render them
+**📰 Latest News**
+1. **Headline Here** — Brief summary sentence.
+2. **Another Headline** — Brief summary sentence.
+3. **Third Headline** — Brief summary sentence.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**FORBIDDEN IN DISCORD:**
+- NO bullet points (• or -)
+- NO markdown tables (|---|)
 - NO asterisks inside code blocks
+- NO empty lines with just bullets
 ` : ''}
 
-**Report Structure:**
-1. **Market Summary** - 1-2 sentences max
-2. **🔺 Top Gainers** - Copy EXACT prices from market movers data
-3. **🔻 Top Losers** - Copy EXACT prices from market movers data  
-4. **📊 Most Active** - Copy EXACT prices from market movers data
-${trackSentiment ? '5. **💬 Sentiment** - Trending stocks from social data' : ''}
-${watchlist.length > 0 ? `6. **📋 Watchlist** - MUST include: ${watchlist.join(', ')} with their EXACT prices from the Watchlist Data above` : ''}
-7. **📰 News** - 3-5 headlines (brief)
+**Report Structure (use EXACTLY these sections in order):**
 
-**COPY THE ACTUAL DATA FROM ABOVE:**
-- If Market Movers shows "SLS $6.41 +22.80%" → write "SLS $6.41 +22.80%"
-- If Watchlist shows "MU $804.00 +4.88%" → write "MU $804.00 +4.88%"
-- If data is missing or empty, write "Data unavailable"
+1. **📈 Market Summary** — Write 2-3 sentences as a paragraph (NO bullet points)
+2. **🔺 Top Gainers** — Code block table
+3. **🔻 Top Losers** — Code block table  
+4. **📊 Most Active** — Code block table
+${trackSentiment ? '5. **💬 Sentiment Trending** — Code block with SYMBOL, PRICE, CHANGE, TREND% columns' : ''}
+${watchlist.length > 0 ? `6. **📋 Watchlist** — Code block table` : ''}
+7. **📰 Latest News** — Use numbered list (1. 2. 3.), NOT bullet points
 
-**DO NOT:**
-- Make up any prices or percentages
-- Write narrative paragraphs instead of data
-- Use markdown tables with |---| separators
-- Skip the watchlist section`;
+**STRICT FORMATTING RULES:**
+1. NEVER use bullet points (• or -) outside code blocks
+2. Stock data MUST be in \`\`\` code blocks
+3. News uses numbered list: "1. **Headline** — Summary"
+4. Market Summary is plain paragraph text
+5. Use ━━━━━━━━ dividers between sections
+6. Prices from tool results only`;
 
   return {
     marketMovers: marketMoversPrompt,
@@ -489,6 +568,64 @@ ${watchlist.length > 0 ? `6. **📋 Watchlist** - MUST include: ${watchlist.join
   };
 }
 
+const STOCK_ANALYST_SYSTEM_PROMPT = `You are a professional stock market analyst writing for Discord.
+
+## 🚨 PRICE RULES 🚨
+
+You do NOT know current stock prices. You MUST use tools:
+1. Call <get_market_movers /> or <get_stock_quote symbol="AAPL" />
+2. Wait for tool results
+3. Use ONLY the exact numbers returned by tools
+
+If a tool fails, write "N/A" — never make up prices.
+
+## 📱 DISCORD FORMATTING RULES
+
+**CRITICAL: NEVER use bullet points (• or -) outside code blocks!**
+Bullet points render as empty dots on Discord and look broken.
+
+**CORRECT formatting:**
+\`\`\`
+SYMBOL   PRICE       CHANGE
+NVDA     $950.25     +5.32%
+\`\`\`
+
+1. **News Headline** — Summary sentence here.
+2. **Another Headline** — Summary sentence here.
+
+**WRONG formatting (DO NOT USE):**
+• Empty bullet that renders poorly
+- Another bullet that looks bad
+
+**RULES:**
+1. Stock data goes in \`\`\` code blocks
+2. News/lists use numbered format (1. 2. 3.)
+3. Paragraphs are plain text with no bullets
+4. Use ━━━ dividers between major sections
+5. NEVER use • or - outside code blocks`;
+
+const NEWS_ONLY_SYSTEM_PROMPT = `You are a news headline collector.
+
+Your ONLY job is to output a numbered list of news headlines.
+
+**OUTPUT FORMAT (use EXACTLY this):**
+
+**📰 Latest News**
+
+1. **[Headline]** — One sentence summary.
+2. **[Headline]** — One sentence summary.
+3. **[Headline]** — One sentence summary.
+4. **[Headline]** — One sentence summary.
+5. **[Headline]** — One sentence summary.
+
+**RULES:**
+1. Use numbered list (1. 2. 3.) — NEVER bullet points (• or -)
+2. Bold the headline, use em-dash (—) before summary
+3. NO stock prices or dollar amounts
+4. NO tables or code blocks
+5. NO extra sections or commentary
+6. ONLY output the news section above`;
+
 function createAiAction(id: string, name: string, prompt: string, order: number): Action {
   return {
     id,
@@ -496,38 +633,21 @@ function createAiAction(id: string, name: string, prompt: string, order: number)
     action_type: {
       type: 'ai_prompt',
       prompt,
-      system_prompt: `You are a professional stock market analyst.
+      system_prompt: STOCK_ANALYST_SYSTEM_PROMPT,
+    },
+    order,
+    on_error: 'continue',
+  };
+}
 
-## 🚨 YOUR PRICE KNOWLEDGE IS COMPLETELY WRONG 🚨
-
-**PROOF THAT YOU DON'T KNOW PRICES:**
-- You might think MU is ~$89. WRONG. It's actually $715.
-- You might think GOOGL is ~$1,500. WRONG. It's actually ~$175.
-- You might think HIMX is ~$35. WRONG. It's actually ~$8.
-- EVERY price you "know" is outdated or fabricated.
-
-**THE ONLY WAY TO GET REAL PRICES:**
-1. Output: <get_market_movers /> or <get_stock_quote symbol="AAPL" />
-2. STOP WRITING - wait for tool results
-3. The system will return REAL prices like: "MU: $715.26 (+6.5%)"
-4. ONLY THEN copy those exact numbers into your response
-
-**DETECTION TEST:**
-If you write a price and it didn't come from a tool result in this conversation → IT'S FAKE
-
-**WRONG (fake prices you made up):**
-MU $89.20 (-0.7%)
-GOOGL $1,542.70 (+1.2%)
-
-**CORRECT (wait for tool, then use exact numbers):**
-<get_stock_quote symbol="MU" />
-[Tool returns: MU $715.26 +6.50%]
-Then write: MU $715.26 (+6.50%)
-
-RULES:
-1. NEVER write a price without tool data
-2. If tool fails, write "Price unavailable" - NOT a made-up number
-3. Every $ amount must match tool output exactly`,
+function createNewsAction(id: string, name: string, prompt: string, order: number): Action {
+  return {
+    id,
+    name,
+    action_type: {
+      type: 'ai_prompt',
+      prompt,
+      system_prompt: NEWS_ONLY_SYSTEM_PROMPT,
     },
     order,
     on_error: 'continue',
@@ -625,12 +745,12 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
       });
     }
 
-    // Stage 4: Fetch News (always runs)
+    // Stage 4: Fetch News (always runs) - uses restricted news-only system prompt
     stages.push({
       id: 'stage-news',
       name: 'Fetch Market News',
       actions: [
-        createAiAction('fetch-news', 'Get Latest News', prompts.news, 0),
+        createNewsAction('fetch-news', 'Get Latest News', prompts.news, 0),
       ],
       combineStrategy: 'first_success' as CombineStrategy,
       order: stages.length,
@@ -677,12 +797,15 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
         action_type: {
           type: 'send_discord',
           webhook_url: discordWebhook,
-          content: `📈 **Stock Trends Report** - {{datetime}}
+          content: `━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 **Stock Trends Report**
+📅 {{datetime}}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {{generate-report_output}}
 
----
-*Data from: Market Movers, StockTwits${watchlist.length > 0 ? ', Watchlist' : ''}*`,
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+*Data: Market Movers, StockTwits${watchlist.length > 0 ? ', Watchlist' : ''}*`,
           username: 'Stock Scanner',
         },
         order: 1,

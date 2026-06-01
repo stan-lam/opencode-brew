@@ -66,6 +66,25 @@ opencodebrew/
   - Linux: `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libayatana-appindicator3-dev librsvg2-dev`
   - Windows: [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
+### Optional Dependencies (for AI Web Search)
+
+The AI assistant uses text-based browsers for reliable web search. Install for best results:
+
+```bash
+# macOS (recommended)
+brew install lynx w3m
+
+# Linux (Debian/Ubuntu)
+sudo apt install lynx w3m
+
+# Linux (Fedora/RHEL)
+sudo dnf install lynx w3m
+```
+
+Without these, the assistant falls back to slower/less reliable methods (headless browser, HTTP scraping).
+
+**Search API (optional)**: Set `BRAVE_SEARCH_API_KEY` environment variable for Brave Search API access.
+
 ## Development
 
 ```bash
@@ -106,6 +125,8 @@ Configure AI backends in the Settings panel:
 - **Claude**: Add your Anthropic API key
 - **OpenAI**: Add your OpenAI API key
 - **Custom**: Any OpenAI-compatible endpoint
+
+**Web Search**: The AI assistant can search the web using `lynx` or `w3m` text browsers. For best results, install these tools (see Optional Dependencies above).
 
 ### Workspaces
 

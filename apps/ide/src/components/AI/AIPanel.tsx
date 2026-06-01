@@ -3247,6 +3247,15 @@ export function AIPanel() {
     resizeTextarea();
   }, [input, resizeTextarea]);
 
+  // Auto-resize textarea on window resize
+  useEffect(() => {
+    const handleWindowResize = () => {
+      resizeTextarea();
+    };
+    window.addEventListener('resize', handleWindowResize);
+    return () => window.removeEventListener('resize', handleWindowResize);
+  }, [resizeTextarea]);
+
   useEffect(() => {
     if (config.provider === 'ollama' || config.provider === 'copilot') {
       refreshAvailableModels();
@@ -4692,7 +4701,7 @@ export function AIPanel() {
                 <button
                   type="button"
                   className={`${styles.controlBtn} ${styles.stopBtn}`}
-                  onClick={stopStreaming}
+                  onClick={() => stopStreaming()}
                   title="Stop generating"
                 >
                   <Square size={16} />
