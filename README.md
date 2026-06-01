@@ -19,23 +19,23 @@ A modern, cross-platform desktop IDE built with Tauri (Rust) + React + TypeScrip
 
 **Launcher hub**
 
-![OpenCodeBrew launcher](docs/screenshots/landing.png)
+OpenCodeBrew launcher
 
 **IDE workspace with AI assistant**
 
-![OpenCodeBrew IDE](docs/screenshots/ide.png)
+OpenCodeBrew IDE
 
 **OpenCodeNotes**
 
-![OpenCodeNotes](docs/screenshots/notes.png)
+OpenCodeNotes
 
 **OpenCodeAssistant — Agents**
 
-![OpenCodeAssistant agents](docs/screenshots/assistant-agents.png)
+OpenCodeAssistant agents
 
 **OpenCodeAssistant — History**
 
-![OpenCodeAssistant history](docs/screenshots/assistant-history.png)
+OpenCodeAssistant history
 
 ## Architecture
 
@@ -131,19 +131,22 @@ Configure AI backends in the Settings panel:
 ### Workspaces
 
 The IDE remembers recent workspaces. Open folders via:
+
 - File menu → Open Folder
 - Welcome tab → Open Folder button
 - Drag & drop folder onto window
 
 ## Key Bindings
 
-| Action | macOS | Windows/Linux |
-|--------|-------|---------------|
-| Save | ⌘S | Ctrl+S |
-| Save All | ⌘⇧S | Ctrl+Shift+S |
-| Open File | ⌘O | Ctrl+O |
-| Find | ⌘F | Ctrl+F |
-| Terminal | ⌘` | Ctrl+` |
+
+| Action    | macOS | Windows/Linux |
+| --------- | ----- | ------------- |
+| Save      | ⌘S    | Ctrl+S        |
+| Save All  | ⌘⇧S   | Ctrl+Shift+S  |
+| Open File | ⌘O    | Ctrl+O        |
+| Find      | ⌘F    | Ctrl+F        |
+| Terminal  | ⌘`    | Ctrl+`        |
+
 
 ## Why Tauri over Electron?
 
@@ -161,4 +164,4 @@ The IDE remembers recent workspaces. Open folders via:
 
 ## License
 
-Apache-2.0
+MIT
