@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { TitleBar } from './TitleBar';
 import { ActivityBar } from './ActivityBar';
@@ -26,6 +26,21 @@ export function IDELayout() {
   const { fontSize, increaseFontSize, decreaseFontSize, resetFontSize } = useSettingsStore();
   
   const [showRunConfigEditor, setShowRunConfigEditor] = useState(false);
+  const [panelKey, setPanelKey] = useState(0);
+  const prevPositionRef = useRef(sidePanelPosition);
+  
+  // Clear cached panel sizes and force remount when position changes
+  useEffect(() => {
+    if (prevPositionRef.current !== sidePanelPosition) {
+      // Clear any cached panel data for both positions
+      localStorage.removeItem('react-resizable-panels:main-horizontal-left');
+      localStorage.removeItem('react-resizable-panels:main-horizontal-right');
+      localStorage.removeItem('react-resizable-panels:main-horizontal');
+      prevPositionRef.current = sidePanelPosition;
+      // Force a complete remount of the panel group
+      setPanelKey(k => k + 1);
+    }
+  }, [sidePanelPosition]);
   
   useEffect(() => {
     const handleOpenEditor = () => setShowRunConfigEditor(true);
@@ -95,10 +110,14 @@ export function IDELayout() {
         <div className={styles.content}>
           <PanelGroup direction="vertical" autoSaveId="main-vertical">
             <Panel defaultSize={75} minSize={30}>
-              <PanelGroup direction="horizontal" autoSaveId="main-horizontal">
+              <PanelGroup 
+                key={`horizontal-${sidePanelPosition}-${showSidePanel}-${panelKey}`}
+                direction="horizontal" 
+                autoSaveId={`main-horizontal-${sidePanelPosition}`}
+              >
                 {showSidePanel && sidePanelPosition === 'left' && (
                   <>
-                    <Panel defaultSize={20} minSize={15} maxSize={40}>
+                    <Panel defaultSize={20} minSize={15} maxSize={70}>
                       <SidePanel />
                     </Panel>
                     <PanelResizeHandle className={styles.resizeHandle} />
@@ -110,7 +129,7 @@ export function IDELayout() {
                 {showSidePanel && sidePanelPosition === 'right' && (
                   <>
                     <PanelResizeHandle className={styles.resizeHandle} />
-                    <Panel defaultSize={20} minSize={15} maxSize={40}>
+                    <Panel defaultSize={20} minSize={15} maxSize={70}>
                       <SidePanel />
                     </Panel>
                   </>
