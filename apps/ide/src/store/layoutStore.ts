@@ -18,12 +18,14 @@ interface LayoutState {
   sidePanelPosition: 'left' | 'right';
   activeSideTab: SidePanelTab;
   activeBottomTab: BottomPanelTab | null;
+  syncExplorerWithEditor: boolean;
   toggleSidePanel: () => void;
   toggleBottomPanel: () => void;
   setShowBottomPanel: (show: boolean) => void;
   setActiveSideTab: (tab: SidePanelTab) => void;
   setActiveBottomTab: (tab: BottomPanelTab) => void;
   setSidePanelPosition: (position: 'left' | 'right') => void;
+  toggleSyncExplorerWithEditor: () => void;
 }
 
 export const useLayoutStore = create<LayoutState>()(
@@ -34,6 +36,7 @@ export const useLayoutStore = create<LayoutState>()(
       sidePanelPosition: 'left',
       activeSideTab: 'explorer',
       activeBottomTab: 'terminal',
+      syncExplorerWithEditor: false,
 
       toggleSidePanel: () =>
         set((state) => {
@@ -71,15 +74,19 @@ export const useLayoutStore = create<LayoutState>()(
 
       setSidePanelPosition: (position) =>
         set({ sidePanelPosition: position }),
+
+      toggleSyncExplorerWithEditor: () =>
+        set((state) => ({ syncExplorerWithEditor: !state.syncExplorerWithEditor })),
     }),
     {
       name: 'opencodebrew-layout',
-      version: 2,
+      version: 3,
       partialize: (state) => ({
         showSidePanel: state.showSidePanel,
         showBottomPanel: state.showBottomPanel,
         sidePanelPosition: state.sidePanelPosition,
         activeBottomTab: state.activeBottomTab,
+        syncExplorerWithEditor: state.syncExplorerWithEditor,
       }),
     }
   )

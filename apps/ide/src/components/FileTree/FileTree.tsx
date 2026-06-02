@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Terminal,
   FileText,
+  Focus,
 } from 'lucide-react';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -363,6 +364,7 @@ function TreeItem({ node, depth, onToggle, onSelect, onContextMenu, selectedPath
       <div
         className={`${styles.itemRow} ${isSelected ? styles.selected : ''}`}
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
+        data-path={node.path}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={(event) => onContextMenu(event, node)}
@@ -398,6 +400,8 @@ function TreeItem({ node, depth, onToggle, onSelect, onContextMenu, selectedPath
 
 export function FileTree() {
   const { currentWorkspace, openFolder } = useWorkspaceStore();
+  const activeFile = useEditorStore((state) => state.activeFile);
+  const { syncExplorerWithEditor, toggleSyncExplorerWithEditor } = useLayoutStore();
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -409,6 +413,7 @@ export function FileTree() {
   } | null>(null);
   const [renameTarget, setRenameTarget] = useState<ContextMenuFileItem | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const treeContentRef = useRef<HTMLDivElement>(null);
 
   const loadDirectory = useCallback(async (dirPath: string): Promise<TreeNode[]> => {
     try {
@@ -539,6 +544,82 @@ export function FileTree() {
     };
     setTree(await updateTree(tree));
   };
+
+  const revealInExplorer = useCallback(async (targetPath: string, currentTree: TreeNode[]) => {
+    if (!currentWorkspace?.rootPath || !targetPath) return null;
+    
+    const rootPath = currentWorkspace.rootPath;
+    if (!targetPath.startsWith(rootPath)) return null;
+    
+    const relativePath = targetPath.slice(rootPath.length);
+    const segments = relativePath.split('/').filter(Boolean);
+    
+    if (segments.length === 0) return null;
+    
+    let currentPath = rootPath;
+    const pathsToExpand: string[] = [];
+    
+    for (let i = 0; i < segments.length - 1; i++) {
+      currentPath = `${currentPath}/${segments[i]}`;
+      pathsToExpand.push(currentPath);
+    }
+    
+    const expandPaths = async (nodes: TreeNode[], paths: string[]): Promise<TreeNode[]> => {
+      return Promise.all(
+        nodes.map(async (node) => {
+          if (paths.includes(node.path) && node.isDirectory) {
+            const children = node.children?.length 
+              ? await expandPaths(node.children, paths)
+              : await loadDirectory(node.path);
+            const expandedChildren = await expandPaths(children, paths);
+            return { ...node, isExpanded: true, children: expandedChildren };
+          }
+          if (node.children) {
+            return { ...node, children: await expandPaths(node.children, paths) };
+          }
+          return node;
+        })
+      );
+    };
+    
+    return expandPaths(currentTree, pathsToExpand);
+  }, [currentWorkspace?.rootPath, loadDirectory]);
+
+  const lastRevealedPathRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!syncExplorerWithEditor) {
+      lastRevealedPathRef.current = null;
+      return;
+    }
+    
+    if (!activeFile?.path || activeFile.type !== 'file') {
+      return;
+    }
+    
+    if (lastRevealedPathRef.current === activeFile.path) {
+      return;
+    }
+    
+    lastRevealedPathRef.current = activeFile.path;
+    const targetPath = activeFile.path;
+    
+    revealInExplorer(targetPath, tree).then((expandedTree) => {
+      if (expandedTree) {
+        setTree(expandedTree);
+        setSelectedPath(targetPath);
+        
+        requestAnimationFrame(() => {
+          const itemElement = treeContentRef.current?.querySelector(
+            `[data-path="${CSS.escape(targetPath)}"]`
+          );
+          if (itemElement) {
+            itemElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        });
+      }
+    });
+  }, [syncExplorerWithEditor, activeFile?.path, activeFile?.type]);
 
   const handleSelect = (node: TreeNode) => {
     setSelectedPath(node.path);
@@ -950,6 +1031,13 @@ export function FileTree() {
         >
           <RefreshCw size={16} />
         </button>
+        <button
+          className={`${styles.toolbarButton} ${syncExplorerWithEditor ? styles.toolbarButtonActive : ''}`}
+          onClick={toggleSyncExplorerWithEditor}
+          title={syncExplorerWithEditor ? 'Stop syncing with editor' : 'Sync with editor'}
+        >
+          <Focus size={16} />
+        </button>
       </div>
       {newItemType && (
         <div className={styles.newItemInput}>
@@ -986,6 +1074,7 @@ export function FileTree() {
         </div>
       )}
       <div
+        ref={treeContentRef}
         className={styles.treeContent}
         onContextMenu={(event) => handleOpenContextMenu(event)}
       >

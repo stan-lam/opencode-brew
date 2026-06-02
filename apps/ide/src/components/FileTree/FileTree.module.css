@@ -27,6 +27,15 @@
   background-color: var(--bg-hover);
 }
 
+.toolbarButtonActive {
+  color: var(--accent-blue);
+  background-color: var(--bg-active);
+}
+
+.toolbarButtonActive:hover {
+  color: var(--accent-blue);
+}
+
 .treeContent {
   flex: 1;
   overflow: auto;

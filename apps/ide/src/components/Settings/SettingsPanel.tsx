@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2 } from 'lucide-react';
 import { useSettingsStore, Settings as SettingsType } from '../../store/settingsStore';
+import { useLayoutStore } from '../../store/layoutStore';
 import styles from './SettingsPanel.module.css';
 
 type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'plugins' | 'usage';
@@ -92,6 +93,7 @@ export function SettingsPanel() {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general');
   const settings = useSettingsStore();
   const { updateSetting } = settings;
+  const { sidePanelPosition, setSidePanelPosition } = useLayoutStore();
   const [usageStats, setUsageStats] = useState<OverallStats | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
 
@@ -321,6 +323,23 @@ export function SettingsPanel() {
                 </div>
               );
             })}
+            {activeCategory === 'appearance' && (
+              <div className={styles.settingItem}>
+                <div className={styles.settingInfo}>
+                  <label className={styles.settingLabel}>Side Panel Position</label>
+                  <p className={styles.settingDescription}>Position of the side panel (Explorer, AI, etc.)</p>
+                </div>
+                <div className={styles.settingControl}>
+                  <select
+                    value={sidePanelPosition}
+                    onChange={(e) => setSidePanelPosition(e.target.value as 'left' | 'right')}
+                  >
+                    <option value="left">Left</option>
+                    <option value="right">Right</option>
+                  </select>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
