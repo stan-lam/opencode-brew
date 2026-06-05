@@ -16,6 +16,8 @@ pub struct GitStatus {
     pub staged: Vec<GitFileStatus>,
     pub unstaged: Vec<GitFileStatus>,
     pub untracked: Vec<GitFileStatus>,
+    pub ahead: u32,
+    pub behind: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,12 +108,47 @@ pub async fn git_status(path: String) -> Result<GitStatus, String> {
         }
     }
     
+    // Calculate ahead/behind counts relative to upstream
+    let (ahead, behind) = calculate_ahead_behind(&repo);
+    
     Ok(GitStatus {
         branch,
         staged,
         unstaged,
         untracked,
+        ahead,
+        behind,
     })
+}
+
+fn calculate_ahead_behind(repo: &Repository) -> (u32, u32) {
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => return (0, 0),
+    };
+    
+    let local_oid = match head.target() {
+        Some(oid) => oid,
+        None => return (0, 0),
+    };
+    
+    // Try to find the upstream branch
+    let branch_name = match head.shorthand() {
+        Some(name) => name,
+        None => return (0, 0),
+    };
+    
+    // Look for upstream tracking branch (try common remotes)
+    let upstream_ref = format!("refs/remotes/origin/{}", branch_name);
+    let upstream_oid = match repo.refname_to_id(&upstream_ref) {
+        Ok(oid) => oid,
+        Err(_) => return (0, 0), // No upstream, can't determine ahead/behind
+    };
+    
+    match repo.graph_ahead_behind(local_oid, upstream_oid) {
+        Ok((ahead, behind)) => (ahead as u32, behind as u32),
+        Err(_) => (0, 0),
+    }
 }
 
 #[command]

@@ -36,6 +36,7 @@ export function GitPanel() {
     isLoading,
     isPushing,
     isPulling,
+    aheadCount,
     error,
     refreshStatus,
     initializeRepo,
@@ -362,8 +363,8 @@ export function GitPanel() {
           <button 
             className={styles.actionBtn} 
             onClick={handlePush}
-            disabled={isPulling || isPushing || (stagedFiles.length === 0 && !commitMessage.trim())}
-            title="Push"
+            disabled={isPulling || isPushing || aheadCount === 0}
+            title={aheadCount > 0 ? `Push (${aheadCount} commit${aheadCount > 1 ? 's' : ''} ahead)` : "Push (nothing to push)"}
           >
             {isPushing ? <RefreshCw size={16} className={styles.spinner} /> : <Upload size={16} />}
           </button>
