@@ -1,0 +1,127 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  width: 320px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.closeBtn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.closeBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 8px;
+}
+
+.percentFull {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.tokenCount {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.progressBar {
+  padding: 0 16px 12px;
+}
+
+.progressTrack {
+  height: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: 4px;
+  display: flex;
+  overflow: hidden;
+}
+
+.progressSegment {
+  height: 100%;
+  min-width: 2px;
+  transition: width 0.3s ease;
+}
+
+.progressSegment:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.progressSegment:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.breakdown {
+  padding: 8px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.breakdownItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.itemLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.colorDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.itemTokens {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

@@ -209,24 +209,32 @@ pub fn run() {
                 "new_window" => {
                     println!("New window menu clicked");
                     let window_count = app.webview_windows().len();
-                    let window_label = format!("window_{}", window_count + 1);
-                    println!("Creating window with label: {}", window_label);
+                    let window_label = format!("ide_{}", window_count + 1);
+                    println!("Creating IDE window with label: {}", window_label);
+                    
+                    // Use the same URL logic as open_tool_window for IDE
+                    let url = if cfg!(debug_assertions) {
+                        WebviewUrl::External("http://localhost:5174".parse().unwrap())
+                    } else {
+                        WebviewUrl::App("ide/index.html".into())
+                    };
                     
                     match WebviewWindowBuilder::new(
                         app,
                         &window_label,
-                        WebviewUrl::default(),
+                        url,
                     )
                     .title("OpenCodeBrew")
                     .inner_size(1400.0, 900.0)
                     .min_inner_size(800.0, 600.0)
+                    .center()
                     .build()
                     {
                         Ok(window) => {
-                            println!("New window created successfully: {}", window.label());
+                            println!("New IDE window created successfully: {}", window.label());
                         }
                         Err(e) => {
-                            eprintln!("Failed to create new window: {}", e);
+                            eprintln!("Failed to create new IDE window: {}", e);
                         }
                     }
                 }
