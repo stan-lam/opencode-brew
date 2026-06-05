@@ -299,6 +299,14 @@ export const dialog = {
     });
     return result;
   },
+  
+  confirm: async (message: string, title?: string): Promise<boolean> => {
+    const { ask } = await getDialog();
+    return await ask(message, {
+      title: title || 'Confirm',
+      kind: 'warning',
+    });
+  },
 };
 
 // Shell operations
@@ -499,7 +507,8 @@ export const ai = {
     messages: ChatMessage[],
     temperature: number | undefined,
     maxTokens: number | undefined,
-    conversationId: string
+    conversationId: string,
+    agentMode?: string
   ): Promise<string> => {
     const invoke = await getInvoke();
     return invoke('chat_copilot', {
@@ -508,6 +517,7 @@ export const ai = {
       temperature,
       maxTokens,
       conversationId,
+      agentMode: agentMode || 'chat',
     });
   },
   

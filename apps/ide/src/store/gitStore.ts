@@ -20,6 +20,8 @@ interface GitStatusResponse {
   staged: GitFileStatus[];
   unstaged: GitFileStatus[];
   untracked: GitFileStatus[];
+  ahead: number;
+  behind: number;
 }
 
 export interface GitCommitInfo {
@@ -43,6 +45,8 @@ interface GitState {
   unstagedFiles: GitFile[];
   commitHistory: GitCommitInfo[];
   stashes: StashEntry[];
+  aheadCount: number;
+  behindCount: number;
   isLoading: boolean;
   isPushing: boolean;
   isPulling: boolean;
@@ -88,6 +92,8 @@ export const useGitStore = create<GitState>((set, get) => ({
   unstagedFiles: [],
   commitHistory: [],
   stashes: [],
+  aheadCount: 0,
+  behindCount: 0,
   isLoading: false,
   isPushing: false,
   isPulling: false,
@@ -139,6 +145,8 @@ export const useGitStore = create<GitState>((set, get) => ({
           branches: [],
           stagedFiles: [],
           unstagedFiles: [],
+          aheadCount: 0,
+          behindCount: 0,
           isLoading: false
         });
         return;
@@ -179,6 +187,8 @@ export const useGitStore = create<GitState>((set, get) => ({
         currentBranch: status.branch,
         stagedFiles,
         unstagedFiles,
+        aheadCount: status.ahead,
+        behindCount: status.behind,
       });
 
       await get().fetchBranches();
@@ -521,6 +531,8 @@ export const useGitStore = create<GitState>((set, get) => ({
       unstagedFiles: [],
       commitHistory: [],
       stashes: [],
+      aheadCount: 0,
+      behindCount: 0,
       isLoading: false,
       isPushing: false,
       isPulling: false,

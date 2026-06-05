@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 import { IDELayout } from './components/Layout/IDELayout';
 import { useWorkspaceStore } from './store/workspaceStore';
 import { useLayoutStore } from './store/layoutStore';
@@ -321,7 +322,11 @@ function App() {
     });
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'f') {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'n') {
+        e.preventDefault();
+        const label = `ide-${Date.now()}`;
+        invoke('open_tool_window', { tool: 'ide', label, title: 'OpenCodeBrew' }).catch(console.error);
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'f') {
         e.preventDefault();
         setActiveSideTab('search');
         window.dispatchEvent(new CustomEvent('search-panel-find'));

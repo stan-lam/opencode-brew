@@ -21,11 +21,18 @@ const COPILOT_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_SCOPE: &str = "read:user read:org";
 const COPILOT_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const COPILOT_CHAT_URL: &str = "https://api.githubcopilot.com/chat/completions";
+const COPILOT_RESPONSES_URL: &str = "https://api.githubcopilot.com/responses";
 const COPILOT_MODELS_URL: &str = "https://api.githubcopilot.com/models";
 const COPILOT_USER_AGENT: &str = "GithubCopilot/1.312.0";
 const COPILOT_EDITOR_VERSION: &str = "vscode/1.99.3";
 const COPILOT_PLUGIN_VERSION: &str = "copilot-chat/0.26.3";
 const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+
+// Global cache for model endpoint capabilities
+lazy_static::lazy_static! {
+    static ref MODEL_ENDPOINTS: Arc<RwLock<HashMap<String, Vec<String>>>> = 
+        Arc::new(RwLock::new(HashMap::new()));
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MessageAttachment {
@@ -245,6 +252,61 @@ struct OpenAIRequest {
     max_tokens: Option<i32>,
     stream: bool,
 }
+
+// ========== Responses API Structures ==========
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ResponsesInputContent {
+    Text(String),
+    Items(Vec<ResponsesInputItem>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ResponsesInputItem {
+    #[serde(rename = "message")]
+    Message {
+        role: String,
+        content: ResponsesMessageContent,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ResponsesMessageContent {
+    Text(String),
+    ContentList(Vec<ResponsesContentItem>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ResponsesContentItem {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    #[serde(rename = "input_image")]
+    InputImage {
+        image_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ResponsesApiRequest {
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    input: ResponsesInputContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<i32>,
+    stream: bool,
+    store: bool,
+}
+
+// ========== End Responses API Structures ==========
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamChunk {
@@ -478,9 +540,9 @@ async fn fetch_copilot_api_token(client: &Client, github_token: &str) -> Result<
         .ok_or_else(|| "Copilot token response missing token".to_string())
 }
 
-fn extract_models_from_data(data: &serde_json::Value) -> Vec<(String, bool)> {
-    // Returns vec of (model_id, supports_vision)
-    let mut models: Vec<(String, bool)> = Vec::new();
+fn extract_models_from_data(data: &serde_json::Value) -> Vec<(String, bool, Vec<String>)> {
+    // Returns vec of (model_id, supports_vision, supported_endpoints)
+    let mut models: Vec<(String, bool, Vec<String>)> = Vec::new();
 
     let items_opt = data.get("data").and_then(|v| v.as_array())
         .or_else(|| data.get("models").and_then(|v| v.as_array()));
@@ -489,6 +551,35 @@ fn extract_models_from_data(data: &serde_json::Value) -> Vec<(String, bool)> {
         for item in items {
             let id = item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
             if let Some(id) = id {
+                // Check if model is enabled for picker
+                let picker_enabled = item.get("model_picker_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+
+                // Get supported endpoints
+                let supported_endpoints: Vec<String> = item.get("supported_endpoints")
+                    .and_then(|v| v.as_array())
+                    .map(|endpoints| {
+                        endpoints.iter()
+                            .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Check if model supports /chat/completions or /responses endpoint
+                let supports_chat = supported_endpoints.iter().any(|e| e == "/chat/completions");
+                let supports_responses = supported_endpoints.iter().any(|e| e == "/responses");
+
+                // Skip embedding models and models that don't support any chat endpoint
+                let is_embedding = id.contains("embedding");
+                let is_trajectory = id.contains("trajectory"); // internal model
+                
+                if !picker_enabled || (!supports_chat && !supports_responses) || is_embedding || is_trajectory {
+                    println!("[ai.rs] Skipping model: {} (picker_enabled={}, supports_chat={}, supports_responses={}, is_embedding={}, is_trajectory={})", 
+                             id, picker_enabled, supports_chat, supports_responses, is_embedding, is_trajectory);
+                    continue;
+                }
+
                 let capabilities = item.get("capabilities");
 
                 // Vision capability is stored under capabilities.limits.vision (not supports.vision)
@@ -498,8 +589,8 @@ fn extract_models_from_data(data: &serde_json::Value) -> Vec<(String, bool)> {
                     .map(|v| !v.is_null())
                     .unwrap_or(false);
                 
-                println!("[ai.rs] Model: {} vision={}", id, supports_vision);
-                models.push((id, supports_vision));
+                println!("[ai.rs] Model: {} vision={} endpoints={:?}", id, supports_vision, supported_endpoints);
+                models.push((id, supports_vision, supported_endpoints));
             }
         }
     }
@@ -537,7 +628,16 @@ pub async fn list_copilot_models() -> Result<Vec<String>, String> {
         .map_err(|e| format!("Failed to parse Copilot models: {}", e))?;
 
     let model_entries = extract_models_from_data(&data);
-    let mut models: Vec<String> = model_entries.into_iter().map(|(id, _)| id).collect();
+    
+    // Store endpoints in global cache
+    {
+        let mut endpoints_cache = MODEL_ENDPOINTS.write().await;
+        for (id, _, endpoints) in &model_entries {
+            endpoints_cache.insert(id.clone(), endpoints.clone());
+        }
+    }
+    
+    let mut models: Vec<String> = model_entries.into_iter().map(|(id, _, _)| id).collect();
 
     let mut seen = HashSet::new();
     models.retain(|model| seen.insert(model.clone()));
@@ -576,10 +676,19 @@ pub async fn list_copilot_vision_models() -> Result<Vec<String>, String> {
         .map_err(|e| format!("Failed to parse Copilot models: {}", e))?;
 
     let model_entries = extract_models_from_data(&data);
+    
+    // Also update endpoints cache here
+    {
+        let mut endpoints_cache = MODEL_ENDPOINTS.write().await;
+        for (id, _, endpoints) in &model_entries {
+            endpoints_cache.insert(id.clone(), endpoints.clone());
+        }
+    }
+    
     let mut vision_models: Vec<String> = model_entries
         .into_iter()
-        .filter(|(_, supports_vision)| *supports_vision)
-        .map(|(id, _)| id)
+        .filter(|(_, supports_vision, _)| *supports_vision)
+        .map(|(id, _, _)| id)
         .collect();
 
     let mut seen = HashSet::new();
@@ -588,6 +697,129 @@ pub async fn list_copilot_vision_models() -> Result<Vec<String>, String> {
 
     println!("[ai.rs] Vision-capable models: {:?}", vision_models);
     Ok(vision_models)
+}
+
+/// Determine which endpoint to use for a model
+async fn get_model_endpoint(model: &str) -> &'static str {
+    let endpoints_cache = MODEL_ENDPOINTS.read().await;
+    if let Some(endpoints) = endpoints_cache.get(model) {
+        // Prefer /chat/completions if available, otherwise use /responses
+        if endpoints.iter().any(|e| e == "/chat/completions") {
+            "/chat/completions"
+        } else if endpoints.iter().any(|e| e == "/responses") {
+            "/responses"
+        } else {
+            "/chat/completions" // fallback
+        }
+    } else {
+        "/chat/completions" // default for unknown models
+    }
+}
+
+/// Find a fallback model that supports /chat/completions for agent mode tasks
+async fn find_agent_fallback_model() -> String {
+    let endpoints_cache = MODEL_ENDPOINTS.read().await;
+    
+    // Priority order for agent mode fallback models
+    let preferred_models = [
+        "claude-sonnet-4",
+        "claude-sonnet-4.5",
+        "gpt-4.1",
+        "gpt-4o",
+        "gpt-4.5",
+        "o3",
+        "o3-mini",
+    ];
+    
+    // First try preferred models
+    for preferred in &preferred_models {
+        for (model_name, endpoints) in endpoints_cache.iter() {
+            if model_name.contains(preferred) && endpoints.iter().any(|e| e == "/chat/completions") {
+                return model_name.clone();
+            }
+        }
+    }
+    
+    // Otherwise return any model that supports /chat/completions
+    for (model_name, endpoints) in endpoints_cache.iter() {
+        if endpoints.iter().any(|e| e == "/chat/completions") {
+            return model_name.clone();
+        }
+    }
+    
+    // Hardcoded fallback if cache is empty (this model is widely available)
+    "gpt-4.1".to_string()
+}
+
+/// Convert ChatMessage to Responses API input format
+fn convert_to_responses_input(messages: &[ChatMessage]) -> (Option<String>, ResponsesInputContent) {
+    let mut instructions: Option<String> = None;
+    let mut input_items: Vec<ResponsesInputItem> = Vec::new();
+    
+    for msg in messages {
+        if msg.role == "system" {
+            // System messages become instructions
+            if instructions.is_none() {
+                instructions = Some(msg.content.clone());
+            } else {
+                // Append to existing instructions
+                if let Some(ref mut inst) = instructions {
+                    inst.push_str("\n\n");
+                    inst.push_str(&msg.content);
+                }
+            }
+        } else {
+            // User/assistant messages become input items
+            let has_images = msg.attachments.as_ref()
+                .map(|atts| atts.iter().any(|a| a.attachment_type == "image" && a.data.is_some()))
+                .unwrap_or(false);
+            
+            if has_images {
+                // Build content list with images and text
+                let mut content_items: Vec<ResponsesContentItem> = Vec::new();
+                
+                if let Some(attachments) = &msg.attachments {
+                    for att in attachments {
+                        if att.attachment_type == "image" {
+                            if let Some(data) = &att.data {
+                                let mime_type = att.mime_type.as_deref().unwrap_or("image/png");
+                                let image_url = if data.starts_with("data:") {
+                                    data.clone()
+                                } else {
+                                    format!("data:{};base64,{}", mime_type, data)
+                                };
+                                content_items.push(ResponsesContentItem::InputImage {
+                                    image_url,
+                                    detail: Some("auto".to_string()),
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                // Add text content
+                let text = if msg.content.is_empty() {
+                    "What is in this image?".to_string()
+                } else {
+                    msg.content.clone()
+                };
+                content_items.push(ResponsesContentItem::InputText { text });
+                
+                input_items.push(ResponsesInputItem::Message {
+                    role: msg.role.clone(),
+                    content: ResponsesMessageContent::ContentList(content_items),
+                });
+            } else {
+                // Text-only message
+                input_items.push(ResponsesInputItem::Message {
+                    role: msg.role.clone(),
+                    content: ResponsesMessageContent::Text(msg.content.clone()),
+                });
+            }
+        }
+    }
+    
+    (instructions, ResponsesInputContent::Items(input_items))
 }
 
 #[command]
@@ -1070,6 +1302,42 @@ pub async fn chat_copilot(
     temperature: Option<f32>,
     max_tokens: Option<i32>,
     conversation_id: String,
+    agent_mode: Option<String>,
+) -> Result<String, String> {
+    let mode = agent_mode.as_deref().unwrap_or("chat");
+    let is_agentic = mode == "agent" || mode == "plan";
+    
+    // Determine which endpoint to use based on model capabilities
+    let endpoint = get_model_endpoint(&model).await;
+    
+    // For agentic tasks, ensure we use a model that supports /chat/completions
+    // since /responses endpoint doesn't support tool calling well
+    let (final_model, final_endpoint) = if is_agentic && endpoint == "/responses" {
+        // Current model only supports /responses, need to find a fallback
+        let fallback = find_agent_fallback_model().await;
+        println!("[ai.rs] chat_copilot: Agent mode with {}, auto-routing to {} (supports /chat/completions)", model, fallback);
+        (fallback, "/chat/completions")
+    } else {
+        (model, endpoint)
+    };
+    
+    println!("[ai.rs] chat_copilot: model={}, mode={}, using endpoint={}", final_model, mode, final_endpoint);
+    
+    if final_endpoint == "/responses" {
+        chat_copilot_responses(app, final_model, messages, temperature, max_tokens, conversation_id).await
+    } else {
+        chat_copilot_chat_completions(app, final_model, messages, temperature, max_tokens, conversation_id).await
+    }
+}
+
+/// Handle Copilot chat using the /chat/completions endpoint (traditional OpenAI format)
+async fn chat_copilot_chat_completions(
+    app: AppHandle,
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: Option<f32>,
+    max_tokens: Option<i32>,
+    conversation_id: String,
 ) -> Result<String, String> {
     let client = Client::new();
     let github_token = load_copilot_token()?;
@@ -1089,7 +1357,6 @@ pub async fn chat_copilot(
     }
 
     // Convert messages to OpenAI format
-    // For Copilot vision: images must be sent as separate user messages (like VSCode does)
     let mut openai_messages: Vec<OpenAIMessage> = Vec::new();
     
     for msg in messages {
@@ -1100,7 +1367,6 @@ pub async fn chat_copilot(
                 .collect();
 
             if !image_attachments.is_empty() {
-                // Combine images and text in a single user message (standard OpenAI vision format)
                 let mut blocks: Vec<ContentBlock> = Vec::new();
                 
                 for att in &image_attachments {
@@ -1121,7 +1387,6 @@ pub async fn chat_copilot(
                     }
                 }
                 
-                // Append text block (required by Copilot - cannot send image-only messages)
                 let text = if msg.content.is_empty() { "What is in this image?".to_string() } else { msg.content.clone() };
                 blocks.push(ContentBlock::Text { text });
                 
@@ -1130,14 +1395,12 @@ pub async fn chat_copilot(
                     content: MessageContent::ContentBlocks(blocks),
                 });
             } else {
-                // No images, just text
                 openai_messages.push(OpenAIMessage {
                     role: msg.role,
                     content: MessageContent::Text(msg.content),
                 });
             }
         } else {
-            // No attachments
             openai_messages.push(OpenAIMessage {
                 role: msg.role,
                 content: MessageContent::Text(msg.content),
@@ -1153,19 +1416,8 @@ pub async fn chat_copilot(
         stream: true,
     };
 
-    // Debug: log the request structure and full JSON
     let has_vision = request.messages.iter().any(|m| matches!(&m.content, MessageContent::ContentBlocks(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. }))));
-    println!("[ai.rs] Sending Copilot request: model={}, messages={}, has_vision={}", request.model, request.messages.len(), has_vision);
-    for (i, msg) in request.messages.iter().enumerate() {
-        match &msg.content {
-            MessageContent::Text(t) => println!("[ai.rs]   msg[{}] role={} text_len={}", i, msg.role, t.len()),
-            MessageContent::ContentBlocks(blocks) => println!("[ai.rs]   msg[{}] role={} blocks={:?}", i, msg.role, blocks.iter().map(|b| match b { ContentBlock::Text { .. } => "text", ContentBlock::ImageUrl { .. } => "image_url" }).collect::<Vec<_>>()),
-        }
-    }
-    if let Ok(json_str) = serde_json::to_string(&request) {
-        let truncated = if json_str.len() > 500 { format!("{}...[truncated, total={}]", &json_str[..500], json_str.len()) } else { json_str };
-        println!("[ai.rs] Request JSON (truncated): {}", truncated);
-    }
+    println!("[ai.rs] Sending Copilot /chat/completions request: model={}, messages={}, has_vision={}", request.model, request.messages.len(), has_vision);
 
     let mut req_builder = client
         .post(COPILOT_CHAT_URL)
@@ -1179,7 +1431,6 @@ pub async fn chat_copilot(
 
     if has_vision {
         req_builder = req_builder.header("Copilot-Vision-Request", "true");
-        println!("[ai.rs] Adding Copilot-Vision-Request: true header");
     }
 
     let response = req_builder
@@ -1195,34 +1446,35 @@ pub async fn chat_copilot(
 
     let mut stream = response.bytes_stream();
     let mut full_content = String::new();
+    let mut line_buffer = String::new(); // Buffer for incomplete lines
 
     let mut cancel_active = true;
     loop {
         tokio::select! {
-            // Check for cancellation
             cancel_result = cancel_rx.recv(), if cancel_active => {
                 match cancel_result {
                     Ok(_) => {
-                        println!("Stream cancelled for conversation: {}", conversation_id);
-                        // Clean up
                         let mut streams = ACTIVE_STREAMS.write().await;
                         streams.remove(&conversation_id);
                         return Err("Stream cancelled by user".to_string());
                     }
                     Err(_) => {
-                        println!("[ai.rs] Cancel channel closed; continuing stream.");
                         cancel_active = false;
                     }
                 }
             }
-            // Process stream chunks
             chunk_result = stream.next() => {
                 match chunk_result {
                     Some(Ok(chunk)) => {
-                        let text = String::from_utf8_lossy(&chunk);
-
-                        for line in text.lines() {
-                            if !line.starts_with("data: ") {
+                        // Append chunk to buffer
+                        line_buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        
+                        // Process complete lines from buffer
+                        while let Some(newline_pos) = line_buffer.find('\n') {
+                            let line = line_buffer[..newline_pos].trim().to_string();
+                            line_buffer = line_buffer[newline_pos + 1..].to_string();
+                            
+                            if line.is_empty() || !line.starts_with("data: ") {
                                 continue;
                             }
 
@@ -1232,9 +1484,7 @@ pub async fn chat_copilot(
                                     content: String::new(),
                                     done: true,
                                 });
-                                // Emit token usage event
                                 emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
-                                // Clean up on completion
                                 let mut streams = ACTIVE_STREAMS.write().await;
                                 streams.remove(&conversation_id);
                                 return Ok(full_content);
@@ -1243,7 +1493,6 @@ pub async fn chat_copilot(
                             if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
                                 if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
                                     full_content.push_str(content);
-
                                     let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
                                         content: content.to_string(),
                                         done: false,
@@ -1258,9 +1507,7 @@ pub async fn chat_copilot(
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
-                        // Stream ended
-                        let event_name = format!("ai-stream-{}", conversation_id);
-                        let _ = app.emit(&event_name, StreamChunk {
+                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
                             content: String::new(),
                             done: true,
                         });
@@ -1273,9 +1520,205 @@ pub async fn chat_copilot(
         }
     }
 
-    // Emit token usage event
     emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
+    Ok(full_content)
+}
 
+/// Handle Copilot chat using the /responses endpoint (newer OpenAI Responses API format)
+async fn chat_copilot_responses(
+    app: AppHandle,
+    model: String,
+    messages: Vec<ChatMessage>,
+    _temperature: Option<f32>, // Not supported by Codex models
+    max_tokens: Option<i32>,
+    conversation_id: String,
+) -> Result<String, String> {
+    let client = Client::new();
+    let github_token = load_copilot_token()?;
+    let copilot_token = fetch_copilot_api_token(&client, &github_token).await?;
+    
+    let prompt_content: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+    let model_clone = model.clone();
+    
+    let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
+    {
+        let mut streams = ACTIVE_STREAMS.write().await;
+        streams.insert(conversation_id.clone(), cancel_tx);
+    }
+
+    // Convert messages to Responses API format
+    let (mut instructions, input) = convert_to_responses_input(&messages);
+    
+    // Prepend model identity to instructions so the model knows what it is
+    let model_identity = format!("You are {}, an AI assistant by OpenAI accessed through GitHub Copilot. When asked about your identity, respond in plain text without markdown formatting.", model);
+    instructions = Some(match instructions {
+        Some(existing) => format!("{}\n\n{}", model_identity, existing),
+        None => model_identity,
+    });
+    
+    // Note: Codex models don't support temperature parameter
+    let request = ResponsesApiRequest {
+        model,
+        instructions,
+        input,
+        temperature: None, // Not supported by Codex models
+        max_output_tokens: max_tokens,
+        stream: true,
+        store: false, // Don't store responses on server
+    };
+
+    println!("[ai.rs] Sending Copilot /responses request: model={}", request.model);
+    if let Ok(json_str) = serde_json::to_string(&request) {
+        let truncated = if json_str.len() > 500 { format!("{}...[truncated, total={}]", &json_str[..500], json_str.len()) } else { json_str };
+        println!("[ai.rs] Request JSON: {}", truncated);
+    }
+
+    let response = client
+        .post(COPILOT_RESPONSES_URL)
+        .header("Authorization", format!("Bearer {}", copilot_token))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", COPILOT_USER_AGENT)
+        .header("Editor-Version", COPILOT_EDITOR_VERSION)
+        .header("Editor-Plugin-Version", COPILOT_PLUGIN_VERSION)
+        .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)
+        .header("OpenAI-Intent", "conversation-panel")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("Copilot /responses error: {}", error_text));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut full_content = String::new();
+    let mut buffer = String::new();
+
+    let mut cancel_active = true;
+    loop {
+        tokio::select! {
+            cancel_result = cancel_rx.recv(), if cancel_active => {
+                match cancel_result {
+                    Ok(_) => {
+                        let mut streams = ACTIVE_STREAMS.write().await;
+                        streams.remove(&conversation_id);
+                        return Err("Stream cancelled by user".to_string());
+                    }
+                    Err(_) => {
+                        cancel_active = false;
+                    }
+                }
+            }
+            chunk_result = stream.next() => {
+                match chunk_result {
+                    Some(Ok(chunk)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        
+                        // Process complete lines from buffer
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+                            
+                            if line.is_empty() || !line.starts_with("data: ") {
+                                continue;
+                            }
+
+                            let json_str = &line[6..];
+                            if json_str == "[DONE]" {
+                                let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                    content: String::new(),
+                                    done: true,
+                                });
+                                emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
+                                let mut streams = ACTIVE_STREAMS.write().await;
+                                streams.remove(&conversation_id);
+                                return Ok(full_content);
+                            }
+
+                            // Parse Responses API streaming format
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                // Responses API uses different event types
+                                // Look for output_text delta events
+                                let event_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                
+                                // Handle different event types
+                                if event_type == "response.output_text.delta" {
+                                    if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                                        full_content.push_str(delta);
+                                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                            content: delta.to_string(),
+                                            done: false,
+                                        });
+                                    }
+                                } else if event_type == "response.output_text.done" || event_type == "response.done" {
+                                    // Stream complete
+                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                        content: String::new(),
+                                        done: true,
+                                    });
+                                    emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
+                                    let mut streams = ACTIVE_STREAMS.write().await;
+                                    streams.remove(&conversation_id);
+                                    return Ok(full_content);
+                                } else if event_type.starts_with("response.content_part") {
+                                    // Handle content part deltas (alternative format)
+                                    if let Some(delta) = data.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
+                                        full_content.push_str(delta);
+                                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                            content: delta.to_string(),
+                                            done: false,
+                                        });
+                                    }
+                                }
+                                // Also try the output array format for non-streaming portions
+                                else if let Some(output) = data.get("output") {
+                                    if let Some(items) = output.as_array() {
+                                        for item in items {
+                                            if item.get("type").and_then(|t| t.as_str()) == Some("message") {
+                                                if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                                                    for content_item in content_arr {
+                                                        if content_item.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                                            if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
+                                                                if !text.is_empty() && !full_content.contains(text) {
+                                                                    full_content.push_str(text);
+                                                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                                                        content: text.to_string(),
+                                                                        done: false,
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        let mut streams = ACTIVE_STREAMS.write().await;
+                        streams.remove(&conversation_id);
+                        return Err(format!("Stream error: {}", e));
+                    }
+                    None => {
+                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                            content: String::new(),
+                            done: true,
+                        });
+                        let mut streams = ACTIVE_STREAMS.write().await;
+                        streams.remove(&conversation_id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
     Ok(full_content)
 }
 

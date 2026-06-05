@@ -47,6 +47,19 @@ export interface SessionUsage {
   turnCount: number;
 }
 
+export interface ContextBreakdown {
+  systemPrompt: number;
+  modePrompt: number;
+  webAccessPrompt: number;
+  conversationSummary: number;
+  conversation: number;
+  currentMessage: number;
+  attachments: number;
+  total: number;
+  contextLimit: number;
+  percentFull: number;
+}
+
 export interface AIMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -129,8 +142,10 @@ interface AIState {
   sessionUsage: SessionUsage;
   lastMessageUsage: MessageUsage | null;
   isSummarizing: boolean;
+  contextBreakdown: ContextBreakdown | null;
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
+  updateContextBreakdown: (breakdown: ContextBreakdown) => void;
   updateSessionUsage: (usage: MessageUsage) => void;
   resetSessionUsage: () => void;
   setWebAccessStatus: (status: WebAccessStatus) => void;
@@ -224,6 +239,36 @@ function formatMessageForSummary(message: AIMessage): string {
     ? ` [attachments: ${message.attachments.map(att => att.name).join(', ')}]`
     : '';
   return `${roleLabel}: ${message.content}${attachmentText}`;
+}
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function getContextLimitForModel(model: string): number {
+  const modelLower = model.toLowerCase();
+  if (modelLower.includes('claude-3') || modelLower.includes('claude-sonnet') || modelLower.includes('claude-opus')) {
+    return 200000;
+  }
+  if (modelLower.includes('gpt-4o') || modelLower.includes('gpt-4-turbo')) {
+    return 128000;
+  }
+  if (modelLower.includes('gpt-4')) {
+    return 8192;
+  }
+  if (modelLower.includes('gpt-3.5')) {
+    return 16385;
+  }
+  if (modelLower.includes('o1') || modelLower.includes('o3')) {
+    return 128000;
+  }
+  if (modelLower.includes('gemini')) {
+    return 1000000;
+  }
+  if (modelLower.includes('codex')) {
+    return 192000;
+  }
+  return 128000;
 }
 
 function buildSummaryPrompt(existingSummary: string | undefined, messages: AIMessage[]): string {
@@ -1299,6 +1344,7 @@ export const useAIStore = create<AIState>()(
       },
       lastMessageUsage: null,
       isSummarizing: false,
+      contextBreakdown: null,
 
       setConfig: (newConfig) => {
         set((state) => ({
@@ -1333,7 +1379,12 @@ export const useAIStore = create<AIState>()(
             turnCount: 0,
           },
           lastMessageUsage: null,
+          contextBreakdown: null,
         });
+      },
+      
+      updateContextBreakdown: (breakdown: ContextBreakdown) => {
+        set({ contextBreakdown: breakdown });
       },
 
       setWebAccessStatus: (status: WebAccessStatus) => {
@@ -1728,40 +1779,42 @@ export const useAIStore = create<AIState>()(
           const { summary, messages: contextMessages } = getConversationContext(activeConversation, true);
           const { agentMode, forceFileOpsNext } = get();
           
-          // Build system prompt based on mode
-          let systemPrompt = config.systemPrompt;
+          // Build system prompt based on mode - track each component for context breakdown
+          const baseSystemPrompt = config.systemPrompt;
 
           // Ensure prompts are loaded
           await initializePrompts();
 
-          // Add response formatting guidelines (for consistent markdown output)
-          systemPrompt += getPrompt(PROMPT_NAMES.RESPONSE_FORMAT);
-
+          // Track each component separately for context breakdown
+          const responseFormatPrompt = getPrompt(PROMPT_NAMES.RESPONSE_FORMAT);
+          let forceFileOpsPrompt = '';
           if (forceFileOpsNext && (agentMode === 'agent' || agentMode === 'edit')) {
-            systemPrompt += FORCE_FILE_OPS_SYSTEM_PROMPT;
+            forceFileOpsPrompt = FORCE_FILE_OPS_SYSTEM_PROMPT;
             set({ forceFileOpsNext: false });
           }
 
-          // Add mode-specific prompts (loaded from config files)
+          // Get mode-specific prompt
+          let modePrompt = '';
           if (agentMode === 'agent') {
-            systemPrompt += getPrompt(PROMPT_NAMES.AGENT_MODE);
+            modePrompt = getPrompt(PROMPT_NAMES.AGENT_MODE);
           } else if (agentMode === 'edit') {
-            systemPrompt += getPrompt(PROMPT_NAMES.EDIT_MODE);
+            modePrompt = getPrompt(PROMPT_NAMES.EDIT_MODE);
           } else if (agentMode === 'plan') {
-            systemPrompt += getPrompt(PROMPT_NAMES.PLAN_MODE);
+            modePrompt = getPrompt(PROMPT_NAMES.PLAN_MODE);
           } else {
-            systemPrompt += CHAT_FILE_OPS_PROMPT;
+            modePrompt = CHAT_FILE_OPS_PROMPT;
           }
 
           // Add web access capability for all modes (with current date)
-          const webAccessPrompt = getPrompt(PROMPT_NAMES.WEB_ACCESS);
+          const webAccessPromptTemplate = getPrompt(PROMPT_NAMES.WEB_ACCESS);
           const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-          systemPrompt += getCurrentDatePrompt() + webAccessPrompt.replace('{{TODAY}}', today);
+          const webAccessPrompt = getCurrentDatePrompt() + webAccessPromptTemplate.replace('{{TODAY}}', today);
 
           // Add think aloud prompt if enabled
-          if (config.thinkAloud) {
-            systemPrompt += getPrompt(PROMPT_NAMES.THINK_ALOUD);
-          }
+          const thinkAloudPrompt = config.thinkAloud ? getPrompt(PROMPT_NAMES.THINK_ALOUD) : '';
+          
+          // Combine into final system prompt
+          const systemPrompt = baseSystemPrompt + responseFormatPrompt + forceFileOpsPrompt + modePrompt + webAccessPrompt + thinkAloudPrompt;
           
           const messages = [
             { role: 'system', content: systemPrompt, attachments: undefined },
@@ -1774,6 +1827,37 @@ export const useAIStore = create<AIState>()(
             // Use enhanced content with context for the last (current) message
             { role: 'user', content: enhancedContent, attachments: attachments },
           ];
+          
+          // Calculate context breakdown
+          const systemPromptTokens = estimateTokens(baseSystemPrompt + responseFormatPrompt + forceFileOpsPrompt + thinkAloudPrompt);
+          const modePromptTokens = estimateTokens(modePrompt);
+          const webAccessPromptTokens = estimateTokens(webAccessPrompt);
+          const summaryTokens = summary ? estimateTokens(`Conversation Summary:\n${summary}`) : 0;
+          const conversationTokens = contextMessages.reduce((acc, m) => acc + estimateTokens(m.content), 0);
+          const currentMessageTokens = estimateTokens(enhancedContent);
+          const attachmentTokens = attachments?.reduce((acc, att) => {
+            if (att.type === 'image' && att.data) {
+              return acc + 765; // Approximate tokens for image
+            }
+            return acc + estimateTokens(att.name || '');
+          }, 0) || 0;
+          
+          const totalTokens = systemPromptTokens + modePromptTokens + webAccessPromptTokens + summaryTokens + conversationTokens + currentMessageTokens + attachmentTokens;
+          const contextLimit = getContextLimitForModel(config.model);
+          
+          get().updateContextBreakdown({
+            systemPrompt: systemPromptTokens,
+            modePrompt: modePromptTokens,
+            webAccessPrompt: webAccessPromptTokens,
+            conversationSummary: summaryTokens,
+            conversation: conversationTokens,
+            currentMessage: currentMessageTokens,
+            attachments: attachmentTokens,
+            total: totalTokens,
+            contextLimit,
+            percentFull: Math.round((totalTokens / contextLimit) * 100),
+          });
+          
           // Check for images and override model if needed
           const hasImageAttachments = messages.some((message) =>
             message.attachments?.some((attachment) => attachment.type === 'image')
@@ -1811,6 +1895,15 @@ export const useAIStore = create<AIState>()(
               /[,(]\s*$/.test(trimmed) ||
               /\w+-\s*$/.test(trimmed);
             
+            // Check if response ends with incomplete code block (started but not closed properly)
+            const codeBlockStarts = (trimmed.match(/```/g) || []).length;
+            const hasUnclosedCodeBlock = codeBlockStarts % 2 !== 0;
+            
+            // Check if response mentions writing/making changes but doesn't have file operation tags
+            const promisedAction = /(let me (write|make|create|implement|add|fix|update|apply)|i('ll| will) (write|make|create|implement|add|fix|update|apply)|here('s| is) the (fix|change|update|code|implementation))/i.test(lower);
+            const hasFileOps = /<(create_file|edit_file|delete_file)\s/i.test(trimmed);
+            const promisedButDidntDeliver = promisedAction && !hasFileOps && !hasUnclosedCodeBlock;
+            
             console.log('[aiStore] shouldAutoContinue check', {
               textLen: trimmed.length,
               lastSentence: lastSentence.slice(0, 100),
@@ -1823,6 +1916,8 @@ export const useAIStore = create<AIState>()(
               endsWithPlanList,
               endsWithActionStatement,
               endsWithTruncation,
+              hasUnclosedCodeBlock,
+              promisedButDidntDeliver,
               hasToolTags,
             });
             
@@ -1832,6 +1927,8 @@ export const useAIStore = create<AIState>()(
             if (endsWithPlanList && longResponse && !hasToolTags) return true;
             if (endsWithActionStatement && !hasToolTags) return true;
             if (endsWithTruncation) return true;
+            if (hasUnclosedCodeBlock) return true;
+            if (promisedButDidntDeliver) return true;
             return false;
           };
 
@@ -2138,7 +2235,8 @@ export const useAIStore = create<AIState>()(
                         continuationMessages,
                         config.temperature,
                         config.maxTokens,
-                        conversationId
+                        conversationId,
+                        get().agentMode
                       );
                     } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
                       const baseUrl = config.provider === 'openai' 
@@ -2184,11 +2282,11 @@ export const useAIStore = create<AIState>()(
                   get().saveWorkspaceHistory();
                 });
               } else {
-                // Check for file read operations (agent mode only)
+                // Check for file read operations (agent and plan modes)
                 const fileReadOps = parseFileReadOperations(responseContent);
                 const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath;
                 
-                if (fileReadOps.length > 0 && workspacePath && currentMode === 'agent') {
+                if (fileReadOps.length > 0 && workspacePath && (currentMode === 'agent' || currentMode === 'plan')) {
                   set({ streamContinuationPending: true });
                   console.log('[aiStore] file read operations detected', {
                     conversationId,
@@ -2423,7 +2521,8 @@ export const useAIStore = create<AIState>()(
                           continuationMessages,
                           config.temperature,
                           config.maxTokens,
-                          conversationId
+                          conversationId,
+                          get().agentMode
                         );
                       } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
                         const baseUrl = config.provider === 'openai' 
@@ -2611,7 +2710,8 @@ export const useAIStore = create<AIState>()(
               messages,
               config.temperature,
               config.maxTokens,
-              conversationId
+              conversationId,
+              get().agentMode
             );
           } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
             const providerName = config.provider === 'openai' ? 'OpenAI' : config.provider === 'claude' ? 'Claude' : 'API';
@@ -2990,7 +3090,8 @@ export const useAIStore = create<AIState>()(
               summaryMessages,
               0.2,
               SUMMARY_MAX_TOKENS,
-              summaryId
+              summaryId,
+              'chat' // Summary generation doesn't need agent mode
             );
           } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
             const baseUrl = config.provider === 'openai'

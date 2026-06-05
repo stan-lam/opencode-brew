@@ -1574,6 +1574,15 @@
   flex-shrink: 0;
 }
 
+.mdCheckboxInline {
+  width: 14px;
+  height: 14px;
+  margin: 0 2px;
+  vertical-align: middle;
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+}
+
 .mdChecklistItem span {
   flex: 1;
 }
@@ -2522,6 +2531,61 @@
 .approach.recommended {
   border-color: rgba(76, 175, 80, 0.5);
   background-color: rgba(76, 175, 80, 0.05);
+}
+
+.approach.approachSelectable {
+  transition: all 0.15s ease;
+}
+
+.approach.approachSelectable:hover {
+  border-color: var(--accent-color);
+  background-color: rgba(var(--accent-rgb), 0.05);
+}
+
+.approach.approachSelected {
+  border-color: var(--accent-color);
+  border-width: 2px;
+  background-color: rgba(var(--accent-rgb), 0.08);
+}
+
+.approachRadio {
+  margin-right: 8px;
+  color: var(--accent-color);
+  font-size: 14px;
+}
+
+.selectedBadge {
+  background-color: var(--accent-color);
+  color: white;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  margin-left: 8px;
+}
+
+.approachActions {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.confirmApproachBtn {
+  background-color: var(--accent-color);
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.confirmApproachBtn:hover {
+  background-color: var(--accent-hover);
 }
 
 .approachHeader {
@@ -3939,6 +4003,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   padding: 6px 12px;
   background: var(--bg-secondary, #252526);
   border-bottom: 1px solid var(--border-color, #3c3c3c);
@@ -3979,6 +4044,53 @@
   padding: 1px 5px;
   background: rgba(0, 122, 204, 0.15);
   border-radius: 3px;
+}
+
+/* Context Breakdown Button */
+.contextBreakdownBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary, #1f1f1f);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-right: 10px;
+}
+
+.contextBreakdownBtn:hover {
+  background: var(--bg-hover, #2a2d2e);
+  border-color: var(--border-color-bright, #555);
+}
+
+.contextPercent {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary, #ccc);
+  min-width: 28px;
+}
+
+.contextMiniBar {
+  width: 40px;
+  height: 6px;
+  background: var(--bg-secondary, #252526);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.contextMiniBarFill {
+  height: 100%;
+  background: linear-gradient(90deg, 
+    #6b7280 0%, 
+    #a855f7 15%, 
+    #22c55e 30%, 
+    #3b82f6 60%, 
+    #06b6d4 100%
+  );
+  border-radius: 3px;
+  transition: width 0.3s ease;
 }
 
 /* Summary card */

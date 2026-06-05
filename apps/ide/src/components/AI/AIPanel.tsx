@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage } from '../../services/tauri';
 import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
+import { ContextBreakdownModal } from './ContextBreakdownModal';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
@@ -680,7 +681,7 @@ function parsePlanComponents(content: string): {
 }
 
 // Component to display a plan
-function PlanView({ plan }: { plan: Plan }) {
+function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithApproach?: (approach: PlanApproach) => void }) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['overview', 'approaches', 'tasks']));
   const [tasks, setTasks] = useState<PlanTask[]>(plan.tasks);
   const [newTaskText, setNewTaskText] = useState('');
@@ -688,6 +689,11 @@ function PlanView({ plan }: { plan: Plan }) {
   const [editingText, setEditingText] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const { currentWorkspace } = useWorkspaceStore();
+  
+  // Default to recommended approach, or first one if none recommended
+  const defaultApproachIdx = plan.approaches.findIndex(a => a.recommended);
+  const [selectedApproachIdx, setSelectedApproachIdx] = useState<number>(defaultApproachIdx >= 0 ? defaultApproachIdx : 0);
+  const [approachConfirmed, setApproachConfirmed] = useState(false);
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => {
@@ -939,10 +945,23 @@ function PlanView({ plan }: { plan: Plan }) {
           {expandedSections.has('approaches') && (
             <div className={styles.planSectionContent}>
               {plan.approaches.map((approach, idx) => (
-                <div key={idx} className={`${styles.approach} ${approach.recommended ? styles.recommended : ''}`}>
+                <div 
+                  key={idx} 
+                  className={`${styles.approach} ${approach.recommended ? styles.recommended : ''} ${selectedApproachIdx === idx ? styles.approachSelected : ''} ${!approachConfirmed ? styles.approachSelectable : ''}`}
+                  onClick={() => !approachConfirmed && setSelectedApproachIdx(idx)}
+                  style={{ cursor: approachConfirmed ? 'default' : 'pointer' }}
+                >
                   <div className={styles.approachHeader}>
-                    <span className={styles.approachName}>{approach.name}</span>
+                    <span className={styles.approachName}>
+                      {!approachConfirmed && (
+                        <span className={styles.approachRadio}>
+                          {selectedApproachIdx === idx ? '◉' : '○'}
+                        </span>
+                      )}
+                      {approach.name}
+                    </span>
                     {approach.recommended && <span className={styles.recommendedBadge}>Recommended</span>}
+                    {approachConfirmed && selectedApproachIdx === idx && <span className={styles.selectedBadge}>Selected</span>}
                   </div>
                   {approach.pros.length > 0 && (
                     <div className={styles.approachList}>
@@ -962,6 +981,19 @@ function PlanView({ plan }: { plan: Plan }) {
                   )}
                 </div>
               ))}
+              {!approachConfirmed && plan.approaches.length > 0 && onProceedWithApproach && (
+                <div className={styles.approachActions}>
+                  <button 
+                    className={styles.confirmApproachBtn}
+                    onClick={() => {
+                      setApproachConfirmed(true);
+                      onProceedWithApproach(plan.approaches[selectedApproachIdx]);
+                    }}
+                  >
+                    Confirm & Proceed with {plan.approaches[selectedApproachIdx]?.name || 'Selected Approach'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1473,9 +1505,9 @@ function MessageBubble({ message, onOperationsChange }: {
     
     // In plan mode, remove code blocks (detection happens in useEffect, not here)
     if (agentMode === 'plan') {
-      // Remove all code blocks except mermaid — use double newlines to preserve paragraph breaks
+      // Remove all code blocks except mermaid — replace with a subtle indicator
       cleaned = cleaned.replace(/```(?!mermaid)(\w*)[^\n]*\n[\s\S]*?```/g, () => {
-        return `\n\n*[Code block hidden — switch to Agent Mode to see implementation]*\n\n`;
+        return `\n\n> 📋 *Code hidden in Plan Mode — switch to Agent Mode to see implementation*\n\n`;
       });
     }
     
@@ -1563,11 +1595,35 @@ function MessageBubble({ message, onOperationsChange }: {
     cleaned = cleaned.replace(/<old_content>[\s\S]*?<\/old_content>/gi, '');
     cleaned = cleaned.replace(/<new_content>[\s\S]*?<\/new_content>/gi, '');
     
+    // Handle read_file tags - convert to readable format
+    cleaned = cleaned.replace(
+      /<read_file\s+path="([^"]+)"\s*\/?>/gi,
+      (_, path) => `\n\n*Reading \`${path}\`*\n\n`
+    );
+    // Handle malformed read_file tags (missing quotes, etc.)
+    cleaned = cleaned.replace(
+      /<read_file\s+path[^>]*\/?>/gi,
+      ''
+    );
+    
+    // Handle other common tool/function call XML patterns
+    cleaned = cleaned.replace(/<search_files[^>]*>[\s\S]*?<\/search_files>/gi, '');
+    cleaned = cleaned.replace(/<search_files[^>]*\/?>/gi, '');
+    cleaned = cleaned.replace(/<execute_command[^>]*>[\s\S]*?<\/execute_command>/gi, '');
+    cleaned = cleaned.replace(/<execute_command[^>]*\/?>/gi, '');
+    cleaned = cleaned.replace(/<list_files[^>]*>[\s\S]*?<\/list_files>/gi, '');
+    cleaned = cleaned.replace(/<list_files[^>]*\/?>/gi, '');
+    cleaned = cleaned.replace(/<write_to_file[^>]*>[\s\S]*?<\/write_to_file>/gi, '');
+    cleaned = cleaned.replace(/<ask_followup_question[^>]*>[\s\S]*?<\/ask_followup_question>/gi, '');
+    cleaned = cleaned.replace(/<attempt_completion[^>]*>[\s\S]*?<\/attempt_completion>/gi, '');
+    
     // Remove any remaining known plan component wrapper tags (opening and closing, no content strip)
     // Only target the specific known tag names to avoid eating real words in the response.
     const knownTags = ['plan', 'checklist', 'decision', 'overview', 'approach', 'pros', 'cons',
       'tasks', 'architecture', 'considerations', 'old_content', 'new_content',
-      'create_file', 'edit_file', 'delete_file', 'summary'];
+      'create_file', 'edit_file', 'delete_file', 'read_file', 'search_files', 
+      'execute_command', 'list_files', 'write_to_file', 'ask_followup_question',
+      'attempt_completion', 'summary', 'thinking', 'result', 'output', 'response'];
     const knownTagPattern = knownTags.join('|');
     // Remove paired known tags that still have content inside
     cleaned = cleaned.replace(
@@ -1577,6 +1633,36 @@ function MessageBubble({ message, onOperationsChange }: {
     cleaned = cleaned.replace(
       new RegExp(`<\\/?(?:${knownTagPattern})(?:\\s[^>]*)?\\s*/?>`, 'gi'), ''
     );
+    
+    // Remove any remaining malformed XML-like tags that look like tool calls
+    // Match patterns like <tag_name ... /> or <tag_name ...> with underscores
+    cleaned = cleaned.replace(/<[a-z_]+(?:\s+[^>]*)?\s*\/?>/gi, (match) => {
+      // Only remove if it looks like a tool call (has underscore or specific patterns)
+      if (match.includes('_') || /^<(read|write|search|list|execute|create|edit|delete|get|set|run)/i.test(match)) {
+        return '';
+      }
+      return match;
+    });
+    
+    // Clean up stray XML closing tags
+    cleaned = cleaned.replace(/<\/[a-z_]+>/gi, (match) => {
+      if (match.includes('_')) return '';
+      return match;
+    });
+    
+    // Clean up stray XML-like fragments - be conservative to avoid false positives
+    // Remove stray " /> or '/> patterns (remnants of self-closing tags)
+    cleaned = cleaned.replace(/^["']\s*\/>\s*$/gm, '');
+    cleaned = cleaned.replace(/["']\s*\/>\s*(?=\n|$)/g, '');
+    // Remove stray /> at the start of lines (only if alone or followed by whitespace)
+    cleaned = cleaned.replace(/^\s*\/>\s*$/gm, '');
+    // Remove incomplete tool-call tags (only known prefixes to avoid false positives)
+    const toolPrefixes = 'read_file|write_file|create_file|edit_file|delete_file|search_files|list_files|execute_command|checklist|chec';
+    cleaned = cleaned.replace(new RegExp(`<(?:${toolPrefixes})(?:=["'][^"']*)?["']?\\s*>?`, 'gi'), '');
+    // Remove stray quotes at start of lines (only if that's the entire line)
+    cleaned = cleaned.replace(/^\s*["']\s*$/gm, '');
+    // Remove lines that are just XML remnants
+    cleaned = cleaned.replace(/^\s*[\/>"']{1,3}\s*$/gm, '');
     
     // Clean up excessive whitespace/newlines that may be left
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
@@ -1635,7 +1721,13 @@ function MessageBubble({ message, onOperationsChange }: {
       {!isUser && (planComponents.plans.length > 0 || planComponents.checklists.length > 0 || planComponents.decisions.length > 0) && (
         <div className={styles.planComponents}>
           {planComponents.plans.map((plan, idx) => (
-            <PlanView key={idx} plan={plan} />
+            <PlanView 
+              key={idx} 
+              plan={plan} 
+              onProceedWithApproach={(approach) => {
+                sendMessage(`Proceed with "${approach.name}". Please break down the implementation steps and begin execution.`);
+              }}
+            />
           ))}
           {planComponents.checklists.map((checklist, idx) => (
             <ChecklistView
@@ -2216,6 +2308,34 @@ function MarkdownRenderer({ content }: { content: string }) {
         continue;
       }
 
+      // Standalone checkbox lines (without list prefix): [ ] or [x] at start of line
+      if (line.match(/^[\s]*\[[ xX]\]\s+/)) {
+        const listItems: React.ReactNode[] = [];
+        while (i < lines.length && lines[i].match(/^[\s]*\[[ xX]\]\s+/)) {
+          const checkboxMatch = lines[i].match(/^[\s]*(\[[ xX]\])\s+(.+)$/);
+          if (checkboxMatch) {
+            const isChecked = checkboxMatch[1].toLowerCase() === '[x]';
+            const text = checkboxMatch[2];
+            listItems.push(
+              <li key={key++} className={styles.mdChecklistItem}>
+                <input 
+                  type="checkbox" 
+                  checked={isChecked} 
+                  readOnly 
+                  className={styles.mdCheckbox}
+                />
+                <span>{renderInline(text)}</span>
+              </li>
+            );
+          }
+          i++;
+        }
+        if (listItems.length > 0) {
+          elements.push(<ul key={key++} className={styles.mdList}>{listItems}</ul>);
+        }
+        continue;
+      }
+
       // Unordered lists (including checkboxes)
       if (line.match(/^[\s]*[-*+]\s/)) {
         const listItems: React.ReactNode[] = [];
@@ -2653,6 +2773,27 @@ function MarkdownRenderer({ content }: { content: string }) {
       }
     }
 
+    // Inline checkboxes [ ] or [x] or [X]
+    const checkboxRegex = /\[[ xX]\]/g;
+    while ((m = checkboxRegex.exec(text)) !== null) {
+      if (noOverlap(m.index, m.index + m[0].length)) {
+        const isChecked = m[0].toLowerCase() === '[x]';
+        matches.push({
+          start: m.index,
+          end: m.index + m[0].length,
+          element: (
+            <input 
+              key={key++}
+              type="checkbox" 
+              checked={isChecked} 
+              readOnly 
+              className={styles.mdCheckboxInline}
+            />
+          ),
+        });
+      }
+    }
+
     // Links [text](url)
     const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
     while ((m = linkRegex.exec(text)) !== null) {
@@ -2849,6 +2990,52 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
   );
 }
 
+// Group operations by file path
+interface GroupedFileOperation {
+  path: string;
+  operations: { op: PendingFileOperation; originalIndex: number }[];
+  totalAdded: number;
+  totalRemoved: number;
+  allApplied: boolean;
+  anyApplied: boolean;
+}
+
+function groupOperationsByFile(operations: PendingFileOperation[]): GroupedFileOperation[] {
+  const groupMap = new Map<string, GroupedFileOperation>();
+  
+  operations.forEach((op, index) => {
+    const path = op.operation.path;
+    if (!groupMap.has(path)) {
+      groupMap.set(path, {
+        path,
+        operations: [],
+        totalAdded: 0,
+        totalRemoved: 0,
+        allApplied: true,
+        anyApplied: false,
+      });
+    }
+    const group = groupMap.get(path)!;
+    group.operations.push({ op, originalIndex: index });
+    
+    // Aggregate line counts
+    if (op.operation.type === 'edit' && op.operation.newContent && op.operation.originalContent) {
+      const added = op.operation.newContent.split('\n').length;
+      const removed = op.operation.originalContent.split('\n').length;
+      group.totalAdded += added;
+      group.totalRemoved += removed;
+    } else if (op.operation.type === 'create' && op.operation.content) {
+      group.totalAdded += op.operation.content.split('\n').length;
+    }
+    
+    // Track applied status
+    if (!op.applied) group.allApplied = false;
+    if (op.applied) group.anyApplied = true;
+  });
+  
+  return Array.from(groupMap.values());
+}
+
 // Unified File Operations Control Bar
 function FileOperationsBar({ 
   operations, 
@@ -2871,12 +3058,14 @@ function FileOperationsBar({
 }) {
   if (operations.length === 0) return null;
 
-  const fileCount = operations.length;
-  const appliedCount = operations.filter(op => op.applied).length;
-  const pendingCount = fileCount - appliedCount;
+  // Group operations by file path
+  const groupedOps = groupOperationsByFile(operations);
+  const fileCount = groupedOps.length;
+  const appliedFileCount = groupedOps.filter(g => g.allApplied).length;
+  const pendingCount = fileCount - appliedFileCount;
 
   // If all operations are applied, show a dismiss option instead of hiding completely
-  const allApplied = appliedCount === fileCount && fileCount > 0;
+  const allApplied = appliedFileCount === fileCount && fileCount > 0;
 
   if (operations.length === 0) return null;
 
@@ -2928,7 +3117,7 @@ function FileOperationsBar({
           <span className={styles.fileOpsBarChevron}>{expanded ? '▼' : '▶'}</span>
           <span className={styles.fileOpsBarText}>
             {fileCount} {fileCount === 1 ? 'File' : 'Files'}
-            {allApplied ? ' (All Applied)' : appliedCount > 0 ? ` (${appliedCount} applied)` : ''}
+            {allApplied ? ' (All Applied)' : appliedFileCount > 0 ? ` (${appliedFileCount} applied)` : ''}
           </span>
         </div>
         {allApplied ? (
@@ -2970,33 +3159,49 @@ function FileOperationsBar({
 
       {expanded && (
         <div className={styles.fileOpsList}>
-          {operations.map((item, index) => (
+          {groupedOps.map((group, groupIndex) => (
             <div 
-              key={index} 
-              className={`${styles.fileOpsItem} ${item.applied ? styles.fileOpsItemApplied : ''}`}
+              key={groupIndex} 
+              className={`${styles.fileOpsItem} ${group.allApplied ? styles.fileOpsItemApplied : ''}`}
             >
-              <span className={`${styles.fileOpsItemIcon} ${getFileIconClass(item.operation.type)}`}>
-                {getFileIcon(item.operation.type)}
+              <span className={`${styles.fileOpsItemIcon} ${getFileIconClass(group.operations[0].op.operation.type)}`}>
+                {getFileIcon(group.operations[0].op.operation.type)}
               </span>
               <span className={styles.fileOpsItemName}>
-                {getFileName(item.operation.path)}
+                {getFileName(group.path)}
               </span>
               <span className={styles.fileOpsItemStats}>
-                {getLineStats(item.operation)}
+                {group.totalAdded > 0 && <span style={{ color: '#4caf50' }}>+{group.totalAdded}</span>}
+                {group.totalAdded > 0 && group.totalRemoved > 0 && ' '}
+                {group.totalRemoved > 0 && <span style={{ color: '#f44336' }}>-{group.totalRemoved}</span>}
               </span>
               <div className={styles.fileOpsItemActions}>
-                {!item.applied ? (
+                {!group.allApplied ? (
                   <>
                     <button
                       className={styles.fileOpsItemBtnAccept}
-                      onClick={() => onAcceptFile(index)}
+                      onClick={() => {
+                        // Accept all operations for this file
+                        group.operations.forEach(({ originalIndex }) => {
+                          if (!operations[originalIndex].applied) {
+                            onAcceptFile(originalIndex);
+                          }
+                        });
+                      }}
                       title="Accept"
                     >
                       ✓
                     </button>
                     <button
                       className={styles.fileOpsItemBtnReject}
-                      onClick={() => onUndoFile(index)}
+                      onClick={() => {
+                        // Reject all operations for this file
+                        group.operations.forEach(({ originalIndex }) => {
+                          if (!operations[originalIndex].applied) {
+                            onUndoFile(originalIndex);
+                          }
+                        });
+                      }}
                       title="Reject"
                     >
                       ✕
@@ -3005,7 +3210,14 @@ function FileOperationsBar({
                 ) : (
                   <button
                     className={styles.fileOpsItemBtnUndo}
-                    onClick={() => onUndoFile(index)}
+                    onClick={() => {
+                      // Undo all operations for this file
+                      group.operations.forEach(({ originalIndex }) => {
+                        if (operations[originalIndex].applied) {
+                          onUndoFile(originalIndex);
+                        }
+                      });
+                    }}
                     title="Undo"
                   >
                     ✕
@@ -3034,6 +3246,7 @@ export function AIPanel() {
     webAccessTraces,
     sessionUsage,
     lastMessageUsage,
+    contextBreakdown,
     toggleWebAccessTraceExpanded,
     createConversation,
     setActiveConversation,
@@ -3056,6 +3269,7 @@ export function AIPanel() {
   const [input, setInput] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showContextBreakdown, setShowContextBreakdown] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -3828,6 +4042,23 @@ export function AIPanel() {
             wasSkipped: false,
           };
         } else if (item.operation.type === 'delete') {
+          // Require manual confirmation for delete operations
+          const confirmed = await dialog.confirm(
+            `Are you sure you want to delete "${item.operation.path}"?\n\nThis action cannot be undone through the IDE (though the file content is saved for undo).`,
+            'Confirm File Deletion'
+          );
+          
+          if (!confirmed) {
+            console.log(`[FileOps] Delete cancelled by user: ${item.operation.path}`);
+            updatedOps[i] = {
+              ...updatedOps[i],
+              applied: false,
+              wasSkipped: true,
+            };
+            skippedCount++;
+            continue;
+          }
+          
           const previousContent = await fs.readFile(fullPath);
           await fs.deletePath(fullPath);
           updatedOps[i] = {
@@ -4007,6 +4238,20 @@ export function AIPanel() {
           idx === index ? { ...op, applied: true, previousExists: true, previousContent, wasSkipped: false } : op
         ));
       } else if (item.operation.type === 'delete') {
+        // Require manual confirmation for delete operations
+        const confirmed = await dialog.confirm(
+          `Are you sure you want to delete "${item.operation.path}"?\n\nThis action cannot be undone through the IDE (though the file content is saved for undo).`,
+          'Confirm File Deletion'
+        );
+        
+        if (!confirmed) {
+          console.log(`[FileOps] Delete cancelled by user: ${item.operation.path}`);
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: `Delete cancelled: ${item.operation.path}`, type: 'info' }
+          }));
+          return;
+        }
+        
         const previousContent = await fs.readFile(fullPath);
         await fs.deletePath(fullPath);
         setAllPendingOps(prev => prev.map((op, idx) => 
@@ -4308,35 +4553,52 @@ export function AIPanel() {
           </div>
         ) : (
           <>
-            {sessionUsage.turnCount > 0 && (
+            {(sessionUsage.turnCount > 0 || contextBreakdown) && (
               <div className={styles.sessionCostTracker}>
-                <div className={styles.sessionCostStats}>
-                  <span className={styles.sessionCostTokens}>
-                    {sessionUsage.totalTokens.toLocaleString()} tokens
-                  </span>
-                  <span className={styles.sessionCostSeparator}>•</span>
-                  <span className={styles.sessionCostTurns}>
-                    {sessionUsage.turnCount} {sessionUsage.turnCount === 1 ? 'turn' : 'turns'}
-                  </span>
-                  {sessionUsage.totalCostUsd > 0 && (
-                    <>
-                      <span className={styles.sessionCostSeparator}>•</span>
-                      <span className={styles.sessionCostAmount}>
-                        ${sessionUsage.totalCostUsd.toFixed(4)}
-                      </span>
-                    </>
-                  )}
-                  {(sessionUsage.totalCacheCreation > 0 || sessionUsage.totalCacheRead > 0) && (
-                    <>
-                      <span className={styles.sessionCostSeparator}>•</span>
-                      <span className={styles.sessionCostCache}>
-                        cache: {sessionUsage.totalCacheRead > 0 
-                          ? `${Math.round((sessionUsage.totalCacheRead / (sessionUsage.totalPromptTokens + sessionUsage.totalCacheRead)) * 100)}%`
-                          : '0%'} hit
-                      </span>
-                    </>
-                  )}
-                </div>
+                {contextBreakdown && (
+                  <button 
+                    className={styles.contextBreakdownBtn}
+                    onClick={() => setShowContextBreakdown(true)}
+                    title="View context breakdown"
+                  >
+                    <span className={styles.contextPercent}>{contextBreakdown.percentFull}%</span>
+                    <div className={styles.contextMiniBar}>
+                      <div 
+                        className={styles.contextMiniBarFill}
+                        style={{ width: `${Math.min(contextBreakdown.percentFull, 100)}%` }}
+                      />
+                    </div>
+                  </button>
+                )}
+                {sessionUsage.turnCount > 0 && (
+                  <div className={styles.sessionCostStats}>
+                    <span className={styles.sessionCostTokens}>
+                      {sessionUsage.totalTokens.toLocaleString()} tokens
+                    </span>
+                    <span className={styles.sessionCostSeparator}>•</span>
+                    <span className={styles.sessionCostTurns}>
+                      {sessionUsage.turnCount} {sessionUsage.turnCount === 1 ? 'turn' : 'turns'}
+                    </span>
+                    {sessionUsage.totalCostUsd > 0 && (
+                      <>
+                        <span className={styles.sessionCostSeparator}>•</span>
+                        <span className={styles.sessionCostAmount}>
+                          ${sessionUsage.totalCostUsd.toFixed(4)}
+                        </span>
+                      </>
+                    )}
+                    {(sessionUsage.totalCacheCreation > 0 || sessionUsage.totalCacheRead > 0) && (
+                      <>
+                        <span className={styles.sessionCostSeparator}>•</span>
+                        <span className={styles.sessionCostCache}>
+                          cache: {sessionUsage.totalCacheRead > 0 
+                            ? `${Math.round((sessionUsage.totalCacheRead / (sessionUsage.totalPromptTokens + sessionUsage.totalCacheRead)) * 100)}%`
+                            : '0%'} hit
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {activeConversation.summary && (
@@ -4806,6 +5068,13 @@ export function AIPanel() {
               <p>Drop files here to attach</p>
             </div>
           </div>
+        )}
+        
+        {showContextBreakdown && contextBreakdown && (
+          <ContextBreakdownModal
+            breakdown={contextBreakdown}
+            onClose={() => setShowContextBreakdown(false)}
+          />
         )}
       </div>
     </div>
