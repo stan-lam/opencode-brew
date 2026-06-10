@@ -3,6 +3,7 @@ import { FileTree } from '../FileTree/FileTree';
 import { SearchPanel } from '../Search/SearchPanel';
 import { GitPanel } from '../Git/GitPanel';
 import { AIPanel } from '../AI/AIPanel';
+import { TestPanel } from '../Test/TestPanel';
 import { HistoryPanel } from '../History/HistoryPanel';
 import { PluginsPanel } from '../Plugins/PluginsPanel';
 import { SettingsPanel } from '../Settings/SettingsPanel';
@@ -13,6 +14,7 @@ const panelTitles: Record<string, string> = {
   search: 'Search',
   git: 'Source Control',
   ai: 'AI Assistant',
+  test: 'Test',
   history: 'Local History',
   plugins: 'Plugins',
   settings: 'Settings',
@@ -41,6 +43,9 @@ export function SidePanel() {
         </div>
         <div className={styles.panelContainer} style={{ display: activeSideTab === 'ai' ? 'flex' : 'none' }}>
           <AIPanel />
+        </div>
+        <div className={styles.panelContainer} style={{ display: activeSideTab === 'test' ? 'flex' : 'none' }}>
+          <TestPanel />
         </div>
         <div className={styles.panelContainer} style={{ display: activeSideTab === 'history' ? 'flex' : 'none' }}>
           <HistoryPanel />

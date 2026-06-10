@@ -1502,11 +1502,17 @@ async fn chat_copilot_chat_completions(
                         }
                     }
                     Some(Err(e)) => {
+                        println!("[ai.rs] chat_copilot_chat_completions: Stream error for {}: {}", conversation_id, e);
                         let mut streams = ACTIVE_STREAMS.write().await;
                         streams.remove(&conversation_id);
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
+                        // Stream ended without [DONE] marker - this may indicate truncation
+                        println!("[ai.rs] chat_copilot_chat_completions: Stream ended (None) for conversation: {}", conversation_id);
+                        println!("[ai.rs] Final content length: {}, ends with: {:?}", 
+                            full_content.len(),
+                            full_content.chars().rev().take(50).collect::<String>().chars().rev().collect::<String>());
                         let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
                             content: String::new(),
                             done: true,

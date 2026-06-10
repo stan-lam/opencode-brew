@@ -6,6 +6,7 @@ export type SidePanelTab =
   | 'search'
   | 'git'
   | 'ai'
+  | 'test'
   | 'history'
   | 'plugins'
   | 'settings';

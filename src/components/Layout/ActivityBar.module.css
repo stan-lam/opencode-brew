@@ -48,3 +48,11 @@
   background-color: var(--accent-blue);
   border-radius: 0 2px 2px 0;
 }
+
+.item[data-activity-id='test'] {
+  color: var(--accent-blue);
+}
+
+.item[data-activity-id='test'] svg {
+  stroke-width: 2.2;
+}

@@ -7,6 +7,7 @@ import {
   History,
   Terminal,
   Puzzle,
+  FlaskConical,
 } from 'lucide-react';
 import { useLayoutStore, SidePanelTab, BottomPanelTab } from '../../store/layoutStore';
 import styles from './ActivityBar.module.css';
@@ -23,6 +24,7 @@ const activityItems: ActivityItem[] = [
   { id: 'search', icon: <Search size={22} />, title: 'Search (⌘⇧F)', position: 'side' },
   { id: 'git', icon: <GitBranch size={22} />, title: 'Source Control (⌘⇧G)', position: 'side' },
   { id: 'ai', icon: <MessageSquare size={22} />, title: 'AI Assistant (⌘⇧A)', position: 'side' },
+  { id: 'test', icon: <FlaskConical size={22} />, title: 'Test (⌘⇧T)', position: 'side' },
   { id: 'history', icon: <History size={22} />, title: 'Local History', position: 'side' },
   { id: 'plugins', icon: <Puzzle size={22} />, title: 'Plugins', position: 'side' },
 ];
@@ -82,6 +84,7 @@ export function ActivityBar() {
             }`}
             onClick={() => handleSideClick(item.id as SidePanelTab)}
             title={item.title}
+            data-activity-id={item.id}
           >
             {item.icon}
           </button>
