@@ -1404,6 +1404,53 @@ function ActionableTasksSuggestion({ tasks, onSwitchToAgent }: { tasks: string[]
   );
 }
 
+// ─── Implementation Offer Prompt (shown in Chat mode when AI offers to implement) ─────
+function ImplementationOfferPrompt({ 
+  onSwitchToAgent 
+}: { 
+  onSwitchToAgent: () => void;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+
+  if (dismissed) return null;
+
+  return (
+    <div className={styles.implementationOffer}>
+      <div className={styles.suggestionHeader}>
+        <div className={styles.suggestionIcon}>🚀</div>
+        <div className={styles.suggestionTitle}>Ready to implement?</div>
+        <button 
+          className={styles.suggestionDismiss}
+          onClick={() => setDismissed(true)}
+          title="Dismiss"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      <div className={styles.suggestionContent}>
+        <p className={styles.suggestionText}>
+          Switch to <strong>Agent Mode</strong> to let the AI create and edit files in your workspace.
+        </p>
+        <div className={styles.suggestionActions}>
+          <button 
+            className={styles.suggestionPrimaryBtn}
+            onClick={onSwitchToAgent}
+          >
+            <TerminalIcon size={14} />
+            Switch to Agent Mode
+          </button>
+          <button 
+            className={styles.suggestionSecondaryBtn}
+            onClick={() => setDismissed(true)}
+          >
+            Stay in Chat
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MessageBubble({ message, onOperationsChange }: { 
   message: AIMessage;
   onOperationsChange?: (ops: FileOperation[]) => void;
@@ -1413,6 +1460,7 @@ function MessageBubble({ message, onOperationsChange }: {
   const [planComponents, setPlanComponents] = useState<{ plans: Plan[]; checklists: Checklist[]; decisions: Decision[] }>({ plans: [], checklists: [], decisions: [] });
   const [actionableTasks, setActionableTasks] = useState<string[]>([]);
   const [codeBlockTasks, setCodeBlockTasks] = useState<string[]>([]);
+  const [hasImplementationOffer, setHasImplementationOffer] = useState(false);
   const { currentWorkspace} = useWorkspaceStore();
   const { openFile } = useEditorStore();
   const { agentMode, setAgentMode, sendMessage, setAgentTasks, queuePrompt } = useAIStore();
@@ -1483,9 +1531,27 @@ function MessageBubble({ message, onOperationsChange }: {
           detectedCodeBlocks.push(`Implement ${lang || 'code'}: ${preview}${codeContent.length > 80 ? '...' : ''}`);
         }
         setCodeBlockTasks(detectedCodeBlocks);
+        setHasImplementationOffer(false);
+      } else if (agentMode === 'chat') {
+        // Detect when AI offers to implement in Chat mode
+        const implementationOfferPatterns = [
+          /would you like me to (?:create|implement|write|build|generate|make|add)/i,
+          /shall i (?:create|implement|write|build|generate|make|add)/i,
+          /i can (?:create|implement|write|build|generate|make|add) (?:this|that|the|it)/i,
+          /do you want me to (?:create|implement|write|build|generate|make|add)/i,
+          /ready to (?:create|implement|write|build|generate|make|add)/i,
+          /let me know if you'?d like me to (?:create|implement|write|build|generate|make|add)/i,
+          /want me to (?:go ahead|proceed) (?:and|with) (?:creat|implement|writ|build)/i,
+          /\?[\s\S]{0,50}(?:create|implement|write|build|add) (?:this|that|the|it)/i,
+        ];
+        const hasOffer = implementationOfferPatterns.some(p => p.test(message.content));
+        setHasImplementationOffer(hasOffer);
+        setActionableTasks([]);
+        setCodeBlockTasks([]);
       } else {
         setActionableTasks([]);
         setCodeBlockTasks([]);
+        setHasImplementationOffer(false);
       }
     }
   }, [message.content, isUser, agentMode]);
@@ -1751,6 +1817,11 @@ function MessageBubble({ message, onOperationsChange }: {
         <ActionableTasksSuggestion 
           tasks={actionableTasks} 
           onSwitchToAgent={() => handleImplementInAgent(actionableTasks)} 
+        />
+      )}
+      {!isUser && agentMode === 'chat' && hasImplementationOffer && (
+        <ImplementationOfferPrompt 
+          onSwitchToAgent={() => setAgentMode('agent')} 
         />
       )}
       {!isUser && message.usage && (
@@ -4632,21 +4703,23 @@ export function AIPanel() {
                 )}
               </div>
             )}
-            {(agentMode === 'agent' || agentMode === 'edit' || agentMode === 'plan') && (
+            {(agentMode === 'agent' || agentMode === 'edit' || agentMode === 'plan' || agentMode === 'test') && (
               <div className={styles.modeBanner}>
                 <div className={styles.modeBannerIcon}>
-                  {agentMode === 'agent' ? '✨' : agentMode === 'edit' ? '📝' : '📋'}
+                  {agentMode === 'agent' ? '✨' : agentMode === 'edit' ? '📝' : agentMode === 'plan' ? '📋' : '🧪'}
                 </div>
                 <div className={styles.modeBannerText}>
                   <strong>
-                    {agentMode === 'agent' ? 'Agent Mode' : agentMode === 'edit' ? 'Edit Mode' : 'Plan Mode'} Active
+                    {agentMode === 'agent' ? 'Agent Mode' : agentMode === 'edit' ? 'Edit Mode' : agentMode === 'plan' ? 'Plan Mode' : 'Test Mode'} Active
                   </strong>
                   <p>
                     {agentMode === 'agent' 
                       ? 'The AI can create, edit, and delete files in your workspace. Changes apply automatically, and you can undo them in File Operations.'
                       : agentMode === 'edit'
                       ? 'The AI will help you edit existing files with precise changes. Edits apply automatically, and you can undo them in File Operations.'
-                      : 'The AI will help you plan and design solutions before implementation. Focus on architecture, approaches, and breaking down tasks.'}
+                      : agentMode === 'plan'
+                      ? 'The AI will help you plan and design solutions before implementation. Focus on architecture, approaches, and breaking down tasks.'
+                      : 'The AI will analyze pending changes and generate comprehensive tests including unit, integration, security, and dependency audits.'}
                   </p>
                 </div>
               </div>

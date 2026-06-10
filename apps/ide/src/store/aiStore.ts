@@ -5,7 +5,7 @@ import { loadPrompt, PROMPT_NAMES, getPromptsPath, ensurePromptsDir } from '../s
 import { useWorkspaceStore } from './workspaceStore';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
-export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan';
+export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan' | 'test';
 export type AgentTaskStatus = 'pending' | 'in-progress' | 'completed' | 'skipped';
 export type WebAccessStatus = 'idle' | 'searching' | 'fetching' | null;
 
@@ -224,6 +224,72 @@ let saveHistoryInFlight = false;
 let saveHistoryQueued = false;
 let lastHistorySaveAt = 0;
 let lastFileOpsRetryMessageId: string | null = null;
+let autoContinueCountGlobal = 0;
+const MAX_AUTO_CONTINUES = 3;
+
+// === AUTO-CONTINUE FIX v2 - 2026-06-10 10:55 ===
+console.log('[aiStore] AUTO-CONTINUE FIX LOADED - v2 2026-06-10 10:55');
+
+/**
+ * Check if the AI response indicates it was cut off mid-task and should auto-continue.
+ * This is used by both the normal stream completion handler and finalizeStreaming fallback.
+ */
+function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShouldAutoContinue'): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  // Only check for OUR specific tool tags, not any XML-like tag
+  const hasToolTags = /<(read_file|search_files|search_web|fetch_url|create_file|edit_file|delete_file)\s/i.test(trimmed);
+  const endsWithSuspense = trimmed.endsWith('...') || /[,:]$/.test(trimmed);
+  const shortResponse = trimmed.length < 700;
+  const mediumResponse = trimmed.length < 1500;
+  const longResponse = trimmed.length < 5000;
+  
+  const sentences = trimmed.split(/[.!?]\s+/);
+  const lastSentence = sentences[sentences.length - 1]?.toLowerCase() || '';
+  const lastSentenceHasAction = /(let me|i need to|i should|i will|i'll|let's|i want to|looking at|checking|searching|reading)\b/i.test(lastSentence);
+  
+  const endsWithIntent = /(to understand|to see|to check|to look|to find|to get|to analyze|the full picture|more context)\s*[.!]?\s*$/i.test(trimmed);
+  
+  const endsWithPlanList = /\n\s*\d+\.\s+[^\n]+\s*$/m.test(trimmed) && 
+    /(i'll need to|i need to|here's what|the plan|steps|tasks|to do):/i.test(lower);
+  
+  const endsWithActionStatement = /(let me (search|look|check|read|examine|find|analyze|explore|investigate|see|get|fetch|review)[^.]*[.!]?\s*$)/i.test(trimmed);
+  
+  const endsWithTruncation = /\s(to|for|with|and|or|the|a|an|is|are|was|were|be|been|being|have|has|had|will|would|could|should|can|may|might|must|shall|in|on|at|by|from|into|that|which|who|whom|whose|this|these|those|it|its|if|then|but|so|as|of)\s*$/i.test(trimmed) ||
+    /[,(]\s*$/.test(trimmed) ||
+    /\w+-\s*$/.test(trimmed) ||
+    /[•\-\*]\s*$/.test(trimmed) ||  // Incomplete bullet point
+    /^\s*\d+\.\s*$/m.test(trimmed.split('\n').pop() || '');  // Incomplete numbered list item
+  
+  const codeBlockStarts = (trimmed.match(/```/g) || []).length;
+  const hasUnclosedCodeBlock = codeBlockStarts % 2 !== 0;
+  
+  const promisedAction = /(let me (write|make|create|implement|add|fix|update|apply)|i('ll| will) (write|make|create|implement|add|fix|update|apply)|here('s| is) the (fix|change|update|code|implementation))/i.test(lower);
+  const hasFileOps = /<(create_file|edit_file|delete_file)\s/i.test(trimmed);
+  const promisedButDidntDeliver = promisedAction && !hasFileOps && !hasUnclosedCodeBlock;
+  
+  const result = (endsWithSuspense && shortResponse) ||
+    (lastSentenceHasAction && mediumResponse && !hasToolTags) ||
+    (endsWithIntent && mediumResponse && !hasToolTags) ||
+    (endsWithPlanList && longResponse && !hasToolTags) ||
+    (endsWithActionStatement && !hasToolTags) ||
+    endsWithTruncation ||
+    hasUnclosedCodeBlock ||
+    promisedButDidntDeliver;
+  
+  console.log(`${logPrefix}`, {
+    textLen: trimmed.length,
+    lastSentence: lastSentence.slice(0, 100),
+    result,
+    endsWithActionStatement,
+    lastSentenceHasAction,
+    endsWithTruncation,
+    hasToolTags,
+  });
+  
+  return result;
+}
 
 const SUMMARY_SYSTEM_PROMPT = `You summarize developer conversations to preserve context while reducing tokens.
 Summarize in concise bullet points. Include:
@@ -1688,6 +1754,11 @@ export const useAIStore = create<AIState>()(
         }
 
         const isAutoContinueRequest = content.trim() === AUTO_CONTINUE_PROMPT;
+        
+        // Reset auto-continue counter when user sends a new (non-auto-continue) message
+        if (!isAutoContinueRequest) {
+          autoContinueCountGlobal = 0;
+        }
 
         // Enhance the user message with context if it seems like a code question
         const enhancedContent = contextInfo 
@@ -1721,8 +1792,8 @@ export const useAIStore = create<AIState>()(
 
         let responseContent = '';
         const conversationId = conversation.id;
-        let autoContinueCount = 0;
-        const MAX_AUTO_CONTINUES = 3;
+        // Use global counter for auto-continues (local counter doesn't persist across sendMessage calls)
+        // autoContinueCountGlobal is defined at module level and reset when user sends new non-auto-continue message
         let streamTimeoutId: ReturnType<typeof setTimeout> | null = null;
         let completionTimeoutId: ReturnType<typeof setTimeout> | null = null;
         let completionTimeoutTriggered = false;
@@ -1801,6 +1872,8 @@ export const useAIStore = create<AIState>()(
             modePrompt = getPrompt(PROMPT_NAMES.EDIT_MODE);
           } else if (agentMode === 'plan') {
             modePrompt = getPrompt(PROMPT_NAMES.PLAN_MODE);
+          } else if (agentMode === 'test') {
+            modePrompt = getPrompt(PROMPT_NAMES.TEST_MODE);
           } else {
             modePrompt = CHAT_FILE_OPS_PROMPT;
           }
@@ -1869,7 +1942,8 @@ export const useAIStore = create<AIState>()(
             const trimmed = text.trim();
             if (!trimmed) return false;
             const lower = trimmed.toLowerCase();
-            const hasToolTags = /<\w+[^>]*>/i.test(trimmed);
+            // Only check for OUR specific tool tags, not any XML-like tag
+            const hasToolTags = /<(read_file|search_files|search_web|fetch_url|create_file|edit_file|delete_file)\s/i.test(trimmed);
             const endsWithSuspense = trimmed.endsWith('...') || /[,:]$/.test(trimmed);
             const shortResponse = trimmed.length < 700;
             const mediumResponse = trimmed.length < 1500;
@@ -1893,7 +1967,9 @@ export const useAIStore = create<AIState>()(
             // Check if response was truncated mid-sentence (ends with incomplete word patterns)
             const endsWithTruncation = /\s(to|for|with|and|or|the|a|an|is|are|was|were|be|been|being|have|has|had|will|would|could|should|can|may|might|must|shall|in|on|at|by|from|into|that|which|who|whom|whose|this|these|those|it|its|if|then|but|so|as|of)\s*$/i.test(trimmed) ||
               /[,(]\s*$/.test(trimmed) ||
-              /\w+-\s*$/.test(trimmed);
+              /\w+-\s*$/.test(trimmed) ||
+              /[•\-\*]\s*$/.test(trimmed) ||  // Incomplete bullet point
+              /^\s*\d+\.\s*$/m.test(trimmed.split('\n').pop() || '');  // Incomplete numbered list item
             
             // Check if response ends with incomplete code block (started but not closed properly)
             const codeBlockStarts = (trimmed.match(/```/g) || []).length;
@@ -2286,7 +2362,10 @@ export const useAIStore = create<AIState>()(
                 const fileReadOps = parseFileReadOperations(responseContent);
                 const workspacePath = useWorkspaceStore.getState().currentWorkspace?.rootPath;
                 
-                if (fileReadOps.length > 0 && workspacePath && (currentMode === 'agent' || currentMode === 'plan')) {
+                // Process file read operations in ALL modes when the AI explicitly outputs <read_file> tags
+                // This allows the AI to examine code even in Chat mode
+                if (fileReadOps.length > 0 && workspacePath) {
+                  console.log('[aiStore] file read operations detected in mode:', currentMode);
                   set({ streamContinuationPending: true });
                   console.log('[aiStore] file read operations detected', {
                     conversationId,
@@ -2451,15 +2530,14 @@ export const useAIStore = create<AIState>()(
                             const contResponseContent = lastMsg?.role === 'assistant' ? lastMsg.content : '';
                             const lastUserMessage = [...currentConv.messages].reverse().find(m => m.role === 'user');
                             const promptQueue = get().promptQueue;
-                            const shouldQueueAutoContinue = !isAutoContinueRequest
-                              && autoContinueCount < MAX_AUTO_CONTINUES
+                            // Allow chained auto-continues up to MAX_AUTO_CONTINUES
+                            const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
                               && shouldAutoContinue(contResponseContent)
-                              && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
                               && !promptQueue.includes(AUTO_CONTINUE_PROMPT);
 
                             if (shouldQueueAutoContinue) {
-                              autoContinueCount++;
-                              console.log('[aiStore] auto-continue queued after continuation', { conversationId, attempt: autoContinueCount, max: MAX_AUTO_CONTINUES });
+                              autoContinueCountGlobal++;
+                              console.log('[aiStore] auto-continue queued after continuation', { conversationId, attempt: autoContinueCountGlobal, max: MAX_AUTO_CONTINUES });
                               get().queuePrompt(AUTO_CONTINUE_PROMPT);
                             }
                           }
@@ -2603,15 +2681,37 @@ export const useAIStore = create<AIState>()(
                     ? [...activeConv.messages].reverse().find(m => m.role === 'user')
                     : undefined;
                   const queuedPrompts = get().promptQueue;
-                  const shouldQueueAutoContinue = !isAutoContinueRequest
-                    && autoContinueCount < MAX_AUTO_CONTINUES
-                    && shouldAutoContinue(responseContent)
-                    && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
+                  const autoContinueResult = shouldAutoContinue(responseContent);
+                  // Allow chained auto-continues up to MAX_AUTO_CONTINUES - the counter is the only limiter
+                  const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
+                    && autoContinueResult
                     && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
 
+                  console.log('[aiStore] auto-continue check', {
+                    conversationId,
+                    isAutoContinueRequest,
+                    autoContinueCountGlobal,
+                    maxAutoContinues: MAX_AUTO_CONTINUES,
+                    autoContinueResult,
+                    shouldQueueAutoContinue,
+                    responseTail: responseContent.slice(-150),
+                  });
+                  
+                  // More visible logging
                   if (shouldQueueAutoContinue) {
-                    autoContinueCount++;
-                    console.log('[aiStore] auto-continue queued', { conversationId, attempt: autoContinueCount, max: MAX_AUTO_CONTINUES });
+                    console.log('%c[aiStore] AUTO-CONTINUE WILL TRIGGER', 'color: green; font-weight: bold', { attempt: autoContinueCountGlobal + 1 });
+                  } else {
+                    console.log('%c[aiStore] AUTO-CONTINUE NOT TRIGGERED', 'color: red; font-weight: bold', {
+                      reason: autoContinueCountGlobal >= MAX_AUTO_CONTINUES ? `hit max continues (${MAX_AUTO_CONTINUES})` :
+                              !autoContinueResult ? 'response does not look incomplete' :
+                              queuedPrompts.includes(AUTO_CONTINUE_PROMPT) ? 'already queued' :
+                              'unknown'
+                    });
+                  }
+
+                  if (shouldQueueAutoContinue) {
+                    autoContinueCountGlobal++;
+                    console.log('[aiStore] auto-continue queued', { conversationId, attempt: autoContinueCountGlobal, max: MAX_AUTO_CONTINUES });
                     get().queuePrompt(AUTO_CONTINUE_PROMPT);
                   }
 
@@ -2734,11 +2834,23 @@ export const useAIStore = create<AIState>()(
             );
           }
 
-          // Cleanup listener
-          unlisten();
+          // Cleanup listener with delay to ensure all events are processed
+          // The done event might still be in transit when the API call resolves
+          setTimeout(() => {
+            unlisten();
+          }, 500);
           clearStreamTimeout();
           clearCompletionTimeout();
-          set({ isStreaming: false, thinkingStatus: null });
+          
+          // If streaming is still active at this point, it means we didn't receive a done signal
+          // This is a fallback to ensure auto-continue can still trigger
+          const { isStreaming: stillStreaming } = get();
+          if (stillStreaming) {
+            console.warn('[aiStore] API call resolved but stream not finalized - calling finalizeStreaming');
+            get().finalizeStreaming();
+          } else {
+            set({ isStreaming: false, thinkingStatus: null });
+          }
           
         } catch (error) {
           clearStreamTimeout();
@@ -2807,14 +2919,48 @@ export const useAIStore = create<AIState>()(
       },
 
       stopStreaming: (reason: string = 'manual') => {
+        const conv = get().activeConversation;
+        const lastMessage = conv?.messages[conv.messages.length - 1];
+        const responseContent = lastMessage?.role === 'assistant' ? lastMessage.content : '';
+        
         console.warn(`[aiStore] stopStreaming called (${reason})`, {
-          conversationId: get().activeConversation?.id,
+          conversationId: conv?.id,
+          responseLen: responseContent.length,
         });
         set({ isStreaming: false, thinkingStatus: null });
         // Call the backend to stop streaming
         import('../services/tauri').then(({ ai }) => {
           ai.stopStream().catch((err) => console.error('Failed to stop stream:', err));
         });
+        
+        // Check if auto-continue should be triggered (only for non-manual stops)
+        // When the stream stalls or times out, we should auto-continue if the response looks incomplete
+        if (reason !== 'manual' && responseContent.length > 0) {
+          const lastUserMessage = conv
+            ? [...conv.messages].reverse().find(m => m.role === 'user')
+            : undefined;
+          const { promptQueue: queuedPrompts } = get();
+          const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
+            && checkShouldAutoContinue(responseContent, `[aiStore] stopStreaming(${reason})`)
+            && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
+            && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
+
+          if (shouldQueueAutoContinue) {
+            autoContinueCountGlobal++;
+            console.log('[aiStore] stopStreaming: auto-continue queued', {
+              conversationId: conv?.id,
+              reason,
+              attempt: autoContinueCountGlobal,
+              max: MAX_AUTO_CONTINUES,
+              responseTail: responseContent.slice(-100),
+            });
+            get().queuePrompt(AUTO_CONTINUE_PROMPT);
+          }
+          
+          // Save workspace history
+          get().saveWorkspaceHistory();
+        }
+        
         // Process next queued prompt if any
         const { promptQueue } = get();
         if (promptQueue.length > 0) {
@@ -2824,10 +2970,41 @@ export const useAIStore = create<AIState>()(
         }
       },
       finalizeStreaming: () => {
+        const conv = get().activeConversation;
+        const lastMessage = conv?.messages[conv.messages.length - 1];
+        const responseContent = lastMessage?.role === 'assistant' ? lastMessage.content : '';
+        
         console.log('[aiStore] finalizeStreaming', {
-          conversationId: get().activeConversation?.id,
+          conversationId: conv?.id,
+          responseLen: responseContent.length,
         });
+        
         set({ isStreaming: false, thinkingStatus: null });
+        
+        // Check if auto-continue should be triggered (same logic as normal stream completion)
+        const lastUserMessage = conv
+          ? [...conv.messages].reverse().find(m => m.role === 'user')
+          : undefined;
+        const { promptQueue: queuedPrompts } = get();
+        const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
+          && checkShouldAutoContinue(responseContent)
+          && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
+          && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
+
+        if (shouldQueueAutoContinue) {
+          autoContinueCountGlobal++;
+          console.log('[aiStore] finalizeStreaming: auto-continue queued', {
+            conversationId: conv?.id,
+            attempt: autoContinueCountGlobal,
+            max: MAX_AUTO_CONTINUES,
+            responseTail: responseContent.slice(-100),
+          });
+          get().queuePrompt(AUTO_CONTINUE_PROMPT);
+        }
+        
+        // Save workspace history
+        get().saveWorkspaceHistory();
+        
         // Process next queued prompt if any
         const { promptQueue } = get();
         if (promptQueue.length > 0) {
