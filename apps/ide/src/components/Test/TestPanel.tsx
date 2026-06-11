@@ -12,17 +12,22 @@ import {
   FileCode,
   Plus,
   Minus,
+  ExternalLink,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
-import { useTestStore, PendingChange, TestCategory } from '../../store/testStore';
+import { useTestStore, PendingChange, TestCategory, SnykVulnerability } from '../../store/testStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useAIStore } from '../../store/aiStore';
+import { useSettingsStore } from '../../store/settingsStore';
 import styles from './TestPanel.module.css';
 
 export function TestPanel() {
   const { activeSideTab } = useLayoutStore();
   const { currentWorkspace } = useWorkspaceStore();
   const { isStreaming, activeConversation, thinkingStatus } = useAIStore();
+  const { snykEnabled } = useSettingsStore();
   const {
     pendingChanges,
     testPlan,
@@ -37,6 +42,8 @@ export function TestPanel() {
     analysisProgress,
     creationProgress,
     creationSummary,
+    snykResult,
+    isScanningSnyk,
     fetchPendingChanges,
     analyzeChanges,
     setCustomInstructions,
@@ -47,6 +54,8 @@ export function TestPanel() {
     createSelectedTests,
     clearTestPlan,
     setError,
+    runSnykScan,
+    clearSnykResult,
   } = useTestStore();
 
   const [showChanges, setShowChanges] = useState(true);
@@ -200,7 +209,7 @@ export function TestPanel() {
     }
   };
 
-  const isLoading = isAnalyzing || isCreatingTests || isFetchingChanges || isStreaming;
+  const isLoading = isAnalyzing || isCreatingTests || isFetchingChanges || isStreaming || isScanningSnyk;
 
   if (!currentWorkspace) {
     return (
@@ -314,6 +323,19 @@ export function TestPanel() {
           >
             <Package size={14} />
             Dep Audit
+          </button>
+          <button
+            className={`${styles.quickActionBtn} ${styles.snykBtn}`}
+            onClick={runSnykScan}
+            disabled={isLoading || !snykEnabled}
+            title={snykEnabled ? "Run Snyk security scan" : "Enable Snyk in Settings to use this feature"}
+          >
+            {isScanningSnyk ? (
+              <RefreshCw size={14} className={styles.spinner} />
+            ) : (
+              <ShieldCheck size={14} />
+            )}
+            Snyk
           </button>
         </div>
 
@@ -523,6 +545,95 @@ export function TestPanel() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {snykResult && (
+        <div className={styles.section}>
+          <div className={styles.sectionHeader}>
+            <ShieldCheck size={14} />
+            <span>Snyk Scan</span>
+            {snykResult.projectName && (
+              <span className={styles.projectName}>{snykResult.projectName}</span>
+            )}
+            <span className={styles.auditSummary}>
+              {snykResult.summary.criticalCount > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityCritical}`}>
+                  {snykResult.summary.criticalCount} critical
+                </span>
+              )}
+              {snykResult.summary.highCount > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityHigh}`}>
+                  {snykResult.summary.highCount} high
+                </span>
+              )}
+            </span>
+            <button
+              className={styles.dismissBtn}
+              onClick={clearSnykResult}
+              title="Clear results"
+            >
+              <X size={12} />
+            </button>
+          </div>
+
+          {snykResult.error ? (
+            <div className={styles.snykError}>
+              <AlertTriangle size={14} />
+              <span>{snykResult.error}</span>
+            </div>
+          ) : snykResult.ok ? (
+            <div className={styles.snykSuccess}>
+              <Check size={14} />
+              <span>No vulnerabilities found</span>
+            </div>
+          ) : (
+            <div className={styles.snykSection}>
+              <div className={styles.snykSummary}>
+                <span className={styles.snykTotal}>
+                  {snykResult.summary.totalVulnerabilities} vulnerabilities found
+                </span>
+              </div>
+              {snykResult.vulnerabilities.map((vuln: SnykVulnerability) => (
+                <div key={vuln.id} className={styles.snykItem}>
+                  <span className={`${styles.severityBadge} ${getSeverityClass(vuln.severity)}`}>
+                    {vuln.severity}
+                  </span>
+                  <div className={styles.snykDetails}>
+                    <span className={styles.snykPackage}>
+                      {vuln.packageName}@{vuln.version}
+                    </span>
+                    <span className={styles.snykTitle}>{vuln.title}</span>
+                    {vuln.cvssScore && (
+                      <span className={styles.snykCvss}>CVSS: {vuln.cvssScore}</span>
+                    )}
+                    {vuln.description && (
+                      <p className={styles.snykDescription}>
+                        {vuln.description.slice(0, 200)}
+                        {vuln.description.length > 200 ? '...' : ''}
+                      </p>
+                    )}
+                  </div>
+                  <div className={styles.snykActions}>
+                    {vuln.fixedIn && (
+                      <span className={styles.fixBadge}>Fix: {vuln.fixedIn}</span>
+                    )}
+                    {vuln.url && (
+                      <a
+                        href={vuln.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={styles.snykLink}
+                        title="View on Snyk"
+                      >
+                        <ExternalLink size={12} />
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

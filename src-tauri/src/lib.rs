@@ -446,6 +446,9 @@ pub fn run() {
             // Pricing for cost tracking
             commands::pricing::get_pricing,
             commands::pricing::calculate_cost,
+            // Snyk security scanning
+            commands::snyk::snyk_scan,
+            commands::snyk::snyk_check_installed,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(focused) = event {

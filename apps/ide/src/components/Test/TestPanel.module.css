@@ -679,3 +679,139 @@
     transform: rotate(360deg);
   }
 }
+
+/* Snyk Section */
+.snykBtn {
+  border-color: #8b5cf6;
+}
+
+.snykBtn:hover:not(:disabled) {
+  border-color: #a78bfa;
+  background-color: rgba(139, 92, 246, 0.1);
+}
+
+.projectName {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-left: 4px;
+  font-style: italic;
+}
+
+.snykSection {
+  padding: 4px 12px 12px;
+}
+
+.snykSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.snykTotal {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.snykItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+}
+
+.snykDetails {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.snykPackage {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.snykTitle {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.snykCvss {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.snykDescription {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+
+.snykActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.snykLink {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.snykLink:hover {
+  color: var(--accent-blue);
+  background-color: var(--bg-hover);
+}
+
+.snykError {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  margin: 8px 12px;
+  background-color: rgba(255, 85, 85, 0.1);
+  border: 1px solid rgba(255, 85, 85, 0.2);
+  border-radius: var(--radius-sm);
+  color: var(--accent-red);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.snykError svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.snykSuccess {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  margin: 8px 12px;
+  background-color: rgba(76, 175, 80, 0.1);
+  border: 1px solid rgba(76, 175, 80, 0.2);
+  border-radius: var(--radius-sm);
+  color: var(--accent-green);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}

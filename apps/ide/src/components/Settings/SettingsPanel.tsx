@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2 } from 'lucide-react';
+import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2, ShieldCheck } from 'lucide-react';
 import { useSettingsStore, Settings as SettingsType } from '../../store/settingsStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import styles from './SettingsPanel.module.css';
 
-type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'plugins' | 'usage';
+type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'security' | 'plugins' | 'usage';
 
 interface UsageStats {
   model: string;
@@ -33,7 +33,7 @@ interface SettingItem {
   id: keyof SettingsType;
   label: string;
   description: string;
-  type: 'toggle' | 'select' | 'input' | 'number';
+  type: 'toggle' | 'select' | 'input' | 'number' | 'password';
   options?: { value: string; label: string }[];
 }
 
@@ -44,6 +44,7 @@ const categories = [
   { id: 'keybindings', label: 'Keybindings', icon: Keyboard },
   { id: 'ai', label: 'AI Assistant', icon: Bot },
   { id: 'git', label: 'Git', icon: GitBranch },
+  { id: 'security', label: 'Security', icon: ShieldCheck },
   { id: 'plugins', label: 'Plugins', icon: Puzzle },
   { id: 'usage', label: 'Usage', icon: BarChart3 },
 ] as const;
@@ -82,6 +83,11 @@ const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
   git: [
     { id: 'autoFetch', label: 'Auto Fetch', description: 'Automatically fetch changes', type: 'toggle' },
     { id: 'confirmSync', label: 'Confirm Sync', description: 'Confirm before sync', type: 'toggle' },
+  ],
+  security: [
+    { id: 'snykEnabled', label: 'Enable Snyk', description: 'Enable Snyk security scanning in Test panel', type: 'toggle' },
+    { id: 'snykCliPath', label: 'Snyk CLI Path', description: 'Path to Snyk CLI (default: snyk)', type: 'input' },
+    { id: 'snykAuthToken', label: 'Snyk Auth Token', description: 'Optional API token for authentication', type: 'password' },
   ],
   plugins: [
     { id: 'autoUpdatePlugins', label: 'Auto Update', description: 'Automatically update plugins', type: 'toggle' },
@@ -317,6 +323,14 @@ export function SettingsPanel() {
                         type="text"
                         value={value as string}
                         onChange={(e) => updateSetting(setting.id, e.target.value as any)}
+                      />
+                    )}
+                    {setting.type === 'password' && (
+                      <input
+                        type="password"
+                        value={value as string}
+                        onChange={(e) => updateSetting(setting.id, e.target.value as any)}
+                        placeholder="••••••••"
                       />
                     )}
                   </div>
