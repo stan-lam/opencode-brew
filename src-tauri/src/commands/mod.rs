@@ -14,3 +14,4 @@ pub mod files;
 pub mod usage;
 pub mod vectordb;
 pub mod pricing;
+pub mod snyk;

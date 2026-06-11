@@ -23,6 +23,10 @@ export interface Settings {
   confirmSync: boolean;
   // Plugins
   autoUpdatePlugins: boolean;
+  // Security / Snyk
+  snykEnabled: boolean;
+  snykCliPath: string;
+  snykAuthToken: string;
 }
 
 interface SettingsState extends Settings {
@@ -48,6 +52,9 @@ const defaultSettings: Settings = {
   autoFetch: true,
   confirmSync: true,
   autoUpdatePlugins: true,
+  snykEnabled: false,
+  snykCliPath: 'snyk',
+  snykAuthToken: '',
 };
 
 export const useSettingsStore = create<SettingsState>()(

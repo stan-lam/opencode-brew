@@ -159,8 +159,15 @@ pub async fn git_stage(repo_path: String, file_path: String) -> Result<(), Strin
     let mut index = repo.index()
         .map_err(|e| format!("Failed to get index: {}", e))?;
     
-    index.add_path(std::path::Path::new(&file_path))
-        .map_err(|e| format!("Failed to stage file: {}", e))?;
+    let full_path = std::path::Path::new(&repo_path).join(&file_path);
+    
+    if full_path.exists() {
+        index.add_path(std::path::Path::new(&file_path))
+            .map_err(|e| format!("Failed to stage file: {}", e))?;
+    } else {
+        index.remove_path(std::path::Path::new(&file_path))
+            .map_err(|e| format!("Failed to stage deleted file: {}", e))?;
+    }
     
     index.write()
         .map_err(|e| format!("Failed to write index: {}", e))?;

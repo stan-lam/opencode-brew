@@ -51,6 +51,35 @@ export interface DependencyAudit {
   lowCount: number;
 }
 
+export interface SnykVulnerability {
+  id: string;
+  title: string;
+  severity: string;
+  packageName: string;
+  version: string;
+  fixedIn: string | null;
+  description: string;
+  cvssScore: number | null;
+  exploitMaturity: string | null;
+  url: string | null;
+}
+
+export interface SnykSummary {
+  totalVulnerabilities: number;
+  criticalCount: number;
+  highCount: number;
+  mediumCount: number;
+  lowCount: number;
+}
+
+export interface SnykScanResult {
+  ok: boolean;
+  vulnerabilities: SnykVulnerability[];
+  summary: SnykSummary;
+  error: string | null;
+  projectName: string | null;
+}
+
 const parseAttributes = (attrs: string): Record<string, string> => {
   const result: Record<string, string> = {};
   const attrRegex = /([a-zA-Z0-9_-]+)="([^"]*)"/g;
@@ -283,6 +312,9 @@ interface TestState {
   analysisProgress: string;
   creationProgress: string;
   creationSummary: { created: number; skipped: number; errors: number } | null;
+  // Snyk
+  snykResult: SnykScanResult | null;
+  isScanningSnyk: boolean;
 
   fetchPendingChanges: () => Promise<void>;
   analyzeChanges: (instructions?: string, focusType?: 'unit' | 'security' | 'audit') => Promise<void>;
@@ -295,6 +327,9 @@ interface TestState {
   clearTestPlan: () => void;
   setError: (error: string | null) => void;
   updateTestFileStatus: (fileId: string, status: TestFile['creationStatus'], message?: string) => void;
+  // Snyk
+  runSnykScan: () => Promise<void>;
+  clearSnykResult: () => void;
 }
 
 const waitForStreamingComplete = (): Promise<string> => {
@@ -335,6 +370,8 @@ export const useTestStore = create<TestState>((set, get) => ({
   analysisProgress: '',
   creationProgress: '',
   creationSummary: null,
+  snykResult: null,
+  isScanningSnyk: false,
 
   fetchPendingChanges: async () => {
     const workspace = useWorkspaceStore.getState().currentWorkspace;
@@ -724,5 +761,51 @@ export const useTestStore = create<TestState>((set, get) => ({
 
   setError: (error: string | null) => {
     set({ error });
+  },
+
+  runSnykScan: async () => {
+    const workspace = useWorkspaceStore.getState().currentWorkspace;
+    if (!workspace?.rootPath) {
+      set({ error: 'No workspace open' });
+      return;
+    }
+
+    set({ isScanningSnyk: true, error: null, snykResult: null });
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const { useSettingsStore } = await import('./settingsStore');
+      const settings = useSettingsStore.getState();
+
+      const result = await invoke<SnykScanResult>('snyk_scan', {
+        workspacePath: workspace.rootPath,
+        cliPath: settings.snykCliPath || undefined,
+        authToken: settings.snykAuthToken || undefined,
+      });
+
+      set({ snykResult: result, isScanningSnyk: false });
+    } catch (error) {
+      set({
+        error: `Snyk scan failed: ${error}`,
+        isScanningSnyk: false,
+        snykResult: {
+          ok: false,
+          vulnerabilities: [],
+          summary: {
+            totalVulnerabilities: 0,
+            criticalCount: 0,
+            highCount: 0,
+            mediumCount: 0,
+            lowCount: 0,
+          },
+          error: String(error),
+          projectName: null,
+        },
+      });
+    }
+  },
+
+  clearSnykResult: () => {
+    set({ snykResult: null });
   },
 }));

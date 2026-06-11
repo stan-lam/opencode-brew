@@ -3090,9 +3090,9 @@ function groupOperationsByFile(operations: PendingFileOperation[]): GroupedFileO
     group.operations.push({ op, originalIndex: index });
     
     // Aggregate line counts
-    if (op.operation.type === 'edit' && op.operation.newContent && op.operation.originalContent) {
+    if (op.operation.type === 'edit' && op.operation.newContent && op.operation.oldContent) {
       const added = op.operation.newContent.split('\n').length;
-      const removed = op.operation.originalContent.split('\n').length;
+      const removed = op.operation.oldContent.split('\n').length;
       group.totalAdded += added;
       group.totalRemoved += removed;
     } else if (op.operation.type === 'create' && op.operation.content) {
