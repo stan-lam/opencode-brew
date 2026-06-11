@@ -1652,7 +1652,7 @@ If no issues are found, return:
           `- VULNERABILITY: ${v.packageName}@${v.currentVersion} (${v.severity}) - ${v.title}. Fix: Update to ${v.fixedInVersion || 'latest safe version'}`
         ),
         ...selectedOutdated.map(p => 
-          `- OUTDATED: ${p.name}@${p.currentVersion} -> ${p.latestVersion}${p.isBreaking ? ' (BREAKING CHANGE)' : ''}`
+          `- OUTDATED: ${p.name}@${p.currentVersion} -> ${p.latestVersion}${p.updateType === 'major' ? ' (MAJOR UPDATE)' : ''}`
         ),
       ].join('\n');
 
