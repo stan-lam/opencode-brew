@@ -1148,10 +1148,25 @@ pub async fn fetch_url(url: String) -> Result<WebContent, String> {
         (title, content)
     };
     
-    // If HTTP fetch returned very little content, try text browser fallback
+    // Helper to detect if content indicates JavaScript is required
+    fn needs_javascript(content: &str) -> bool {
+        let lower = content.to_lowercase();
+        (lower.contains("javascript") && (lower.contains("enable") || lower.contains("disabled") || lower.contains("required")))
+            || lower.contains("please enable javascript")
+            || lower.contains("this page requires javascript")
+            || (lower.contains("browser") && lower.contains("not support") && lower.contains("javascript"))
+    }
+    
+    // If HTTP fetch returned very little content or indicates JavaScript is required, try text browser fallback
     // This helps with JS-heavy sites that don't render well without JavaScript
-    let final_content = if content.len() < 100 {
-        println!("[web::fetch_url] HTTP fetch returned only {} chars, trying text browser fallback...", content.len());
+    let needs_fallback = content.len() < 100 || needs_javascript(&content);
+    let final_content = if needs_fallback {
+        let reason = if content.len() < 100 { 
+            format!("only {} chars", content.len()) 
+        } else { 
+            "JavaScript required detected".to_string() 
+        };
+        println!("[web::fetch_url] HTTP fetch returned {}, trying text browser fallback...", reason);
         match fetch_with_text_browser(&url).await {
             Ok(text_content) if text_content.len() > content.len() => {
                 println!("[web::fetch_url] Text browser returned {} chars", text_content.len());

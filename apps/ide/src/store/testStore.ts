@@ -937,21 +937,42 @@ export const useTestStore = create<TestState>((set, get) => ({
           .map(c => c.path);
       } else {
         set({ securityScanProgress: 'Gathering source files...' });
-        const result = await invoke<{ path: string }[]>('read_directory', {
-          path: workspace.rootPath,
-        });
         
-        const sourceExtensions = ['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.rb', '.php'];
-        const excludeDirs = ['node_modules', '.git', 'dist', 'build', 'target', '__pycache__', '.next', 'vendor'];
-        
-        filesToScan = result
-          .map(f => f.path)
-          .filter(p => {
-            const isSourceFile = sourceExtensions.some(ext => p.endsWith(ext));
-            const isExcluded = excludeDirs.some(dir => p.includes(`/${dir}/`) || p.includes(`\\${dir}\\`));
-            return isSourceFile && !isExcluded;
-          })
-          .slice(0, 50);
+        const sourceExtensions = ['.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java', '.rb', '.php', '.c', '.cpp', '.h', '.cs', '.sh', '.sql'];
+        const excludeDirs = ['node_modules', '.git', 'dist', 'build', 'target', '__pycache__', '.next', 'vendor', '.gradle', 'bin', 'obj', '.idea', '.vscode'];
+
+        // Recursively gather all source files
+        const gatherFiles = async (dirPath: string): Promise<string[]> => {
+          const files: string[] = [];
+          try {
+            const entries = await invoke<{ path: string; name: string; is_directory: boolean; is_file: boolean }[]>('read_directory', {
+              path: dirPath,
+            });
+
+            for (const entry of entries) {
+              // Skip excluded directories and hidden files/folders
+              if (excludeDirs.includes(entry.name) || entry.name.startsWith('.')) {
+                continue;
+              }
+              
+              if (entry.is_directory) {
+                const subFiles = await gatherFiles(entry.path);
+                files.push(...subFiles);
+              } else if (entry.is_file) {
+                // Check if it's a source file
+                if (sourceExtensions.some(ext => entry.path.endsWith(ext))) {
+                  files.push(entry.path);
+                }
+              }
+            }
+          } catch {
+            // Skip directories that can't be read
+          }
+          return files;
+        };
+
+        const allFiles = await gatherFiles(workspace.rootPath);
+        filesToScan = allFiles.slice(0, 100); // Limit to 100 files for performance
       }
 
       set({ securityScanProgress: `Reading ${filesToScan.length} files...` });

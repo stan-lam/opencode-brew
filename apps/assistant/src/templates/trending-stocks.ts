@@ -443,29 +443,20 @@ Do not add commentary, analysis, or any other sections.`;
 
   const reportPrompt = `Compile a Trending Stocks Report.
 
-## STEP 1: FETCH ALL STOCK PRICES FIRST
+${watchlist.length > 0 ? `## STEP 1: FETCH WATCHLIST PRICES
 
-Before writing the report, fetch current prices for all stocks that will appear in the report:
+Fetch current prices for watchlist stocks:
 
-${watchlist.length > 0 ? `### Watchlist stocks - FETCH THESE NOW:
 ${watchlist.map((s: string) => `<get_stock_quote symbol="${s}" />`).join('\n')}
-` : ''}
-### Common trending stocks - FETCH THESE NOW:
-<get_stock_quote symbol="ASTC" />
-<get_stock_quote symbol="SPCE" />
-<get_stock_quote symbol="DELL" />
-<get_stock_quote symbol="ASTS" />
-<get_stock_quote symbol="MX" />
-<get_stock_quote symbol="RIVN" />
-<get_stock_quote symbol="BBAI" />
-<get_stock_quote symbol="WMT" />
-<get_stock_quote symbol="BSX" />
 
 WAIT FOR TOOL RESULTS before continuing.
 
 ---
 
-## STEP 2: REFERENCE DATA FROM PREVIOUS STAGES
+` : ''}## ${watchlist.length > 0 ? 'STEP 2' : 'STEP 1'}: USE DATA FROM PREVIOUS STAGES
+
+**IMPORTANT:** All stock prices and market data are already available below from earlier stages.
+DO NOT fetch URLs or make additional API calls - use ONLY the data provided here.
 
 ### Market Movers Data:
 {{fetch-movers_output}}
@@ -481,13 +472,14 @@ ${trackSentiment ? `### Sentiment Data:
 
 ---
 
-## STEP 3: WRITE REPORT USING TOOL RESULTS
+## ${watchlist.length > 0 ? 'STEP 3' : 'STEP 2'}: WRITE REPORT USING DATA ABOVE
 
-Use prices from:
-1. The <get_stock_quote> tool results from Step 1 (PRIMARY SOURCE)
-2. Market Movers/Watchlist/Sentiment data from Step 2 (SECONDARY)
+Use prices and data from:
+1. Market Movers data above (gainers, losers, most active with prices)
+2. ${watchlist.length > 0 ? 'Watchlist quotes from tool results above\n3. ' : ''}${trackSentiment ? 'Sentiment data above\n' + (watchlist.length > 0 ? '4. ' : '3. ') : ''}News headlines above
 
-**NEVER write "N/A" or "$X.XX" - you have the tool results above.**
+**IMPORTANT:** Do NOT try to fetch additional URLs or data. Use ONLY what is provided above.
+**NEVER write "N/A" or "$X.XX" - you have the actual data above.**
 
 ${useDiscordFormat ? `## DISCORD FORMAT - CLEAN & PROFESSIONAL
 
