@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Ban, CheckCircle, XCircle, Loader2, Clock, ChevronRight, ChevronDown, RefreshCw, Layers, Zap } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAssistantStore, ExecutionLog, ActionLog } from '../store/assistantStore';
+import { MermaidDiagram } from './MermaidDiagram';
 import styles from './ExecutionHistory.module.css';
 
 interface GroupedActions {
@@ -119,6 +120,16 @@ export function ExecutionHistory() {
   const [expandedStages, setExpandedStages] = useState<Set<number>>(new Set([0]));
   const [fullOutputExpanded, setFullOutputExpanded] = useState(true);
   const [isCancelling, setIsCancelling] = useState(false);
+
+  const markdownComponents: Components = useMemo(() => ({
+    code({ className, children, ...props }) {
+      const match = /language-mermaid/.exec(className || '');
+      if (match) {
+        return <MermaidDiagram chart={String(children).replace(/\n$/, '')} />;
+      }
+      return <code className={className} {...props}>{children}</code>;
+    },
+  }), []);
 
   const toggleStage = (index: number) => {
     setExpandedStages(prev => {
@@ -330,7 +341,7 @@ export function ExecutionHistory() {
                               </div>
                               {action.output && (
                                 <div className={styles.output}>
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{action.output}</ReactMarkdown>
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{action.output}</ReactMarkdown>
                                 </div>
                               )}
                               {action.error && (
@@ -356,7 +367,7 @@ export function ExecutionHistory() {
                   </h4>
                   {fullOutputExpanded && (
                     <div className={styles.fullOutputContent}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                         {formatOutputAsMarkdown(executionDetails.execution.output)}
                       </ReactMarkdown>
                     </div>

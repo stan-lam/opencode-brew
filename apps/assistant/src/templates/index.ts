@@ -1,10 +1,12 @@
 import { AgentTemplate, TemplateCategory } from '../types/AgentTemplate';
 import { vacationTemplate } from './vacation';
 import { trendingStocksTemplate } from './trending-stocks';
+import { shoppingPriceTrackerTemplate } from './shopping-price-tracker';
 
 export const templates: AgentTemplate[] = [
   vacationTemplate,
   trendingStocksTemplate,
+  shoppingPriceTrackerTemplate,
 ];
 
 export const templateCategories: { id: TemplateCategory; name: string; icon: string }[] = [
@@ -23,5 +25,5 @@ export function getTemplatesByCategory(category: TemplateCategory): AgentTemplat
   return templates.filter(t => t.category === category);
 }
 
-export { vacationTemplate, trendingStocksTemplate };
+export { vacationTemplate, trendingStocksTemplate, shoppingPriceTrackerTemplate };
 export type { AgentTemplate, TemplateCategory };

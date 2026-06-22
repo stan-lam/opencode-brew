@@ -85,6 +85,61 @@
   color: var(--text-muted);
 }
 
+.reviewBox {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reviewHeader {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.reviewControls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.reviewSelect {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.reviewSelect:disabled {
+  color: var(--text-muted);
+}
+
+.reviewBtn {
+  padding: 6px 10px;
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-sm);
+  background-color: var(--accent-green);
+  color: white;
+  transition: background-color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.reviewBtn:hover:not(:disabled) {
+  background-color: #1f8a4c;
+}
+
+.reviewBtn:disabled {
+  background-color: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
 .changes {
   flex: 1;
   overflow-y: auto;

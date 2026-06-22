@@ -35,6 +35,7 @@ export function EditorArea() {
           repoPath={activeFile.diffInfo.repoPath}
           filePath={activeFile.diffInfo.filePath}
           staged={activeFile.diffInfo.staged}
+          status={activeFile.diffInfo.status}
         />
       );
     }

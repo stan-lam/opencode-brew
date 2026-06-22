@@ -3307,7 +3307,7 @@ export function AIPanel() {
     
     // If already streaming, queue the prompt
     if (isStreaming) {
-      queuePrompt(message);
+      queuePrompt(message, messageAttachments);
     } else {
       await sendMessage(message, messageAttachments);
     }
@@ -3650,7 +3650,10 @@ export function AIPanel() {
         <div className={styles.queueIndicator}>
           <div className={styles.queueInfo}>
             <span className={styles.queueCount}>{promptQueue.length} prompt{promptQueue.length > 1 ? 's' : ''} queued</span>
-            <span className={styles.queuePreview}>{promptQueue[0].slice(0, 50)}{promptQueue[0].length > 50 ? '...' : ''}</span>
+            <span className={styles.queuePreview}>
+              {promptQueue[0].content.slice(0, 50)}
+              {promptQueue[0].content.length > 50 ? '...' : ''}
+            </span>
           </div>
           <button 
             className={styles.queueClearBtn}

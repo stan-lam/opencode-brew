@@ -9,6 +9,7 @@ use uuid::Uuid;
 use regex::Regex;
 use lazy_static::lazy_static;
 use std::time::Duration;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use crate::commands::web;
 use crate::commands::usage;
@@ -1076,7 +1077,21 @@ fn substitute_variables(
         result = result.replace("{{time}}", &now.format("%H:%M:%S").to_string());
         result = result.replace("{{datetime}}", &now.format("%Y-%m-%d %H:%M:%S").to_string());
         result = result.replace("{{timestamp}}", &now.timestamp().to_string());
-        
+
+        // Convert {{mermaid_url:MERMAID_CODE}} to mermaid.ink image URLs
+        let mermaid_re = Regex::new(r"\{\{mermaid_url:([\s\S]*?)\}\}").unwrap();
+        let mut last_result = String::new();
+        while result != last_result {
+            last_result = result.clone();
+            if let Some(cap) = mermaid_re.captures(&result) {
+                let full_match = &cap[0];
+                let mermaid_code = cap[1].trim();
+                let encoded = URL_SAFE_NO_PAD.encode(mermaid_code.as_bytes());
+                let url = format!("https://mermaid.ink/img/{}", encoded);
+                result = result.replace(full_match, &url);
+            }
+        }
+
         result
     };
     
