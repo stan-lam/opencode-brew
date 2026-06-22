@@ -337,6 +337,25 @@ After the tool returns data, filter and organize the results:
 - Minimum stock price: $${minPrice}
 - Maximum stocks per category: ${maxStocksPerCategory}
 
+## REQUIRED DATA BLOCK (OUTPUT THIS FIRST)
+MARKET_MOVERS_DATA_START
+TOP_GAINERS
+SYMBOL | PRICE | CHANGE%
+NVDA | $950.25 | +5.32%
+TOP_LOSERS
+SYMBOL | PRICE | CHANGE%
+TSLA | $220.10 | -4.10%
+MOST_ACTIVE
+SYMBOL | PRICE | CHANGE% | VOLUME
+AMD | $165.80 | +3.21% | 89.7M
+MARKET_MOVERS_DATA_END
+
+Rules:
+- Use ONLY values from <get_market_movers /> results
+- Include ONLY categories requested above
+- If a category has no results, write "NO_DATA" on a single line under that header
+- Keep price and % formatting exactly as returned
+
 ${formatInstructions}
 
 ${useDiscordFormat 
@@ -374,21 +393,34 @@ If blocked: <search_web query="StockTwits trending stocks today" />
 <get_stock_quote symbol="PATH" />
 <get_stock_quote symbol="VIVO" />
 
-## STEP 3: Output format - INCLUDE ALL 4 COLUMNS
+## STEP 3: OUTPUT REQUIRED DATA BLOCK FIRST
+
+SENTIMENT_DATA_START
+SYMBOL | PRICE | CHANGE% | TREND%
+ASTC | $56.00 | +90.28% | 90.08%
+SPCE | $6.12 | +35.01% | 35.10%
+SENTIMENT_DATA_END
+
+Rules:
+- PRICE and CHANGE% come from get_stock_quote tool results (use change_percent)
+- TREND% comes from StockTwits data
+- If any quote is missing, write "Data unavailable" for PRICE and CHANGE%
+
+## STEP 4: Output format - INCLUDE ALL 4 COLUMNS
 
 ${useDiscordFormat 
     ? `**💬 Sentiment Trending**
 \`\`\`
-SYMBOL   PRICE       CHANGE     TREND%
+SYMBOL   PRICE       CHANGE%    TREND%
 ASTC     $56.00      +90.28%    90.08%
 SPCE     $6.12       +35.01%    35.10%
 DELL     $409.97     +29.31%    29.40%
-MX       $XX.XX      +XX.XX%    30.63%
+MX       $12.34      +30.63%    30.63%
 \`\`\`
 
-PRICE and CHANGE = from get_stock_quote tool results
+PRICE and CHANGE% = from get_stock_quote tool results (change_percent)
 TREND% = from StockTwits data`
-    : `| Symbol | Price | Change | Trend % |
+    : `| Symbol | Price | Change % | Trend % |
 |--------|-------|--------|---------|`}
 
 Filter to trend >= ${sentimentThreshold}%. Include ALL 4 columns.` : '';
@@ -441,31 +473,76 @@ Rules:
 
 Do not add commentary, analysis, or any other sections.`;
 
+  const validateReportPrompt = `Validate and finalize the stock report.
+
+## REQUIRED DATA (authoritative - use only these values):
+### Market Movers Data:
+{{fetch-movers_output}}
+
+${trackSentiment ? `### Sentiment Data:
+{{analyze-sentiment_output}}
+
+` : ''}${watchlist.length > 0 ? `### Watchlist Data:
+{{fetch-watchlist_output}}
+
+` : ''}### News Data (HEADLINES ONLY):
+{{fetch-news_output}}
+
+### Report Draft:
+{{generate-report_output}}
+
+## TASK
+1. Extract required data blocks:
+- MARKET_MOVERS_DATA_START ... MARKET_MOVERS_DATA_END
+- ${trackSentiment ? 'SENTIMENT_DATA_START ... SENTIMENT_DATA_END' : 'Sentiment disabled'}
+- ${watchlist.length > 0 ? 'WATCHLIST_DATA_START ... WATCHLIST_DATA_END' : 'Watchlist disabled'}
+2. Verify every price, percent, and volume in the report draft appears in those blocks.
+3. If any mismatch, missing block, or placeholder appears, rewrite the report using ONLY the block values.
+4. Keep the same section order and formatting rules used in the draft.
+5. Append the required REPORT_DATA block at the end.
+
+${useDiscordFormat ? `## DISCORD RULES
+1. NEVER use bullet points (• or -) outside code blocks
+2. Stock data MUST be in code blocks
+3. News uses numbered list (1. 2. 3.)
+4. Market Summary is plain paragraph text
+5. Use ━━━━━━━━ dividers between sections` : `## MARKDOWN RULES
+1. Use markdown tables for stock data
+2. News uses numbered list (1. 2. 3.)
+3. Market Summary is plain paragraph text`}
+
+## REQUIRED REPORT_DATA BLOCK (append after the report)
+REPORT_DATA_START
+SECTION | SYMBOL | PRICE | CHANGE | VOLUME | TREND%
+TOP_GAINERS | NVDA | $950.25 | +5.32% | - | -
+TOP_LOSERS | TSLA | $220.10 | -4.10% | - | -
+MOST_ACTIVE | AMD | $165.80 | +3.21% | 89.7M | -
+${trackSentiment ? 'SENTIMENT | ASTC | $56.00 | +90.28% | - | 90.08%' : ''}
+${watchlist.length > 0 ? 'WATCHLIST | AAPL | $178.50 | +2.15% | - | -' : ''}
+REPORT_DATA_END
+
+Rules:
+- Section names must be: TOP_GAINERS, TOP_LOSERS, MOST_ACTIVE${trackSentiment ? ', SENTIMENT' : ''}${watchlist.length > 0 ? ', WATCHLIST' : ''}
+- Use "-" for fields that do not apply
+- If a section is NO_DATA or missing, output "SECTION | NO_DATA" (only two columns)
+- Do not invent values; copy exact text from the data blocks`;
+
   const reportPrompt = `Compile a Trending Stocks Report.
 
-## STEP 1: FETCH ALL STOCK PRICES FIRST
+${watchlist.length > 0 ? `## STEP 1: FETCH WATCHLIST PRICES
 
-Before writing the report, fetch current prices for all stocks that will appear in the report:
+Fetch current prices for watchlist stocks:
 
-${watchlist.length > 0 ? `### Watchlist stocks - FETCH THESE NOW:
 ${watchlist.map((s: string) => `<get_stock_quote symbol="${s}" />`).join('\n')}
-` : ''}
-### Common trending stocks - FETCH THESE NOW:
-<get_stock_quote symbol="ASTC" />
-<get_stock_quote symbol="SPCE" />
-<get_stock_quote symbol="DELL" />
-<get_stock_quote symbol="ASTS" />
-<get_stock_quote symbol="MX" />
-<get_stock_quote symbol="RIVN" />
-<get_stock_quote symbol="BBAI" />
-<get_stock_quote symbol="WMT" />
-<get_stock_quote symbol="BSX" />
 
 WAIT FOR TOOL RESULTS before continuing.
 
 ---
 
-## STEP 2: REFERENCE DATA FROM PREVIOUS STAGES
+` : ''}## ${watchlist.length > 0 ? 'STEP 2' : 'STEP 1'}: USE DATA FROM PREVIOUS STAGES
+
+**IMPORTANT:** All stock prices and market data are already available below from earlier stages.
+DO NOT fetch URLs or make additional API calls - use ONLY the data provided here.
 
 ### Market Movers Data:
 {{fetch-movers_output}}
@@ -479,15 +556,23 @@ ${trackSentiment ? `### Sentiment Data:
 ` : ''}### News Data (HEADLINES ONLY):
 {{fetch-news_output}}
 
+### REQUIRED DATA BLOCKS (USE ONLY THESE FOR PRICES)
+- MARKET_MOVERS_DATA_START ... MARKET_MOVERS_DATA_END
+- ${trackSentiment ? 'SENTIMENT_DATA_START ... SENTIMENT_DATA_END' : 'Sentiment disabled'}
+- ${watchlist.length > 0 ? 'WATCHLIST_DATA_START ... WATCHLIST_DATA_END' : 'Watchlist disabled'}
+
 ---
 
-## STEP 3: WRITE REPORT USING TOOL RESULTS
+## ${watchlist.length > 0 ? 'STEP 3' : 'STEP 2'}: WRITE REPORT USING DATA ABOVE
 
-Use prices from:
-1. The <get_stock_quote> tool results from Step 1 (PRIMARY SOURCE)
-2. Market Movers/Watchlist/Sentiment data from Step 2 (SECONDARY)
+Use prices and data from:
+1. Market Movers data above (gainers, losers, most active with prices)
+2. ${watchlist.length > 0 ? 'Watchlist quotes from tool results above\n3. ' : ''}${trackSentiment ? 'Sentiment data above\n' + (watchlist.length > 0 ? '4. ' : '3. ') : ''}News headlines above
 
-**NEVER write "N/A" or "$X.XX" - you have the tool results above.**
+**IMPORTANT:** Do NOT try to fetch additional URLs or data. Use ONLY what is provided above.
+**Never invent placeholders. Only use "Data unavailable" if it appears in the data blocks.**
+**Every price and % in the report MUST match a value in the required data blocks.**
+**If a required block is missing or a section has NO_DATA, write "No data available" for that section.**
 
 ${useDiscordFormat ? `## DISCORD FORMAT - CLEAN & PROFESSIONAL
 
@@ -547,7 +632,7 @@ AMD      $165.80     +3.21%     89.7M
 2. **🔺 Top Gainers** — Code block table
 3. **🔻 Top Losers** — Code block table  
 4. **📊 Most Active** — Code block table
-${trackSentiment ? '5. **💬 Sentiment Trending** — Code block with SYMBOL, PRICE, CHANGE, TREND% columns' : ''}
+${trackSentiment ? '5. **💬 Sentiment Trending** — Code block with SYMBOL, PRICE, CHANGE%, TREND% columns' : ''}
 ${watchlist.length > 0 ? `6. **📋 Watchlist** — Code block table` : ''}
 7. **📰 Latest News** — Use numbered list (1. 2. 3.), NOT bullet points
 
@@ -564,6 +649,7 @@ ${watchlist.length > 0 ? `6. **📋 Watchlist** — Code block table` : ''}
     sentiment: sentimentPrompt,
     watchlist: watchlistPrompt,
     news: newsPrompt,
+    validateReport: validateReportPrompt,
     report: reportPrompt,
   };
 }
@@ -626,14 +712,29 @@ Your ONLY job is to output a numbered list of news headlines.
 5. NO extra sections or commentary
 6. ONLY output the news section above`;
 
-function createAiAction(id: string, name: string, prompt: string, order: number): Action {
+const REPORT_VALIDATOR_SYSTEM_PROMPT = `You are a report validation step.
+
+## CORE RULES
+1. Do NOT call tools or fetch new data.
+2. Use ONLY values present in the provided data blocks.
+3. If a value is missing, write "No data available" for that section.
+4. Never invent prices, percentages, or volumes.
+5. Output the final report plus the required REPORT_DATA block.`;
+
+function createAiAction(
+  id: string,
+  name: string,
+  prompt: string,
+  order: number,
+  systemPrompt: string = STOCK_ANALYST_SYSTEM_PROMPT,
+): Action {
   return {
     id,
     name,
     action_type: {
       type: 'ai_prompt',
       prompt,
-      system_prompt: STOCK_ANALYST_SYSTEM_PROMPT,
+      system_prompt: systemPrompt,
     },
     order,
     on_error: 'continue',
@@ -767,7 +868,24 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
       order: stages.length,
     });
 
-    // Stage 5: Save and Notify
+    // Stage 6: Validate Report
+    stages.push({
+      id: 'stage-validate',
+      name: 'Validate Report',
+      actions: [
+        createAiAction(
+          'validate-report',
+          'Validate Report',
+          prompts.validateReport,
+          0,
+          REPORT_VALIDATOR_SYSTEM_PROMPT,
+        ),
+      ],
+      combineStrategy: 'first_success' as CombineStrategy,
+      order: stages.length,
+    });
+
+    // Stage 7: Save and Notify
     const notifyActions: Action[] = [];
 
     if (saveToFile && saveFilePath) {
@@ -782,7 +900,7 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
         action_type: {
           type: 'save_file',
           path: finalPath,
-          content: `# Stock Trends Report - {{datetime}}\n\n{{generate-report_output}}`,
+          content: `# Stock Trends Report - {{datetime}}\n\n{{validate-report_output}}`,
           append: false,
         },
         order: 0,
@@ -802,7 +920,7 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
 📅 {{datetime}}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-{{generate-report_output}}
+{{validate-report_output}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 *Data: Market Movers, StockTwits${watchlist.length > 0 ? ', Watchlist' : ''}*`,
@@ -821,7 +939,7 @@ Get scheduled reports delivered to Discord, Slack, or saved to a file.`,
           type: 'send_slack',
           webhook_url: slackWebhook,
           channel: slackChannel || '#stock-alerts',
-          message: '📈 *Stock Trends Report* - {{datetime}}\n\n{{generate-report_output}}',
+          message: '📈 *Stock Trends Report* - {{datetime}}\n\n{{validate-report_output}}',
           username: 'Stock Scanner',
         },
         order: 2,

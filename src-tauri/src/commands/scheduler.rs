@@ -9,6 +9,7 @@ use uuid::Uuid;
 use regex::Regex;
 use lazy_static::lazy_static;
 use std::time::Duration;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use crate::commands::web;
 use crate::commands::usage;
@@ -1076,7 +1077,21 @@ fn substitute_variables(
         result = result.replace("{{time}}", &now.format("%H:%M:%S").to_string());
         result = result.replace("{{datetime}}", &now.format("%Y-%m-%d %H:%M:%S").to_string());
         result = result.replace("{{timestamp}}", &now.timestamp().to_string());
-        
+
+        // Convert {{mermaid_url:MERMAID_CODE}} to mermaid.ink image URLs
+        let mermaid_re = Regex::new(r"\{\{mermaid_url:([\s\S]*?)\}\}").unwrap();
+        let mut last_result = String::new();
+        while result != last_result {
+            last_result = result.clone();
+            if let Some(cap) = mermaid_re.captures(&result) {
+                let full_match = &cap[0];
+                let mermaid_code = cap[1].trim();
+                let encoded = URL_SAFE_NO_PAD.encode(mermaid_code.as_bytes());
+                let url = format!("https://mermaid.ink/img/{}", encoded);
+                result = result.replace(full_match, &url);
+            }
+        }
+
         result
     };
     
@@ -2061,8 +2076,7 @@ async fn execute_ai_prompt_with_tools(
 2. DO NOT invent, estimate, or make up ANY numbers, prices, or facts
 3. If the data you need is not in these results, say "Data not available" - do NOT fabricate it
 4. Every stock price, percentage, and statistic in your response MUST come from above
-
-If the results only show links/titles without actual data, use <fetch_url url="..." /> to get the content.
+5. Do NOT use <fetch_url> to fetch stock/market data websites - they often require JavaScript and will fail
 
 Now provide your response using ONLY the real data above."#,
             tool_results_text
@@ -2124,11 +2138,25 @@ async fn execute_tools_in_response_with_results(response: &str) -> (String, Vec<
         // Try regular fetch first
         let fetch_result = web::fetch_url(url.to_string()).await;
         
-        // If content is empty or very short, try rendered fetch (headless browser)
+        // Helper to detect if content indicates JavaScript is required
+        fn needs_javascript(content: &str) -> bool {
+            let lower = content.to_lowercase();
+            (lower.contains("javascript") && (lower.contains("enable") || lower.contains("disabled") || lower.contains("required")))
+                || lower.contains("please enable javascript")
+                || lower.contains("this page requires javascript")
+                || (lower.contains("browser") && lower.contains("not support") && lower.contains("javascript"))
+        }
+        
+        // If content is empty, very short, or indicates JavaScript is required, try headless browser
         // Each browser uses a unique profile so they can run in parallel
         let web_content = match &fetch_result {
-            Ok(wc) if wc.content.len() < 100 => {
-                println!("[scheduler::tools] Regular fetch returned {} chars, trying headless browser...", wc.content.len());
+            Ok(wc) if wc.content.len() < 100 || needs_javascript(&wc.content) => {
+                let reason = if wc.content.len() < 100 { 
+                    format!("only {} chars", wc.content.len()) 
+                } else { 
+                    "JavaScript required".to_string() 
+                };
+                println!("[scheduler::tools] Regular fetch returned {}, trying headless browser...", reason);
                 match web::fetch_url_rendered(url.to_string()).await {
                     Ok(rendered) => Ok(rendered),
                     Err(e) => {

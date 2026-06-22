@@ -113,6 +113,17 @@ export interface AIProviderConfig {
   customPricing?: CustomPricing;
 }
 
+export interface AIMessageOverrides {
+  provider?: AIProvider;
+  model?: string;
+}
+
+export interface QueuedPrompt {
+  content: string;
+  attachments?: MessageAttachment[];
+  overrides?: AIMessageOverrides;
+}
+
 export interface MCPServerState {
   id: string;
   name: string;
@@ -132,7 +143,7 @@ interface AIState {
   availableModels: Record<AIProvider, string[]>;
   copilotVisionModels: string[];
   currentWorkspacePath: string | null;
-  promptQueue: string[];
+  promptQueue: QueuedPrompt[];
   agentMode: AgentMode;
   agentTasks: AgentTask[];
   agentTaskIndex: number;
@@ -160,8 +171,8 @@ interface AIState {
   createConversation: () => void;
   setActiveConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
-  sendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
-  queuePrompt: (content: string) => void;
+  sendMessage: (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => Promise<void>;
+  queuePrompt: (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => void;
   clearQueue: () => void;
   stopStreaming: (reason?: string) => void;
   finalizeStreaming: () => void;
@@ -1608,9 +1619,10 @@ export const useAIStore = create<AIState>()(
         get().saveWorkspaceHistory();
       },
 
-      sendMessage: async (content: string, attachments?: MessageAttachment[]) => {
+      sendMessage: async (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => {
         let conversation = get().activeConversation;
-        const { config } = get();
+        const baseConfig = get().config;
+        const config = overrides ? { ...baseConfig, ...overrides } : baseConfig;
         
         if (!conversation) {
           get().createConversation();
@@ -2533,7 +2545,7 @@ export const useAIStore = create<AIState>()(
                             // Allow chained auto-continues up to MAX_AUTO_CONTINUES
                             const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
                               && shouldAutoContinue(contResponseContent)
-                              && !promptQueue.includes(AUTO_CONTINUE_PROMPT);
+                              && !promptQueue.some((prompt) => prompt.content === AUTO_CONTINUE_PROMPT);
 
                             if (shouldQueueAutoContinue) {
                               autoContinueCountGlobal++;
@@ -2547,7 +2559,9 @@ export const useAIStore = create<AIState>()(
                           if (promptQueue.length > 0) {
                             const [nextPrompt, ...remaining] = promptQueue;
                             set({ promptQueue: remaining });
-                            setTimeout(() => get().sendMessage(nextPrompt), 100);
+                            setTimeout(() => {
+                              get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+                            }, 100);
                           }
                         }
                       }).then((unlisten) => {
@@ -2685,7 +2699,7 @@ export const useAIStore = create<AIState>()(
                   // Allow chained auto-continues up to MAX_AUTO_CONTINUES - the counter is the only limiter
                   const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
                     && autoContinueResult
-                    && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
+                    && !queuedPrompts.some((prompt) => prompt.content === AUTO_CONTINUE_PROMPT);
 
                   console.log('[aiStore] auto-continue check', {
                     conversationId,
@@ -2704,7 +2718,7 @@ export const useAIStore = create<AIState>()(
                     console.log('%c[aiStore] AUTO-CONTINUE NOT TRIGGERED', 'color: red; font-weight: bold', {
                       reason: autoContinueCountGlobal >= MAX_AUTO_CONTINUES ? `hit max continues (${MAX_AUTO_CONTINUES})` :
                               !autoContinueResult ? 'response does not look incomplete' :
-                              queuedPrompts.includes(AUTO_CONTINUE_PROMPT) ? 'already queued' :
+                              queuedPrompts.some((prompt) => prompt.content === AUTO_CONTINUE_PROMPT) ? 'already queued' :
                               'unknown'
                     });
                   }
@@ -2720,7 +2734,9 @@ export const useAIStore = create<AIState>()(
                   if (pendingPrompts.length > 0) {
                     const [nextPrompt, ...remaining] = pendingPrompts;
                     set({ promptQueue: remaining });
-                    setTimeout(() => get().sendMessage(nextPrompt), 100);
+                    setTimeout(() => {
+                      get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+                    }, 100);
                   }
                 }
               }
@@ -2899,18 +2915,21 @@ export const useAIStore = create<AIState>()(
           if (promptQueue.length > 0) {
             const [nextPrompt, ...remaining] = promptQueue;
             set({ promptQueue: remaining });
-            setTimeout(() => get().sendMessage(nextPrompt), 100);
+            setTimeout(() => {
+              get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+            }, 100);
           }
         }
       },
 
-      queuePrompt: (content: string) => {
+      queuePrompt: (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => {
         console.log('[aiStore] queuePrompt', { contentLen: content.length });
         set((state) => {
-          if (content.trim() === AUTO_CONTINUE_PROMPT && state.promptQueue.includes(AUTO_CONTINUE_PROMPT)) {
+          if (content.trim() === AUTO_CONTINUE_PROMPT
+            && state.promptQueue.some((prompt) => prompt.content === AUTO_CONTINUE_PROMPT)) {
             return state;
           }
-          return { promptQueue: [...state.promptQueue, content] };
+          return { promptQueue: [...state.promptQueue, { content, attachments, overrides }] };
         });
       },
 
@@ -2943,7 +2962,7 @@ export const useAIStore = create<AIState>()(
           const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
             && checkShouldAutoContinue(responseContent, `[aiStore] stopStreaming(${reason})`)
             && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
-            && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
+            && !queuedPrompts.some((prompt) => prompt.content === AUTO_CONTINUE_PROMPT);
 
           if (shouldQueueAutoContinue) {
             autoContinueCountGlobal++;
@@ -2966,7 +2985,9 @@ export const useAIStore = create<AIState>()(
         if (promptQueue.length > 0) {
           const [nextPrompt, ...remaining] = promptQueue;
           set({ promptQueue: remaining });
-          setTimeout(() => get().sendMessage(nextPrompt), 100);
+          setTimeout(() => {
+            get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+          }, 100);
         }
       },
       finalizeStreaming: () => {
@@ -2989,7 +3010,7 @@ export const useAIStore = create<AIState>()(
         const shouldQueueAutoContinue = autoContinueCountGlobal < MAX_AUTO_CONTINUES
           && checkShouldAutoContinue(responseContent)
           && lastUserMessage?.content.trim() !== AUTO_CONTINUE_PROMPT
-          && !queuedPrompts.includes(AUTO_CONTINUE_PROMPT);
+          && !queuedPrompts.some((prompt) => prompt.content === AUTO_CONTINUE_PROMPT);
 
         if (shouldQueueAutoContinue) {
           autoContinueCountGlobal++;
@@ -3010,7 +3031,9 @@ export const useAIStore = create<AIState>()(
         if (promptQueue.length > 0) {
           const [nextPrompt, ...remaining] = promptQueue;
           set({ promptQueue: remaining });
-          setTimeout(() => get().sendMessage(nextPrompt), 100);
+          setTimeout(() => {
+            get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+          }, 100);
         }
       },
 

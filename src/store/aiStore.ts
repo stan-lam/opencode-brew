@@ -68,6 +68,16 @@ export interface AIProviderConfig {
   mcpServers: MCPServerConfig[];
 }
 
+export interface AIMessageOverrides {
+  model?: string;
+}
+
+export interface QueuedPrompt {
+  content: string;
+  attachments?: MessageAttachment[];
+  overrides?: AIMessageOverrides;
+}
+
 export interface MCPServerState {
   id: string;
   name: string;
@@ -85,7 +95,7 @@ interface AIState {
   availableModels: Record<AIProvider, string[]>;
   copilotVisionModels: string[];
   currentWorkspacePath: string | null;
-  promptQueue: string[];
+  promptQueue: QueuedPrompt[];
   agentMode: AgentMode;
   agentTasks: AgentTask[];
   agentTaskIndex: number;
@@ -106,8 +116,8 @@ interface AIState {
   createConversation: () => void;
   setActiveConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
-  sendMessage: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
-  queuePrompt: (content: string) => void;
+  sendMessage: (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => Promise<void>;
+  queuePrompt: (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => void;
   clearQueue: () => void;
   stopStreaming: () => void;
   clearConversation: () => void;
@@ -1231,9 +1241,10 @@ export const useAIStore = create<AIState>()(
         get().saveWorkspaceHistory();
       },
 
-      sendMessage: async (content: string, attachments?: MessageAttachment[]) => {
+      sendMessage: async (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => {
         let conversation = get().activeConversation;
-        const { config } = get();
+        const baseConfig = get().config;
+        const config = overrides ? { ...baseConfig, ...overrides } : baseConfig;
         
         if (!conversation) {
           get().createConversation();
@@ -1753,7 +1764,9 @@ export const useAIStore = create<AIState>()(
                 if (promptQueue.length > 0) {
                   const [nextPrompt, ...remaining] = promptQueue;
                   set({ promptQueue: remaining });
-                  setTimeout(() => get().sendMessage(nextPrompt), 100);
+                  setTimeout(() => {
+                    get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+                  }, 100);
                 }
               }
             }
@@ -1913,14 +1926,16 @@ export const useAIStore = create<AIState>()(
           if (promptQueue.length > 0) {
             const [nextPrompt, ...remaining] = promptQueue;
             set({ promptQueue: remaining });
-            setTimeout(() => get().sendMessage(nextPrompt), 100);
+            setTimeout(() => {
+              get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+            }, 100);
           }
         }
       },
 
-      queuePrompt: (content: string) => {
+      queuePrompt: (content: string, attachments?: MessageAttachment[], overrides?: AIMessageOverrides) => {
         set((state) => ({
-          promptQueue: [...state.promptQueue, content],
+          promptQueue: [...state.promptQueue, { content, attachments, overrides }],
         }));
       },
 
@@ -1939,7 +1954,9 @@ export const useAIStore = create<AIState>()(
         if (promptQueue.length > 0) {
           const [nextPrompt, ...remaining] = promptQueue;
           set({ promptQueue: remaining });
-          setTimeout(() => get().sendMessage(nextPrompt), 100);
+          setTimeout(() => {
+            get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
+          }, 100);
         }
       },
 

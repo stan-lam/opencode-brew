@@ -79,6 +79,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           get().setCurrentWorkspace(workspace);
           console.log('Workspace set successfully');
 
+          // Close any open files from the previous workspace
+          try {
+            const { useEditorStore } = await import('./editorStore');
+            useEditorStore.getState().closeAllFiles();
+            console.log('Closed open files from previous workspace');
+          } catch (editorError) {
+            console.log('Could not close open files:', editorError);
+          }
+
           // Update window title with project name
           try {
             const { appWindow } = await import('../services/tauri');

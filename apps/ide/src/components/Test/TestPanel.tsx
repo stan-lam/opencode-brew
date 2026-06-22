@@ -16,7 +16,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { useTestStore, PendingChange, TestCategory, SnykVulnerability } from '../../store/testStore';
+import { useTestStore, PendingChange, TestCategory, SnykVulnerability, SecurityFinding, DependencyVulnerability, OutdatedPackage } from '../../store/testStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useAIStore } from '../../store/aiStore';
@@ -44,6 +44,15 @@ export function TestPanel() {
     creationSummary,
     snykResult,
     isScanningSnyk,
+    securityScanResult,
+    isSecurityScanning,
+    securityScanProgress,
+    selectedSecurityFindings,
+    isFixingSecurityIssues,
+    securityFixProgress,
+    depAuditResult,
+    isAuditingDeps,
+    depAuditProgress,
     fetchPendingChanges,
     analyzeChanges,
     setCustomInstructions,
@@ -56,10 +65,28 @@ export function TestPanel() {
     setError,
     runSnykScan,
     clearSnykResult,
+    runSecurityScan,
+    clearSecurityScan,
+    toggleSecurityFindingSelection,
+    selectAllSecurityFindings,
+    deselectAllSecurityFindings,
+    fixSelectedSecurityIssues,
+    runDepAudit,
+    clearDepAudit,
+    selectedDepVulnerabilities,
+    selectedOutdatedPackages,
+    isFixingDepIssues,
+    depFixProgress,
+    toggleDepVulnerabilitySelection,
+    toggleOutdatedPackageSelection,
+    selectAllDepIssues,
+    deselectAllDepIssues,
+    fixSelectedDepIssues,
   } = useTestStore();
 
   const [showChanges, setShowChanges] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [showSecurityScopeMenu, setShowSecurityScopeMenu] = useState(false);
 
   // Force refresh when testPlan changes
   useEffect(() => {
@@ -170,6 +197,13 @@ export function TestPanel() {
     }
   }, [activeSideTab, currentWorkspace?.rootPath, fetchPendingChanges]);
 
+  // Clear scan results when workspace changes
+  useEffect(() => {
+    clearSecurityScan();
+    clearDepAudit();
+    clearSnykResult();
+  }, [currentWorkspace?.rootPath, clearSecurityScan, clearDepAudit, clearSnykResult]);
+
   const handleAnalyze = () => {
     analyzeChanges(customInstructions || undefined);
   };
@@ -209,7 +243,7 @@ export function TestPanel() {
     }
   };
 
-  const isLoading = isAnalyzing || isCreatingTests || isFetchingChanges || isStreaming || isScanningSnyk;
+  const isLoading = isAnalyzing || isCreatingTests || isFetchingChanges || isStreaming || isScanningSnyk || isSecurityScanning || isAuditingDeps || isFixingSecurityIssues;
 
   if (!currentWorkspace) {
     return (
@@ -301,27 +335,61 @@ export function TestPanel() {
             className={styles.quickActionBtn}
             onClick={() => handleQuickAction('unit')}
             disabled={isLoading || pendingChanges.length === 0}
-            title="Focus on unit tests"
+            title="Generate unit tests for pending changes"
           >
             <FileCode size={14} />
             Unit Tests
           </button>
+          <div className={styles.securityScanWrapper}>
+            <button
+              className={styles.quickActionBtn}
+              onClick={() => setShowSecurityScopeMenu(!showSecurityScopeMenu)}
+              disabled={isLoading}
+              title="Scan code for security vulnerabilities"
+            >
+              {isSecurityScanning ? (
+                <RefreshCw size={14} className={styles.spinner} />
+              ) : (
+                <Shield size={14} />
+              )}
+              Security
+              <ChevronDown size={10} />
+            </button>
+            {showSecurityScopeMenu && (
+              <div className={styles.scopeMenu}>
+                <button
+                  className={styles.scopeMenuItem}
+                  onClick={() => {
+                    setShowSecurityScopeMenu(false);
+                    runSecurityScan('changes');
+                  }}
+                  disabled={pendingChanges.length === 0}
+                >
+                  Scan Pending Changes
+                </button>
+                <button
+                  className={styles.scopeMenuItem}
+                  onClick={() => {
+                    setShowSecurityScopeMenu(false);
+                    runSecurityScan('codebase');
+                  }}
+                >
+                  Scan Codebase
+                </button>
+              </div>
+            )}
+          </div>
           <button
             className={styles.quickActionBtn}
-            onClick={() => handleQuickAction('security')}
-            disabled={isLoading || pendingChanges.length === 0}
-            title="Focus on security tests"
+            onClick={runDepAudit}
+            disabled={isLoading}
+            title="Audit dependencies for vulnerabilities"
           >
-            <Shield size={14} />
-            Security Scan
-          </button>
-          <button
-            className={styles.quickActionBtn}
-            onClick={() => handleQuickAction('audit')}
-            disabled={isLoading || pendingChanges.length === 0}
-            title="Audit dependencies"
-          >
-            <Package size={14} />
+            {isAuditingDeps ? (
+              <RefreshCw size={14} className={styles.spinner} />
+            ) : (
+              <Package size={14} />
+            )}
             Dep Audit
           </button>
           <button
@@ -351,6 +419,34 @@ export function TestPanel() {
             rows={2}
           />
         </div>
+
+        {isSecurityScanning && (
+          <div className={styles.progressSection}>
+            <div className={styles.progressHeader}>
+              <RefreshCw size={14} className={styles.spinner} />
+              <span>Security Scan</span>
+            </div>
+            <div className={styles.progressContent}>
+              <div className={styles.progressStatus}>
+                {securityScanProgress || 'Scanning...'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isAuditingDeps && (
+          <div className={styles.progressSection}>
+            <div className={styles.progressHeader}>
+              <RefreshCw size={14} className={styles.spinner} />
+              <span>Dependency Audit</span>
+            </div>
+            <div className={styles.progressContent}>
+              <div className={styles.progressStatus}>
+                {depAuditProgress || 'Auditing...'}
+              </div>
+            </div>
+          </div>
+        )}
 
         {(isAnalyzing || isStreaming) && (
           <div className={styles.progressSection}>
@@ -632,6 +728,297 @@ export function TestPanel() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {securityScanResult && (
+        <div className={styles.section}>
+          <div className={styles.sectionHeader}>
+            <Shield size={14} />
+            <span>Security Scan</span>
+            <span className={styles.scanScope}>
+              ({securityScanResult.scanScope === 'changes' ? 'Pending Changes' : 'Codebase'})
+            </span>
+            <span className={styles.auditSummary}>
+              {securityScanResult.summary.critical > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityCritical}`}>
+                  {securityScanResult.summary.critical} critical
+                </span>
+              )}
+              {securityScanResult.summary.high > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityHigh}`}>
+                  {securityScanResult.summary.high} high
+                </span>
+              )}
+            </span>
+            {securityScanResult.findings.length > 0 && (
+              <div className={styles.selectActions}>
+                <button
+                  className={styles.selectBtn}
+                  onClick={selectAllSecurityFindings}
+                  title="Select all"
+                >
+                  <Check size={12} />
+                </button>
+                <button
+                  className={styles.selectBtn}
+                  onClick={deselectAllSecurityFindings}
+                  title="Deselect all"
+                >
+                  <Minus size={12} />
+                </button>
+              </div>
+            )}
+            <button
+              className={styles.dismissBtn}
+              onClick={clearSecurityScan}
+              title="Clear results"
+            >
+              <X size={12} />
+            </button>
+          </div>
+
+          {securityScanResult.error ? (
+            <div className={styles.scanError}>
+              <AlertTriangle size={14} />
+              <span>{securityScanResult.error}</span>
+            </div>
+          ) : securityScanResult.findings.length === 0 ? (
+            <div className={styles.scanSuccess}>
+              <Check size={14} />
+              <span>No security issues found in {securityScanResult.scannedFiles} files</span>
+            </div>
+          ) : (
+            <div className={styles.securitySection}>
+              <div className={styles.scanSummary}>
+                <span>{securityScanResult.findings.length} issues found in {securityScanResult.scannedFiles} files</span>
+                {selectedSecurityFindings.size > 0 && (
+                  <span className={styles.selectedCount}>({selectedSecurityFindings.size} selected)</span>
+                )}
+              </div>
+
+              {isFixingSecurityIssues && (
+                <div className={styles.fixProgress}>
+                  <RefreshCw size={14} className={styles.spinner} />
+                  <span>{securityFixProgress || 'Applying fixes...'}</span>
+                </div>
+              )}
+
+              {securityScanResult.findings.map((finding: SecurityFinding) => (
+                <div 
+                  key={finding.id} 
+                  className={`${styles.findingItem} ${selectedSecurityFindings.has(finding.id) ? styles.findingSelected : ''}`}
+                >
+                  <div className={styles.findingHeader}>
+                    <input
+                      type="checkbox"
+                      checked={selectedSecurityFindings.has(finding.id)}
+                      onChange={() => toggleSecurityFindingSelection(finding.id)}
+                      className={styles.findingCheckbox}
+                    />
+                    <span className={`${styles.severityBadge} ${getSeverityClass(finding.severity)}`}>
+                      {finding.severity}
+                    </span>
+                    <span className={styles.findingCategory}>{finding.category}</span>
+                  </div>
+                  <div className={styles.findingDetails}>
+                    <span className={styles.findingTitle}>{finding.title}</span>
+                    <span className={styles.findingFile}>
+                      {finding.file}{finding.line ? `:${finding.line}` : ''}
+                    </span>
+                    <p className={styles.findingDescription}>{finding.description}</p>
+                    {finding.code && (
+                      <pre className={styles.findingCode}>{finding.code}</pre>
+                    )}
+                    <div className={styles.findingSuggestion}>
+                      <strong>Fix:</strong> {finding.suggestion}
+                    </div>
+                    {finding.references && finding.references.length > 0 && (
+                      <div className={styles.findingRefs}>
+                        {finding.references.map((ref, i) => (
+                          <span key={i} className={styles.refBadge}>{ref}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              <button
+                className={styles.fixButton}
+                onClick={fixSelectedSecurityIssues}
+                disabled={selectedSecurityFindings.size === 0 || isLoading}
+              >
+                {isFixingSecurityIssues ? (
+                  <>
+                    <RefreshCw size={16} className={styles.spinner} />
+                    Fixing...
+                  </>
+                ) : (
+                  <>
+                    <Shield size={16} />
+                    Fix Selected Issues ({selectedSecurityFindings.size})
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {depAuditResult && (
+        <div className={styles.section}>
+          <div className={styles.sectionHeader}>
+            <Package size={14} />
+            <span>Dependency Audit</span>
+            <span className={styles.scanScope}>({depAuditResult.packageManager})</span>
+            <span className={styles.auditSummary}>
+              {depAuditResult.summary.critical > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityCritical}`}>
+                  {depAuditResult.summary.critical} critical
+                </span>
+              )}
+              {depAuditResult.summary.high > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityHigh}`}>
+                  {depAuditResult.summary.high} high
+                </span>
+              )}
+              {depAuditResult.summary.outdated > 0 && (
+                <span className={`${styles.severityBadge} ${styles.severityMedium}`}>
+                  {depAuditResult.summary.outdated} outdated
+                </span>
+              )}
+            </span>
+            <button
+              className={styles.dismissBtn}
+              onClick={clearDepAudit}
+              title="Clear results"
+            >
+              <X size={12} />
+            </button>
+          </div>
+
+          {depAuditResult.error ? (
+            <div className={styles.scanError}>
+              <AlertTriangle size={14} />
+              <span>{depAuditResult.error}</span>
+            </div>
+          ) : depAuditResult.vulnerabilities.length === 0 && depAuditResult.outdatedPackages.length === 0 ? (
+            <div className={styles.scanSuccess}>
+              <Check size={14} />
+              <span>No vulnerabilities found in {depAuditResult.totalDependencies} dependencies</span>
+            </div>
+          ) : (
+            <div className={styles.depAuditSection}>
+              {/* Selection controls */}
+              <div className={styles.selectionControls}>
+                <button
+                  className={styles.selectAllBtn}
+                  onClick={selectAllDepIssues}
+                  disabled={isFixingDepIssues}
+                >
+                  Select All
+                </button>
+                <button
+                  className={styles.deselectAllBtn}
+                  onClick={deselectAllDepIssues}
+                  disabled={isFixingDepIssues}
+                >
+                  Deselect All
+                </button>
+                <span className={styles.selectedCount}>
+                  {selectedDepVulnerabilities.size + selectedOutdatedPackages.size} selected
+                </span>
+              </div>
+
+              {isFixingDepIssues && depFixProgress && (
+                <div className={styles.fixProgress}>
+                  <RefreshCw size={14} className={styles.spinner} />
+                  {depFixProgress}
+                </div>
+              )}
+
+              {depAuditResult.vulnerabilities.length > 0 && (
+                <>
+                  <div className={styles.depAuditSubheader}>Vulnerabilities</div>
+                  {depAuditResult.vulnerabilities.map((vuln: DependencyVulnerability) => (
+                    <div key={vuln.id} className={`${styles.vulnItem} ${selectedDepVulnerabilities.has(vuln.id) ? styles.selected : ''}`}>
+                      <input
+                        type="checkbox"
+                        className={styles.findingCheckbox}
+                        checked={selectedDepVulnerabilities.has(vuln.id)}
+                        onChange={() => toggleDepVulnerabilitySelection(vuln.id)}
+                        disabled={isFixingDepIssues}
+                      />
+                      <span className={`${styles.severityBadge} ${getSeverityClass(vuln.severity)}`}>
+                        {vuln.severity}
+                      </span>
+                      <div className={styles.vulnDetails}>
+                        <span className={styles.vulnPackage}>
+                          {vuln.packageName}@{vuln.currentVersion}
+                        </span>
+                        {vuln.cveId && <span className={styles.vulnCve}>{vuln.cveId}</span>}
+                        <span className={styles.vulnTitle}>{vuln.title}</span>
+                        <p className={styles.vulnDescription}>{vuln.description}</p>
+                        <div className={styles.vulnRecommendation}>
+                          <strong>Recommendation:</strong> {vuln.recommendation}
+                        </div>
+                      </div>
+                      {vuln.fixedInVersion && (
+                        <span className={styles.fixBadge}>Fix: {vuln.fixedInVersion}</span>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+              {depAuditResult.outdatedPackages.length > 0 && (
+                <>
+                  <div className={styles.depAuditSubheader}>Outdated Packages</div>
+                  {depAuditResult.outdatedPackages.map((pkg: OutdatedPackage, idx: number) => (
+                    <div key={idx} className={`${styles.outdatedItem} ${pkg.hasSecurityImpact ? styles.securityImpact : ''} ${selectedOutdatedPackages.has(pkg.name) ? styles.selected : ''}`}>
+                      <input
+                        type="checkbox"
+                        className={styles.findingCheckbox}
+                        checked={selectedOutdatedPackages.has(pkg.name)}
+                        onChange={() => toggleOutdatedPackageSelection(pkg.name)}
+                        disabled={isFixingDepIssues}
+                      />
+                      <span className={`${styles.updateBadge} ${styles[`update${pkg.updateType.charAt(0).toUpperCase() + pkg.updateType.slice(1)}`]}`}>
+                        {pkg.updateType}
+                      </span>
+                      <div className={styles.outdatedDetails}>
+                        <span className={styles.outdatedPackage}>{pkg.name}</span>
+                        <span className={styles.outdatedVersions}>
+                          {pkg.currentVersion} → {pkg.latestVersion}
+                        </span>
+                      </div>
+                      {pkg.hasSecurityImpact && (
+                        <span className={styles.securityBadge}>Security Impact</span>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+
+              <button
+                className={styles.fixButton}
+                onClick={fixSelectedDepIssues}
+                disabled={(selectedDepVulnerabilities.size + selectedOutdatedPackages.size) === 0 || isFixingDepIssues}
+              >
+                {isFixingDepIssues ? (
+                  <>
+                    <RefreshCw size={16} className={styles.spinner} />
+                    Fixing...
+                  </>
+                ) : (
+                  <>
+                    <Package size={16} />
+                    Fix Selected Issues ({selectedDepVulnerabilities.size + selectedOutdatedPackages.size})
+                  </>
+                )}
+              </button>
             </div>
           )}
         </div>

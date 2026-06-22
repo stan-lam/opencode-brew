@@ -355,6 +355,11 @@ export const git = {
     const invoke = await getInvoke();
     return invoke('git_diff_since', { repoPath, commitId });
   },
+
+  diffAll: async (repoPath: string, staged: boolean): Promise<FileDiff[]> => {
+    const invoke = await getInvoke();
+    return invoke('git_diff_all', { repoPath, staged });
+  },
   
   fetch: async (repoPath: string, remoteName?: string): Promise<void> => {
     const invoke = await getInvoke();

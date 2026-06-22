@@ -30,6 +30,7 @@ export interface OpenFile {
     repoPath: string;
     filePath: string;
     staged: boolean;
+    status?: DiffFileStatus;
   };
   historyDiffInfo?: {
     filePath: string;
@@ -53,17 +54,20 @@ export interface OpenFile {
   };
 }
 
+type DiffFileStatus = 'modified' | 'added' | 'deleted' | 'untracked' | 'renamed';
+
 interface EditorState {
   openFiles: OpenFile[];
   activeFile: OpenFile | null;
   openFile: (path: string) => Promise<void>;
-  openDiff: (repoPath: string, filePath: string, staged: boolean) => void;
+  openDiff: (repoPath: string, filePath: string, staged: boolean, status?: DiffFileStatus) => void;
   openHistoryDiff: (filePath: string, fileName: string, historyId: number, timestamp: string, oldContent: string, newContent: string) => void;
   openAIDiff: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete') => void;
   openFileWithAIEdit: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete', insertLine?: number) => Promise<void>;
   clearAIEdit: (path: string) => void;
   applyAIEdit: (path: string) => void;
   closeFile: (path: string) => void;
+  closeAllFiles: () => void;
   setActiveFile: (path: string) => void;
   updateFileContent: (path: string, content: string) => void;
   saveFile: (path: string) => Promise<void>;
@@ -152,7 +156,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
 
-  openDiff: (repoPath: string, filePath: string, staged: boolean) => {
+  openDiff: (repoPath: string, filePath: string, staged: boolean, status?: DiffFileStatus) => {
     const { openFiles } = get();
     const diffPath = `diff:${staged ? 'staged' : 'unstaged'}:${filePath}`;
     const existingDiff = openFiles.find((f) => f.path === diffPath);
@@ -175,6 +179,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         repoPath,
         filePath,
         staged,
+        status,
       },
     };
 
@@ -376,6 +381,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     
     // Update window title
     updateWindowTitle(newActiveFile?.name || null);
+  },
+
+  closeAllFiles: () => {
+    set({ openFiles: [], activeFile: null });
+    updateWindowTitle(null);
   },
 
   setActiveFile: (path: string) => {

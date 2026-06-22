@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { fs } from '../../services/tauri';
 import styles from './DiffEditor.module.css';
 
 interface DiffLine {
@@ -32,9 +33,13 @@ interface DiffEditorProps {
   repoPath: string;
   filePath: string;
   staged: boolean;
+  status?: 'modified' | 'added' | 'deleted' | 'untracked' | 'renamed';
 }
 
-export function DiffEditor({ repoPath, filePath, staged }: DiffEditorProps) {
+const MAX_UNTRACKED_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_UNTRACKED_FILE_CHARS = 20000;
+
+export function DiffEditor({ repoPath, filePath, staged, status }: DiffEditorProps) {
   const [diff, setDiff] = useState<FileDiff | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,13 +47,58 @@ export function DiffEditor({ repoPath, filePath, staged }: DiffEditorProps) {
 
   useEffect(() => {
     loadDiff();
-  }, [repoPath, filePath, staged]);
+  }, [repoPath, filePath, staged, status]);
 
   useEffect(() => {
     if (diff) {
       setExpandedHunks(new Set(diff.hunks.map((_, i) => i)));
     }
   }, [diff]);
+
+  const buildUntrackedDiff = async (): Promise<FileDiff | null> => {
+    const fullPath = `${repoPath.replace(/\/$/, '')}/${filePath}`.replace(/\/+/g, '/');
+    try {
+      const info = await fs.getFileInfo(fullPath);
+      if (info.size > MAX_UNTRACKED_FILE_BYTES) {
+        setError('Untracked file is too large to display here. Open it from the file tree.');
+        return null;
+      }
+      const content = await fs.readFile(fullPath);
+      if (content.includes('\u0000')) {
+        setError('Untracked file appears to be binary.');
+        return null;
+      }
+      let safeContent = content;
+      if (safeContent.length > MAX_UNTRACKED_FILE_CHARS) {
+        safeContent = `${safeContent.slice(0, MAX_UNTRACKED_FILE_CHARS)}\n...[truncated]`;
+      }
+      const lines = safeContent.split('\n');
+      const hunk: DiffHunk = {
+        header: `@@ -0,0 +1,${lines.length} @@`,
+        old_start: 0,
+        old_lines: 0,
+        new_start: 1,
+        new_lines: lines.length,
+        lines: lines.map((line, index) => ({
+          line_type: 'addition',
+          old_lineno: null,
+          new_lineno: index + 1,
+          content: line,
+        })),
+      };
+      return {
+        old_path: null,
+        new_path: filePath,
+        status: 'added',
+        hunks: [hunk],
+        additions: lines.length,
+        deletions: 0,
+      };
+    } catch (readError) {
+      console.error('Failed to load untracked file content:', readError);
+      return null;
+    }
+  };
 
   const loadDiff = async () => {
     setIsLoading(true);
@@ -59,6 +109,11 @@ export function DiffEditor({ repoPath, filePath, staged }: DiffEditorProps) {
         filePath,
         staged,
       });
+      if (result.hunks.length === 0 && (status === 'untracked' || status === 'added')) {
+        const fallbackDiff = await buildUntrackedDiff();
+        setDiff(fallbackDiff ?? result);
+        return;
+      }
       setDiff(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
