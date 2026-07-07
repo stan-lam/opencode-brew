@@ -273,7 +273,7 @@ const inputGroups: TemplateInputGroup[] = [
           { value: 'first', label: 'First Class' },
         ],
         defaultValue: 'economy',
-        dependsOn: { field: 'travelMethod', value: 'flight' },
+        dependsOn: { field: 'activeTravelMethod', value: 'flight' },
       },
       {
         id: 'directOnly',
@@ -281,7 +281,7 @@ const inputGroups: TemplateInputGroup[] = [
         type: 'checkbox',
         required: false,
         defaultValue: false,
-        dependsOn: { field: 'travelMethod', value: 'flight' },
+        dependsOn: { field: 'activeTravelMethod', value: 'flight' },
       },
       {
         id: 'carType',
@@ -294,7 +294,7 @@ const inputGroups: TemplateInputGroup[] = [
         ],
         defaultValue: 'rental',
         helpText: 'Choose whether to use your own car or rent one',
-        dependsOn: { field: 'travelMethod', value: 'car' },
+        dependsOn: { field: 'activeTravelMethod', value: 'car' },
       },
       {
         id: 'carMpg',
@@ -305,7 +305,7 @@ const inputGroups: TemplateInputGroup[] = [
         min: 10,
         max: 100,
         helpText: 'Miles per gallon for gas cost estimation',
-        dependsOn: { field: 'travelMethod', value: 'car' },
+        dependsOn: { field: 'activeTravelMethod', value: 'car' },
       },
     ],
   },

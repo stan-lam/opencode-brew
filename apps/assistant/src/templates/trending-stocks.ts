@@ -337,17 +337,17 @@ After the tool returns data, filter and organize the results:
 - Minimum stock price: $${minPrice}
 - Maximum stocks per category: ${maxStocksPerCategory}
 
-## REQUIRED DATA BLOCK (OUTPUT THIS FIRST)
+## REQUIRED DATA BLOCK (OUTPUT THIS FIRST - NO TEXT BEFORE IT)
 MARKET_MOVERS_DATA_START
 TOP_GAINERS
 SYMBOL | PRICE | CHANGE%
-NVDA | $950.25 | +5.32%
+ROWS_FROM_TOOL_HERE
 TOP_LOSERS
 SYMBOL | PRICE | CHANGE%
-TSLA | $220.10 | -4.10%
+ROWS_FROM_TOOL_HERE
 MOST_ACTIVE
 SYMBOL | PRICE | CHANGE% | VOLUME
-AMD | $165.80 | +3.21% | 89.7M
+ROWS_FROM_TOOL_HERE
 MARKET_MOVERS_DATA_END
 
 Rules:
@@ -355,6 +355,8 @@ Rules:
 - Include ONLY categories requested above
 - If a category has no results, write "NO_DATA" on a single line under that header
 - Keep price and % formatting exactly as returned
+- Replace ROWS_FROM_TOOL_HERE with real rows (do not output placeholder text)
+- Do not output any commentary before the required data block
 
 ${formatInstructions}
 
@@ -393,18 +395,19 @@ If blocked: <search_web query="StockTwits trending stocks today" />
 <get_stock_quote symbol="PATH" />
 <get_stock_quote symbol="VIVO" />
 
-## STEP 3: OUTPUT REQUIRED DATA BLOCK FIRST
+## STEP 3: OUTPUT REQUIRED DATA BLOCK FIRST (NO TEXT BEFORE IT)
 
 SENTIMENT_DATA_START
 SYMBOL | PRICE | CHANGE% | TREND%
-ASTC | $56.00 | +90.28% | 90.08%
-SPCE | $6.12 | +35.01% | 35.10%
+ROWS_FROM_TOOL_HERE
 SENTIMENT_DATA_END
 
 Rules:
 - PRICE and CHANGE% come from get_stock_quote tool results (use change_percent)
 - TREND% comes from StockTwits data
 - If any quote is missing, write "Data unavailable" for PRICE and CHANGE%
+- Replace ROWS_FROM_TOOL_HERE with real rows (do not output placeholder text)
+- Do not output any commentary before the required data block
 
 ## STEP 4: Output format - INCLUDE ALL 4 COLUMNS
 
@@ -514,20 +517,22 @@ ${useDiscordFormat ? `## DISCORD RULES
 ## REQUIRED REPORT_DATA BLOCK (append after the report)
 REPORT_DATA_START
 SECTION | SYMBOL | PRICE | CHANGE | VOLUME | TREND%
-TOP_GAINERS | NVDA | $950.25 | +5.32% | - | -
-TOP_LOSERS | TSLA | $220.10 | -4.10% | - | -
-MOST_ACTIVE | AMD | $165.80 | +3.21% | 89.7M | -
-${trackSentiment ? 'SENTIMENT | ASTC | $56.00 | +90.28% | - | 90.08%' : ''}
-${watchlist.length > 0 ? 'WATCHLIST | AAPL | $178.50 | +2.15% | - | -' : ''}
+ROWS_FROM_DATA_BLOCKS_HERE
 REPORT_DATA_END
 
 Rules:
 - Section names must be: TOP_GAINERS, TOP_LOSERS, MOST_ACTIVE${trackSentiment ? ', SENTIMENT' : ''}${watchlist.length > 0 ? ', WATCHLIST' : ''}
 - Use "-" for fields that do not apply
 - If a section is NO_DATA or missing, output "SECTION | NO_DATA" (only two columns)
-- Do not invent values; copy exact text from the data blocks`;
+- Do not invent values; copy exact text from the data blocks
+- Replace ROWS_FROM_DATA_BLOCKS_HERE with real rows (do not output placeholder text)
+- Output ONLY the final report plus REPORT_DATA block; no instructions or commentary`;
 
   const reportPrompt = `Compile a Trending Stocks Report.
+
+OUTPUT ONLY THE FINAL REPORT. Do NOT include any instructions, steps, or commentary about missing data, tools, or search results.
+If a required data block is missing or a section has NO_DATA, write "No data available" for that section and continue.
+Do NOT output the required data blocks themselves.
 
 ${watchlist.length > 0 ? `## STEP 1: FETCH WATCHLIST PRICES
 
@@ -543,6 +548,7 @@ WAIT FOR TOOL RESULTS before continuing.
 
 **IMPORTANT:** All stock prices and market data are already available below from earlier stages.
 DO NOT fetch URLs or make additional API calls - use ONLY the data provided here.
+Do NOT mention "search results", "resources", "snippets", or data limitations in the report.
 
 ### Market Movers Data:
 {{fetch-movers_output}}
@@ -573,6 +579,7 @@ Use prices and data from:
 **Never invent placeholders. Only use "Data unavailable" if it appears in the data blocks.**
 **Every price and % in the report MUST match a value in the required data blocks.**
 **If a required block is missing or a section has NO_DATA, write "No data available" for that section.**
+**Do NOT repeat or paraphrase any instructions from this prompt.**
 
 ${useDiscordFormat ? `## DISCORD FORMAT - CLEAN & PROFESSIONAL
 

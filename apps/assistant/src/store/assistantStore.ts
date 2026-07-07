@@ -96,6 +96,38 @@ export interface ActionType {
   avatar_url?: string;
 }
 
+export interface EmailNotificationSettings {
+  enabled: boolean;
+  from: string;
+  to: string;
+  subject: string;
+  smtpUsername: string;
+  smtpHost: string;
+  smtpPort: number;
+  useTls: boolean;
+  password: string;
+}
+
+export interface SlackNotificationSettings {
+  enabled: boolean;
+  webhookUrl: string;
+  channel: string;
+  username: string;
+}
+
+export interface DiscordNotificationSettings {
+  enabled: boolean;
+  webhookUrl: string;
+  username: string;
+  avatarUrl: string;
+}
+
+export interface NotificationSettings {
+  email: EmailNotificationSettings;
+  slack: SlackNotificationSettings;
+  discord: DiscordNotificationSettings;
+}
+
 export interface Action {
   id: string;
   name: string;
@@ -122,6 +154,7 @@ export interface Agent {
   name: string;
   description?: string;
   trigger: TriggerType;
+  notificationSettings?: NotificationSettings;
   // New: stages-based workflow (actions within stage run in parallel, stages run sequentially)
   stages: WorkflowStage[];
   // Legacy: flat actions array (for backward compatibility - will be migrated to stages)

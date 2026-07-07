@@ -118,6 +118,7 @@
       "delete_agent",
       "toggle_agent",
       "execute_agent",
+      "send_execution_output",
       "list_executions",
       "get_execution_details",
       "cancel_execution",

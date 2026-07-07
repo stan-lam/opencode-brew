@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { X, X as XIcon, Plus, Trash2, ChevronDown, ChevronRight, RefreshCw, Layers, Sparkles } from 'lucide-react';
-import { useAssistantStore, Agent, Action, TriggerType, ActionType, WorkflowStage, CombineStrategy, getAgentStages } from '../store/assistantStore';
+import { useAssistantStore, Agent, Action, TriggerType, ActionType, WorkflowStage, CombineStrategy, getAgentStages, NotificationSettings } from '../store/assistantStore';
 import { WorkflowStageEditor } from './WorkflowStageEditor';
 import { TemplateGallery } from './TemplateGallery';
 import { TemplateWizard } from './TemplateWizard';
@@ -39,6 +39,38 @@ const DEFAULT_MODELS: Record<string, string[]> = {
   custom: [],
 };
 
+const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  email: {
+    enabled: false,
+    from: '',
+    to: '',
+    subject: '',
+    smtpUsername: '',
+    smtpHost: 'smtp.gmail.com',
+    smtpPort: 587,
+    useTls: true,
+    password: '',
+  },
+  slack: {
+    enabled: false,
+    webhookUrl: '',
+    channel: '',
+    username: '',
+  },
+  discord: {
+    enabled: false,
+    webhookUrl: '',
+    username: '',
+    avatarUrl: '',
+  },
+};
+
+const cloneNotificationSettings = (settings: NotificationSettings): NotificationSettings => ({
+  email: { ...settings.email },
+  slack: { ...settings.slack },
+  discord: { ...settings.discord },
+});
+
 export function AgentBuilder() {
   const { 
     isEditing, 
@@ -58,6 +90,9 @@ export function AgentBuilder() {
   
   const [name, setName] = useState(existingAgent?.name || '');
   const [description, setDescription] = useState(existingAgent?.description || '');
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(() =>
+    cloneNotificationSettings(existingAgent?.notificationSettings ?? DEFAULT_NOTIFICATION_SETTINGS)
+  );
   const [triggerType, setTriggerType] = useState<string>(existingAgent?.trigger.type || 'manual');
   const [cronExpression, setCronExpression] = useState(
     existingAgent?.trigger.type === 'cron' ? existingAgent.trigger.expression || '' : '0 * * * *'
@@ -287,6 +322,36 @@ export function AgentBuilder() {
     return [];
   });
 
+  const updateEmailSettings = useCallback((updates: Partial<NotificationSettings['email']>) => {
+    setNotificationSettings((prev) => ({
+      ...prev,
+      email: {
+        ...prev.email,
+        ...updates,
+      },
+    }));
+  }, []);
+
+  const updateSlackSettings = useCallback((updates: Partial<NotificationSettings['slack']>) => {
+    setNotificationSettings((prev) => ({
+      ...prev,
+      slack: {
+        ...prev.slack,
+        ...updates,
+      },
+    }));
+  }, []);
+
+  const updateDiscordSettings = useCallback((updates: Partial<NotificationSettings['discord']>) => {
+    setNotificationSettings((prev) => ({
+      ...prev,
+      discord: {
+        ...prev.discord,
+        ...updates,
+      },
+    }));
+  }, []);
+
   const handleClose = () => {
     if (isEditing) {
       setIsEditing(false);
@@ -478,6 +543,7 @@ export function AgentBuilder() {
           actions: flatActions,
           stages: backendStages,
           enabled: existingAgent.enabled,
+          notificationSettings,
         });
         updateAgentInStore({
           ...existingAgent,
@@ -486,6 +552,7 @@ export function AgentBuilder() {
           trigger,
           stages,
           actions: flatActions,
+          notificationSettings,
           updated_at: new Date().toISOString(),
         });
         setIsEditing(false);
@@ -496,9 +563,10 @@ export function AgentBuilder() {
           trigger,
           actions: flatActions,
           stages: backendStages,
+          notificationSettings,
         }) as Agent;
         // Add stages to the returned agent for proper state management
-        addAgent({ ...newAgent, stages });
+        addAgent({ ...newAgent, stages, notificationSettings });
         setIsCreating(false);
       }
     } catch (error) {
@@ -526,16 +594,20 @@ export function AgentBuilder() {
       // Flatten actions for the legacy API
       const flatActions = agentData.stages.flatMap(stage => stage.actions);
       
+      const resolvedNotificationSettings = cloneNotificationSettings(
+        agentData.notificationSettings ?? DEFAULT_NOTIFICATION_SETTINGS
+      );
       const newAgent = await invoke('create_agent', {
         name: agentData.name,
         description: agentData.description || null,
         trigger: agentData.trigger,
         actions: flatActions,
         stages: backendStages,
+        notificationSettings: resolvedNotificationSettings,
       }) as Agent;
       
       // Add the agent with stages
-      addAgent({ ...newAgent, stages: agentData.stages });
+      addAgent({ ...newAgent, stages: agentData.stages, notificationSettings: resolvedNotificationSettings });
       
       setShowTemplateWizard(false);
       setSelectedTemplate(null);
@@ -914,6 +986,197 @@ export function AgentBuilder() {
             />
           </div>
         )}
+
+        <div className={styles.notificationsSection}>
+          <div className={styles.notificationsHeader}>
+            <label>Notifications</label>
+            <span className={styles.hint}>Used as defaults when sending execution output.</span>
+          </div>
+
+          <div className={styles.notificationCard}>
+            <label className={styles.notificationToggle}>
+              <input
+                type="checkbox"
+                checked={notificationSettings.email.enabled}
+                onChange={(e) => updateEmailSettings({ enabled: e.target.checked })}
+              />
+              Email
+            </label>
+            {notificationSettings.email.enabled && (
+              <div className={styles.notificationFields}>
+                <div className={styles.notificationRow}>
+                  <label>From</label>
+                  <input
+                    type="email"
+                    value={notificationSettings.email.from}
+                    onChange={(e) => updateEmailSettings({ from: e.target.value })}
+                    placeholder="you@example.com"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>To</label>
+                  <input
+                    type="email"
+                    value={notificationSettings.email.to}
+                    onChange={(e) => updateEmailSettings({ to: e.target.value })}
+                    placeholder="team@example.com"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>Subject</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.email.subject}
+                    onChange={(e) => updateEmailSettings({ subject: e.target.value })}
+                    placeholder="Execution output"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>SMTP host</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.email.smtpHost}
+                    onChange={(e) => updateEmailSettings({ smtpHost: e.target.value })}
+                    placeholder="smtp.gmail.com"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>SMTP username (optional)</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.email.smtpUsername}
+                    onChange={(e) => updateEmailSettings({ smtpUsername: e.target.value })}
+                    placeholder="you@example.com"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationInline}>
+                  <div className={styles.notificationRow}>
+                    <label>SMTP port</label>
+                    <input
+                      type="number"
+                      value={notificationSettings.email.smtpPort}
+                      onChange={(e) => updateEmailSettings({ smtpPort: Number(e.target.value) || 0 })}
+                      className={styles.input}
+                    />
+                  </div>
+                  <label className={styles.checkboxLabel}>
+                    <input
+                      type="checkbox"
+                      checked={notificationSettings.email.useTls}
+                      onChange={(e) => updateEmailSettings({ useTls: e.target.checked })}
+                    />
+                    Use TLS
+                  </label>
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>Password / app key</label>
+                  <input
+                    type="password"
+                    value={notificationSettings.email.password}
+                    onChange={(e) => updateEmailSettings({ password: e.target.value })}
+                    placeholder="App password"
+                    className={styles.input}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className={styles.notificationCard}>
+            <label className={styles.notificationToggle}>
+              <input
+                type="checkbox"
+                checked={notificationSettings.slack.enabled}
+                onChange={(e) => updateSlackSettings({ enabled: e.target.checked })}
+              />
+              Slack
+            </label>
+            {notificationSettings.slack.enabled && (
+              <div className={styles.notificationFields}>
+                <div className={styles.notificationRow}>
+                  <label>Webhook URL</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.slack.webhookUrl}
+                    onChange={(e) => updateSlackSettings({ webhookUrl: e.target.value })}
+                    placeholder="https://hooks.slack.com/services/..."
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>Channel</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.slack.channel}
+                    onChange={(e) => updateSlackSettings({ channel: e.target.value })}
+                    placeholder="#alerts"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>Username (optional)</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.slack.username}
+                    onChange={(e) => updateSlackSettings({ username: e.target.value })}
+                    placeholder="OpenCodeAssistant"
+                    className={styles.input}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className={styles.notificationCard}>
+            <label className={styles.notificationToggle}>
+              <input
+                type="checkbox"
+                checked={notificationSettings.discord.enabled}
+                onChange={(e) => updateDiscordSettings({ enabled: e.target.checked })}
+              />
+              Discord
+            </label>
+            {notificationSettings.discord.enabled && (
+              <div className={styles.notificationFields}>
+                <div className={styles.notificationRow}>
+                  <label>Webhook URL</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.discord.webhookUrl}
+                    onChange={(e) => updateDiscordSettings({ webhookUrl: e.target.value })}
+                    placeholder="https://discord.com/api/webhooks/..."
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>Username (optional)</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.discord.username}
+                    onChange={(e) => updateDiscordSettings({ username: e.target.value })}
+                    placeholder="OpenCodeAssistant"
+                    className={styles.input}
+                  />
+                </div>
+                <div className={styles.notificationRow}>
+                  <label>Avatar URL (optional)</label>
+                  <input
+                    type="text"
+                    value={notificationSettings.discord.avatarUrl}
+                    onChange={(e) => updateDiscordSettings({ avatarUrl: e.target.value })}
+                    placeholder="https://..."
+                    className={styles.input}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
 
         <div className={styles.actionsSection}>
           <div className={styles.actionsHeader}>

@@ -196,7 +196,7 @@ interface AIState {
 }
 
 const AI_HISTORY_FILE = 'ai-history.json';
-const ENABLE_HISTORY_SAVE = false;
+const ENABLE_HISTORY_SAVE = true;
 const SAVE_HISTORY_DEBOUNCE_MS = 2000;
 const MIN_SAVE_INTERVAL_MS = 8000;
 const STREAM_IDLE_TIMEOUT_MS = 90000;
@@ -1801,6 +1801,7 @@ export const useAIStore = create<AIState>()(
             thinkingStatus: 'Understanding your question...',
           };
         });
+        get().saveWorkspaceHistory();
 
         let responseContent = '';
         const conversationId = conversation.id;

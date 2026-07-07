@@ -420,6 +420,7 @@ pub fn run() {
             commands::scheduler::delete_agent,
             commands::scheduler::toggle_agent,
             commands::scheduler::execute_agent,
+            commands::scheduler::send_execution_output,
             commands::scheduler::list_executions,
             commands::scheduler::get_execution_details,
             commands::scheduler::cancel_execution,
