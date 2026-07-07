@@ -398,11 +398,101 @@ pub struct WorkflowStage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailNotificationSettings {
+    pub enabled: bool,
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    pub smtp_username: String,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub use_tls: bool,
+    pub password: String,
+}
+
+impl Default for EmailNotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            from: String::new(),
+            to: String::new(),
+            subject: String::new(),
+            smtp_username: String::new(),
+            smtp_host: "smtp.gmail.com".to_string(),
+            smtp_port: 587,
+            use_tls: true,
+            password: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackNotificationSettings {
+    pub enabled: bool,
+    pub webhook_url: String,
+    pub channel: String,
+    pub username: String,
+}
+
+impl Default for SlackNotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+            channel: String::new(),
+            username: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscordNotificationSettings {
+    pub enabled: bool,
+    pub webhook_url: String,
+    pub username: String,
+    pub avatar_url: String,
+}
+
+impl Default for DiscordNotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+            username: String::new(),
+            avatar_url: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSettings {
+    pub email: EmailNotificationSettings,
+    pub slack: SlackNotificationSettings,
+    pub discord: DiscordNotificationSettings,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            email: EmailNotificationSettings::default(),
+            slack: SlackNotificationSettings::default(),
+            discord: DiscordNotificationSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
     pub trigger: TriggerType,
+    #[serde(default, rename = "notificationSettings")]
+    pub notification_settings: NotificationSettings,
     // New: stage-based workflow (actions within stage run in parallel, stages run sequentially)
     #[serde(default)]
     pub stages: Vec<WorkflowStage>,
@@ -526,6 +616,7 @@ pub async fn init_scheduler_db(app: AppHandle) -> Result<(), String> {
             description TEXT,
             trigger_json TEXT NOT NULL,
             actions_json TEXT NOT NULL,
+            notification_json TEXT,
             enabled INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -569,6 +660,19 @@ pub async fn init_scheduler_db(app: AppHandle) -> Result<(), String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(agents)")
+        .map_err(|e| e.to_string())?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !columns.iter().any(|col| col == "notification_json") {
+        conn.execute("ALTER TABLE agents ADD COLUMN notification_json TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
     
     Ok(())
 }
@@ -581,7 +685,7 @@ pub async fn list_agents(app: AppHandle) -> Result<Vec<Agent>, String> {
     
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, description, trigger_json, actions_json, enabled, created_at, updated_at 
+            "SELECT id, name, description, trigger_json, actions_json, notification_json, enabled, created_at, updated_at 
              FROM agents ORDER BY name"
         )
         .map_err(|e| e.to_string())?;
@@ -590,6 +694,7 @@ pub async fn list_agents(app: AppHandle) -> Result<Vec<Agent>, String> {
         .query_map([], |row| {
             let trigger_json: String = row.get(3)?;
             let actions_json: String = row.get(4)?;
+            let notification_json: Option<String> = row.get(5)?;
             
             // Try to parse stages first, fall back to actions for legacy data
             let stages: Vec<WorkflowStage> = serde_json::from_str(&actions_json).unwrap_or_default();
@@ -599,16 +704,21 @@ pub async fn list_agents(app: AppHandle) -> Result<Vec<Agent>, String> {
                 Vec::new()
             };
             
+            let notification_settings: NotificationSettings = notification_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+
             Ok(Agent {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 description: row.get(2)?,
                 trigger: serde_json::from_str(&trigger_json).unwrap_or(TriggerType::Manual),
+                notification_settings,
                 stages,
                 actions,
-                enabled: row.get::<_, i32>(5)? != 0,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -619,6 +729,7 @@ pub async fn list_agents(app: AppHandle) -> Result<Vec<Agent>, String> {
 }
 
 #[command]
+#[allow(non_snake_case)]
 pub async fn create_agent(
     app: AppHandle,
     name: String,
@@ -626,12 +737,15 @@ pub async fn create_agent(
     trigger: TriggerType,
     actions: Vec<Action>,
     stages: Option<Vec<WorkflowStage>>,
+    notificationSettings: Option<NotificationSettings>,
 ) -> Result<Agent, String> {
     let conn = get_connection(&app).await?;
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     
     let trigger_json = serde_json::to_string(&trigger).map_err(|e| e.to_string())?;
+    let notification_settings = notificationSettings.unwrap_or_default();
+    let notification_json = serde_json::to_string(&notification_settings).map_err(|e| e.to_string())?;
     
     // If stages are provided, store them; otherwise store flat actions for backward compatibility
     let (final_stages, actions_json) = if let Some(ref s) = stages {
@@ -673,9 +787,18 @@ pub async fn create_agent(
     };
     
     conn.execute(
-        "INSERT INTO agents (id, name, description, trigger_json, actions_json, enabled, created_at, updated_at) 
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
-        params![&id, &name, &description, &trigger_json, &actions_json, &now, &now],
+        "INSERT INTO agents (id, name, description, trigger_json, actions_json, notification_json, enabled, created_at, updated_at) 
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
+        params![
+            &id,
+            &name,
+            &description,
+            &trigger_json,
+            &actions_json,
+            &notification_json,
+            &now,
+            &now
+        ],
     )
     .map_err(|e| e.to_string())?;
     
@@ -684,6 +807,7 @@ pub async fn create_agent(
         name,
         description,
         trigger,
+        notification_settings,
         stages: final_stages,
         actions,
         enabled: true,
@@ -693,6 +817,7 @@ pub async fn create_agent(
 }
 
 #[command]
+#[allow(non_snake_case)]
 pub async fn update_agent(
     app: AppHandle,
     id: String,
@@ -702,11 +827,14 @@ pub async fn update_agent(
     actions: Vec<Action>,
     stages: Option<Vec<WorkflowStage>>,
     enabled: bool,
+    notificationSettings: Option<NotificationSettings>,
 ) -> Result<(), String> {
     let conn = get_connection(&app).await?;
     let now = Utc::now().to_rfc3339();
     
     let trigger_json = serde_json::to_string(&trigger).map_err(|e| e.to_string())?;
+    let notification_settings = notificationSettings.unwrap_or_default();
+    let notification_json = serde_json::to_string(&notification_settings).map_err(|e| e.to_string())?;
     
     // If stages are provided, store them; otherwise store flat actions
     let actions_json = if let Some(ref s) = stages {
@@ -720,8 +848,17 @@ pub async fn update_agent(
     };
     
     conn.execute(
-        "UPDATE agents SET name = ?1, description = ?2, trigger_json = ?3, actions_json = ?4, enabled = ?5, updated_at = ?6 WHERE id = ?7",
-        params![&name, &description, &trigger_json, &actions_json, enabled as i32, &now, &id],
+        "UPDATE agents SET name = ?1, description = ?2, trigger_json = ?3, actions_json = ?4, notification_json = ?5, enabled = ?6, updated_at = ?7 WHERE id = ?8",
+        params![
+            &name,
+            &description,
+            &trigger_json,
+            &actions_json,
+            &notification_json,
+            enabled as i32,
+            &now,
+            &id
+        ],
     )
     .map_err(|e| e.to_string())?;
     
@@ -762,12 +899,13 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
     // Get agent
     let agent: Agent = conn
         .query_row(
-            "SELECT id, name, description, trigger_json, actions_json, enabled, created_at, updated_at 
+            "SELECT id, name, description, trigger_json, actions_json, notification_json, enabled, created_at, updated_at 
              FROM agents WHERE id = ?1",
             [&agentId],
             |row| {
                 let trigger_json: String = row.get(3)?;
                 let actions_json: String = row.get(4)?;
+                let notification_json: Option<String> = row.get(5)?;
                 
                 // Try to parse stages first, fall back to actions for legacy data
                 let stages: Vec<WorkflowStage> = serde_json::from_str(&actions_json).unwrap_or_default();
@@ -777,16 +915,21 @@ pub async fn execute_agent(app: AppHandle, agentId: String) -> Result<ExecutionL
                     Vec::new()
                 };
                 
+                let notification_settings: NotificationSettings = notification_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default();
+
                 Ok(Agent {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     description: row.get(2)?,
                     trigger: serde_json::from_str(&trigger_json).unwrap_or(TriggerType::Manual),
+                    notification_settings,
                     stages,
                     actions,
-                    enabled: row.get::<_, i32>(5)? != 0,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
+                    enabled: row.get::<_, i32>(6)? != 0,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
                 })
             },
         )
@@ -1361,7 +1504,18 @@ async fn execute_action(
             execute_save_file(path, content, append.unwrap_or(false)).await
         }
         ActionType::SendEmail { from, to, subject, body, smtp_host, smtp_port, use_tls, password } => {
-            execute_send_email(from, to, subject, body, smtp_host, *smtp_port, *use_tls, password).await
+            execute_send_email(
+                from,
+                to,
+                subject,
+                body,
+                None,
+                smtp_host,
+                *smtp_port,
+                *use_tls,
+                password,
+            )
+            .await
         }
         ActionType::SendSlack { webhook_url, channel, message, username } => {
             execute_send_slack(webhook_url, channel, message, username.as_deref()).await
@@ -2270,17 +2424,345 @@ async fn execute_tools_in_response_with_results(response: &str) -> (String, Vec<
 
 // ============= Notification Executors =============
 
+fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn render_inline_markdown(input: &str) -> String {
+    let mut text = escape_html(input);
+
+    let code_re = Regex::new(r"`([^`]+)`").unwrap();
+    let mut code_spans: Vec<String> = Vec::new();
+    text = code_re
+        .replace_all(&text, |caps: &regex::Captures| {
+            let idx = code_spans.len();
+            code_spans.push(format!("<code>{}</code>", &caps[1]));
+            format!("{{{{CODE_SPAN_{}}}}}", idx)
+        })
+        .to_string();
+
+    let link_re = Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap();
+    text = link_re
+        .replace_all(&text, |caps: &regex::Captures| {
+            format!("<a href=\"{}\">{}</a>", &caps[2], &caps[1])
+        })
+        .to_string();
+
+    let bold_re = Regex::new(r"\*\*([^*]+)\*\*").unwrap();
+    text = bold_re.replace_all(&text, "<strong>$1</strong>").to_string();
+    let bold_alt_re = Regex::new(r"__([^_]+)__").unwrap();
+    text = bold_alt_re.replace_all(&text, "<strong>$1</strong>").to_string();
+
+    let italic_re = Regex::new(r"\*([^*\n]+)\*").unwrap();
+    text = italic_re.replace_all(&text, "<em>$1</em>").to_string();
+    let italic_alt_re = Regex::new(r"_([^_\n]+)_").unwrap();
+    text = italic_alt_re.replace_all(&text, "<em>$1</em>").to_string();
+
+    for (idx, span) in code_spans.iter().enumerate() {
+        text = text.replace(&format!("{{{{CODE_SPAN_{}}}}}", idx), span);
+    }
+
+    text
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.contains('-') {
+        return false;
+    }
+    let cleaned: String = trimmed
+        .chars()
+        .filter(|c| *c != '|' && !c.is_whitespace())
+        .collect();
+    cleaned.chars().all(|c| c == '-' || c == ':')
+}
+
+fn parse_table_row(line: &str) -> Vec<String> {
+    let trimmed = line.trim().trim_matches('|');
+    trimmed
+        .split('|')
+        .map(|cell| render_inline_markdown(cell.trim()))
+        .collect()
+}
+
+fn markdown_to_email_html(markdown: &str) -> String {
+    let mut html = String::new();
+    let normalized = markdown
+        .replace("$\\rightarrow$", "→")
+        .replace("$rightarrow$", "→")
+        .replace("\\rightarrow", "→");
+    let mut lines = normalized.lines().peekable();
+    let mut paragraph_lines: Vec<String> = Vec::new();
+    let mut list_type: Option<&str> = None;
+    let mut in_code = false;
+    let mut code_lines: Vec<String> = Vec::new();
+    let mut blockquote_lines: Vec<String> = Vec::new();
+    let ordered_re = Regex::new(r"^\d+\.\s+").unwrap();
+
+    let mut flush_paragraph = |target: &mut String, lines: &mut Vec<String>| {
+        if !lines.is_empty() {
+            let joined = lines.join(" ");
+            target.push_str(&format!("<p>{}</p>", render_inline_markdown(&joined)));
+            lines.clear();
+        }
+    };
+
+    let mut close_list = |target: &mut String, list_type: &mut Option<&str>| {
+        if let Some(list) = list_type.take() {
+            target.push_str(&format!("</{}>", list));
+        }
+    };
+
+    let mut flush_blockquote = |target: &mut String, lines: &mut Vec<String>| {
+        if !lines.is_empty() {
+            let inner = lines
+                .iter()
+                .map(|line| format!("<p>{}</p>", render_inline_markdown(line)))
+                .collect::<Vec<String>>()
+                .join("");
+            target.push_str(&format!("<blockquote>{}</blockquote>", inner));
+            lines.clear();
+        }
+    };
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_end();
+
+        if in_code {
+            if trimmed.trim_start().starts_with("```") {
+                let code = escape_html(&code_lines.join("\n"));
+                html.push_str(&format!("<pre><code>{}</code></pre>", code));
+                code_lines.clear();
+                in_code = false;
+            } else {
+                code_lines.push(trimmed.to_string());
+            }
+            continue;
+        }
+
+        if trimmed.trim_start().starts_with("```") {
+            flush_paragraph(&mut html, &mut paragraph_lines);
+            close_list(&mut html, &mut list_type);
+            flush_blockquote(&mut html, &mut blockquote_lines);
+            in_code = true;
+            continue;
+        }
+
+        if trimmed.trim().is_empty() {
+            flush_paragraph(&mut html, &mut paragraph_lines);
+            close_list(&mut html, &mut list_type);
+            flush_blockquote(&mut html, &mut blockquote_lines);
+            continue;
+        }
+
+        if trimmed.starts_with('>') {
+            flush_paragraph(&mut html, &mut paragraph_lines);
+            close_list(&mut html, &mut list_type);
+            let content = trimmed.trim_start_matches('>').trim_start();
+            blockquote_lines.push(content.to_string());
+            continue;
+        } else {
+            flush_blockquote(&mut html, &mut blockquote_lines);
+        }
+
+        if trimmed.starts_with('#') {
+            flush_paragraph(&mut html, &mut paragraph_lines);
+            close_list(&mut html, &mut list_type);
+            let level = trimmed.chars().take_while(|c| *c == '#').count().min(4);
+            let text = trimmed[level..].trim();
+            html.push_str(&format!(
+                "<h{lvl}>{}</h{lvl}>",
+                render_inline_markdown(text),
+                lvl = level
+            ));
+            continue;
+        }
+
+        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+            flush_paragraph(&mut html, &mut paragraph_lines);
+            close_list(&mut html, &mut list_type);
+            html.push_str("<hr />");
+            continue;
+        }
+
+        if trimmed.contains('|') {
+            if let Some(next_line) = lines.peek() {
+                if is_table_separator(next_line) {
+                    flush_paragraph(&mut html, &mut paragraph_lines);
+                    close_list(&mut html, &mut list_type);
+                    let header = parse_table_row(trimmed);
+                    lines.next();
+                    let mut rows: Vec<Vec<String>> = Vec::new();
+                    while let Some(row_line) = lines.peek() {
+                        let row_trimmed = row_line.trim();
+                        if row_trimmed.is_empty() || !row_trimmed.contains('|') {
+                            break;
+                        }
+                        rows.push(parse_table_row(row_trimmed));
+                        lines.next();
+                    }
+                    html.push_str("<table><thead><tr>");
+                    for cell in header {
+                        html.push_str(&format!("<th>{}</th>", cell));
+                    }
+                    html.push_str("</tr></thead><tbody>");
+                    for row in rows {
+                        html.push_str("<tr>");
+                        for cell in row {
+                            html.push_str(&format!("<td>{}</td>", cell));
+                        }
+                        html.push_str("</tr>");
+                    }
+                    html.push_str("</tbody></table>");
+                    continue;
+                }
+            }
+        }
+
+        let trimmed_start = trimmed.trim_start();
+        let is_unordered = trimmed_start.starts_with("- ")
+            || trimmed_start.starts_with("* ")
+            || trimmed_start.starts_with("+ ");
+        let is_ordered = ordered_re.is_match(trimmed_start);
+
+        if is_unordered || is_ordered {
+            flush_paragraph(&mut html, &mut paragraph_lines);
+            let desired_list = if is_ordered { "ol" } else { "ul" };
+            if list_type != Some(desired_list) {
+                close_list(&mut html, &mut list_type);
+                html.push_str(&format!("<{}>", desired_list));
+                list_type = Some(desired_list);
+            }
+            let item_text = if is_ordered {
+                ordered_re.replace(trimmed_start, "").to_string()
+            } else {
+                trimmed_start[2..].to_string()
+            };
+            html.push_str(&format!("<li>{}</li>", render_inline_markdown(item_text.trim())));
+            continue;
+        }
+
+        close_list(&mut html, &mut list_type);
+        paragraph_lines.push(trimmed.to_string());
+    }
+
+    if in_code && !code_lines.is_empty() {
+        let code = escape_html(&code_lines.join("\n"));
+        html.push_str(&format!("<pre><code>{}</code></pre>", code));
+    }
+    flush_paragraph(&mut html, &mut paragraph_lines);
+    close_list(&mut html, &mut list_type);
+    flush_blockquote(&mut html, &mut blockquote_lines);
+
+    html
+}
+
+fn build_email_html(body: &str) -> String {
+    let content = markdown_to_email_html(body);
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {{
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #111827;
+        background: #ffffff;
+        margin: 0;
+        padding: 24px;
+      }}
+      h1, h2, h3, h4 {{
+        color: #111827;
+        margin: 18px 0 8px;
+      }}
+      p {{
+        margin: 8px 0;
+        line-height: 1.6;
+      }}
+      code {{
+        font-family: "SF Mono", SFMono-Regular, ui-monospace, monospace;
+        background: #f3f4f6;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }}
+      pre {{
+        background: #f3f4f6;
+        padding: 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+      }}
+      pre code {{
+        padding: 0;
+        background: transparent;
+      }}
+      table {{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 0.95em;
+      }}
+      th, td {{
+        border: 1px solid #e5e7eb;
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+      }}
+      th {{
+        background: #f9fafb;
+        font-weight: 600;
+      }}
+      blockquote {{
+        margin: 12px 0;
+        padding: 8px 16px;
+        border-left: 3px solid #7c3aed;
+        background: #f5f3ff;
+        color: #4b5563;
+      }}
+      hr {{
+        border: none;
+        border-top: 1px solid #e5e7eb;
+        margin: 16px 0;
+      }}
+      a {{
+        color: #7c3aed;
+        text-decoration: none;
+      }}
+    </style>
+  </head>
+  <body>
+    {content}
+  </body>
+</html>"#,
+        content = content
+    )
+}
+
 async fn execute_send_email(
     from: &str,
     to: &str,
     subject: &str,
     body: &str,
+    smtp_username: Option<&str>,
     smtp_host: &str,
     smtp_port: u16,
     use_tls: bool,
     password: &str,
 ) -> Result<String, String> {
-    use lettre::message::Message;
+    use lettre::message::header::ContentType;
+    use lettre::message::{Message, MultiPart, SinglePart};
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{SmtpTransport, Transport};
 
@@ -2288,14 +2770,34 @@ async fn execute_send_email(
         return Err("SMTP host and password are required".to_string());
     }
 
+    let html_body = build_email_html(body);
+    let from_mailbox: lettre::message::Mailbox = from
+        .parse()
+        .map_err(|e| format!("Invalid 'from' address: {}", e))?;
+    let to_mailbox: lettre::message::Mailbox = to
+        .parse()
+        .map_err(|e| format!("Invalid 'to' address: {}", e))?;
+    let smtp_username = smtp_username
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| from_mailbox.email.to_string());
+
     let email = Message::builder()
-        .from(from.parse().map_err(|e| format!("Invalid 'from' address: {}", e))?)
-        .to(to.parse().map_err(|e| format!("Invalid 'to' address: {}", e))?)
+        .from(from_mailbox)
+        .to(to_mailbox)
         .subject(subject)
-        .body(body.to_string())
+        .multipart(
+            MultiPart::alternative()
+                .singlepart(SinglePart::plain(body.to_string()))
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(html_body),
+                ),
+        )
         .map_err(|e| format!("Failed to build email: {}", e))?;
 
-    let credentials = Credentials::new(from.to_string(), password.to_string());
+    let credentials = Credentials::new(smtp_username, password.trim().to_string());
 
     let transport = if use_tls {
         SmtpTransport::starttls_relay(smtp_host)
@@ -2632,6 +3134,123 @@ async fn execute_send_discord(
 }
 
 // ============= Execution History =============
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputEmailRequest {
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    pub smtp_username: Option<String>,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub use_tls: bool,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSlackRequest {
+    pub webhook_url: String,
+    pub channel: String,
+    pub message: String,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDiscordRequest {
+    pub webhook_url: String,
+    pub content: String,
+    pub username: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDeliveryRequest {
+    pub email: Option<OutputEmailRequest>,
+    pub slack: Option<OutputSlackRequest>,
+    pub discord: Option<OutputDiscordRequest>,
+}
+
+#[command]
+#[allow(non_snake_case)]
+pub async fn send_execution_output(request: OutputDeliveryRequest) -> Result<Vec<String>, String> {
+    let mut results = Vec::new();
+
+    if let Some(email) = request.email {
+        if email.from.trim().is_empty() {
+            return Err("Email from is required".to_string());
+        }
+        if email.to.trim().is_empty() {
+            return Err("Email to is required".to_string());
+        }
+        if email.smtp_host.trim().is_empty() {
+            return Err("Email SMTP host is required".to_string());
+        }
+        if email.password.trim().is_empty() {
+            return Err("Email SMTP password is required".to_string());
+        }
+        results.push(
+            execute_send_email(
+                &email.from,
+                &email.to,
+                &email.subject,
+                &email.body,
+                email.smtp_username.as_deref(),
+                &email.smtp_host,
+                email.smtp_port,
+                email.use_tls,
+                &email.password,
+            )
+            .await?,
+        );
+    }
+
+    if let Some(slack) = request.slack {
+        if slack.webhook_url.trim().is_empty() {
+            return Err("Slack webhook URL is required".to_string());
+        }
+        if slack.channel.trim().is_empty() {
+            return Err("Slack channel is required".to_string());
+        }
+        let username = slack.username.as_deref().filter(|value| !value.trim().is_empty());
+        results.push(
+            execute_send_slack(
+                &slack.webhook_url,
+                &slack.channel,
+                &slack.message,
+                username,
+            )
+            .await?,
+        );
+    }
+
+    if let Some(discord) = request.discord {
+        if discord.webhook_url.trim().is_empty() {
+            return Err("Discord webhook URL is required".to_string());
+        }
+        let username = discord.username.as_deref().filter(|value| !value.trim().is_empty());
+        let avatar_url = discord.avatar_url.as_deref().filter(|value| !value.trim().is_empty());
+        results.push(
+            execute_send_discord(
+                &discord.webhook_url,
+                &discord.content,
+                username,
+                avatar_url,
+            )
+            .await?,
+        );
+    }
+
+    if results.is_empty() {
+        return Err("No delivery targets configured".to_string());
+    }
+
+    Ok(results)
+}
 
 #[command]
 #[allow(non_snake_case)]

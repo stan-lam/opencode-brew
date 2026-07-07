@@ -4,6 +4,17 @@ import { AgentTemplate, TemplateInput, TemplateInputGroup, DependsOnCondition } 
 import { Agent } from '../store/assistantStore';
 import styles from './TemplateWizard.module.css';
 
+const getActiveTravelMethod = (configState: Record<string, any>): string | undefined => {
+  switch (configState.tripType) {
+    case 'multi':
+      return configState.travelMethodMulti;
+    case 'cruise':
+      return configState.travelMethodCruise;
+    default:
+      return configState.travelMethod;
+  }
+};
+
 const openSaveDialog = async (options: { 
   title?: string; 
   filters?: { name: string; extensions: string[] }[];
@@ -39,6 +50,7 @@ export function TemplateWizard({ template, onClose, onComplete }: TemplateWizard
         }
       });
     });
+    initial.activeTravelMethod = getActiveTravelMethod(initial);
     return initial;
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -155,7 +167,13 @@ export function TemplateWizard({ template, onClose, onComplete }: TemplateWizard
   }, [config, template, validateCurrentStep, onComplete]);
 
   const handleChange = useCallback((id: string, value: any) => {
-    setConfig(prev => ({ ...prev, [id]: value }));
+    setConfig(prev => {
+      const next = { ...prev, [id]: value };
+      if (id === 'tripType' || id === 'travelMethod' || id === 'travelMethodMulti' || id === 'travelMethodCruise') {
+        next.activeTravelMethod = getActiveTravelMethod(next);
+      }
+      return next;
+    });
     if (errors[id]) {
       setErrors(prev => {
         const next = { ...prev };

@@ -177,6 +177,80 @@
   margin-top: 24px;
 }
 
+.notificationsSection {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.notificationsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notificationsHeader label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.notificationCard {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.notificationToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notificationToggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.notificationFields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.notificationRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notificationRow label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.notificationInline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.notificationInline .notificationRow {
+  flex: 1;
+  min-width: 140px;
+}
+
 .actionsHeader {
   display: flex;
   justify-content: space-between;
