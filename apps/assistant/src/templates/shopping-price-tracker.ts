@@ -247,12 +247,12 @@ Output ONLY tool tags and nothing else. Do not add commentary.
 ${urls.length > 0 ? `
 ### For Product URLs
 Output these fetch calls:
-${urls.map(url => `<fetch_url url="${url}" />`).join('\n')}
+${urls.map((url: string) => `<fetch_url url="${url}" />`).join('\n')}
 ` : ''}
 ${searches.length > 0 ? `
 ### For Search Terms
 Output search calls to find product page URLs:
-${searches.map(term => `<search_web query="${term} site:apple.com OR site:amazon.com OR site:walmart.com OR site:bestbuy.com OR site:target.com" />`).join('\n')}
+${searches.map((term: string) => `<search_web query="${term} site:apple.com OR site:amazon.com OR site:walmart.com OR site:bestbuy.com OR site:target.com" />`).join('\n')}
 ` : ''}
 
 After outputting tool tags, STOP.

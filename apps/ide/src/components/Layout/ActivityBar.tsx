@@ -2,11 +2,10 @@ import {
   Files,
   Search,
   GitBranch,
-  MessageSquare,
+  GitPullRequest,
   Settings,
   History,
   Terminal,
-  Puzzle,
   FlaskConical,
 } from 'lucide-react';
 import { useLayoutStore, SidePanelTab, BottomPanelTab } from '../../store/layoutStore';
@@ -23,17 +22,20 @@ const activityItems: ActivityItem[] = [
   { id: 'explorer', icon: <Files size={22} />, title: 'Explorer (⌘1)', position: 'side' },
   { id: 'search', icon: <Search size={22} />, title: 'Search (⌘⇧F)', position: 'side' },
   { id: 'git', icon: <GitBranch size={22} />, title: 'Source Control (⌘⇧G)', position: 'side' },
-  { id: 'ai', icon: <MessageSquare size={22} />, title: 'AI Assistant (⌘⇧A)', position: 'side' },
+  { id: 'codeReview', icon: <GitPullRequest size={22} />, title: 'Code Review', position: 'side' },
   { id: 'test', icon: <FlaskConical size={22} />, title: 'Test (⌘⇧T)', position: 'side' },
   { id: 'history', icon: <History size={22} />, title: 'Local History', position: 'side' },
-  { id: 'plugins', icon: <Puzzle size={22} />, title: 'Plugins', position: 'side' },
 ];
 
 const bottomItems: ActivityItem[] = [
   { id: 'terminal', icon: <Terminal size={22} />, title: 'Terminal (⌘`)', position: 'bottom' },
 ];
 
-export function ActivityBar() {
+interface ActivityBarProps {
+  variant?: 'vertical' | 'horizontal';
+}
+
+export function ActivityBar({ variant = 'vertical' }: ActivityBarProps) {
   const {
     activeSideTab,
     activeBottomTab,
@@ -68,8 +70,10 @@ export function ActivityBar() {
     }
   };
 
+  const isHorizontal = variant === 'horizontal';
+
   return (
-    <div className={styles.activityBar}>
+    <div className={`${styles.activityBar} ${isHorizontal ? styles.horizontal : ''}`}>
       <div className={styles.topItems}>
         {activityItems.map((item) => (
           <button

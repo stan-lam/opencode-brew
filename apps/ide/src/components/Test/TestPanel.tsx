@@ -37,6 +37,8 @@ export function TestPanel() {
     isCreatingTests,
     isFetchingChanges,
     customInstructions,
+    allowOverwrite,
+    overwriteAllInBatch,
     error,
     lastFetchedAt,
     analysisProgress,
@@ -56,6 +58,8 @@ export function TestPanel() {
     fetchPendingChanges,
     analyzeChanges,
     setCustomInstructions,
+    setAllowOverwrite,
+    setOverwriteAllInBatch,
     toggleTestSelection,
     selectAllTests,
     deselectAllTests,
@@ -419,6 +423,28 @@ export function TestPanel() {
             rows={2}
           />
         </div>
+      <div className={styles.overwriteOption}>
+        <label className={styles.overwriteLabel}>
+          <input
+            type="checkbox"
+            checked={allowOverwrite}
+            onChange={(e) => setAllowOverwrite(e.target.checked)}
+            disabled={isLoading}
+          />
+          <span>Allow overwriting existing test files (asks each time)</span>
+        </label>
+      </div>
+      <div className={styles.overwriteOption}>
+        <label className={styles.overwriteLabel}>
+          <input
+            type="checkbox"
+            checked={overwriteAllInBatch}
+            onChange={(e) => setOverwriteAllInBatch(e.target.checked)}
+            disabled={isLoading || !allowOverwrite}
+          />
+          <span>Overwrite all existing test files in this batch</span>
+        </label>
+      </div>
 
         {isSecurityScanning && (
           <div className={styles.progressSection}>
@@ -539,6 +565,7 @@ export function TestPanel() {
                           />
                           {file.creationStatus === 'created' && <Check size={14} className={styles.statusIconCreated} />}
                           {file.creationStatus === 'skipped' && <AlertTriangle size={14} className={styles.statusIconSkipped} />}
+                          {file.creationStatus === 'error' && <X size={14} className={styles.statusIconError} />}
                           {file.creationStatus === 'pending' && <RefreshCw size={14} className={`${styles.statusIconPending} ${styles.spinner}`} />}
                           <span className={styles.testFileName}>{file.path}</span>
                           <span className={styles.testCount}>
@@ -547,6 +574,11 @@ export function TestPanel() {
                         </label>
                         {file.creationStatus === 'skipped' && file.creationMessage && (
                           <div className={styles.skipReasonText}>
+                            {file.creationMessage}
+                          </div>
+                        )}
+                        {file.creationStatus === 'error' && file.creationMessage && (
+                          <div className={styles.errorReasonText}>
                             {file.creationMessage}
                           </div>
                         )}

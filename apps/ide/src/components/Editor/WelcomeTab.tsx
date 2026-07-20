@@ -8,7 +8,7 @@ import styles from './WelcomeTab.module.css';
 
 export function WelcomeTab() {
   const { recentWorkspaces, openFolder, currentWorkspace } = useWorkspaceStore();
-  const { setActiveSideTab } = useLayoutStore();
+  const { setActiveSideTab, setShowAIPanel } = useLayoutStore();
 
   const handleOpenFolder = async () => {
     console.log('Opening folder dialog...');
@@ -68,7 +68,7 @@ export function WelcomeTab() {
                   <Search size={18} />
                   <span>Search in Files</span>
                 </button>
-                <button className={styles.action} onClick={() => setActiveSideTab('ai')}>
+                <button className={styles.action} onClick={() => setShowAIPanel(true)}>
                   <MessageSquare size={18} />
                   <span>AI Assistant</span>
                 </button>
@@ -118,7 +118,7 @@ export function WelcomeTab() {
                   <Folder size={20} />
                   <div>
                     <h3>Open a file</h3>
-                    <p>Click on the Explorer icon or press <kbd>⌘</kbd><kbd>P</kbd> for quick open</p>
+                    <p>Use the Explorer panel on the left or press <kbd>⌘</kbd><kbd>P</kbd> for quick open</p>
                   </div>
                 </div>
                 <div className={styles.feature}>

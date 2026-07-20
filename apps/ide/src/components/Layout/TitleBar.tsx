@@ -1,10 +1,12 @@
-import { Plus } from 'lucide-react';
+import { FileText, MessageSquare, Plus } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { useWorkspaceStore } from '../../store/workspaceStore';
+import { useLayoutStore } from '../../store/layoutStore';
 import styles from './TitleBar.module.css';
 
 export function TitleBar() {
   const { currentWorkspace } = useWorkspaceStore();
+  const { showAIPanel, showEditorPanel, toggleAIPanel, toggleEditorPanel } = useLayoutStore();
 
   const workspaceName = currentWorkspace?.name || 'OpenCodeBrew';
   const workspacePath = currentWorkspace?.rootPath || '';
@@ -28,6 +30,20 @@ export function TitleBar() {
         )}
       </div>
       <div className={styles.actions}>
+        <button
+          className={`${styles.actionButton} ${showAIPanel ? styles.actionButtonActive : ''}`}
+          onClick={toggleAIPanel}
+          title={showAIPanel ? 'Hide AI Panel' : 'Show AI Panel'}
+        >
+          <MessageSquare size={14} />
+        </button>
+        <button
+          className={`${styles.actionButton} ${showEditorPanel ? styles.actionButtonActive : ''}`}
+          onClick={toggleEditorPanel}
+          title={showEditorPanel ? 'Hide Editor' : 'Show Editor'}
+        >
+          <FileText size={14} />
+        </button>
         <button 
           className={styles.actionButton} 
           onClick={handleNewWindow}

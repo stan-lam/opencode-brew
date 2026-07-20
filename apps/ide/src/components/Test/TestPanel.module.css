@@ -256,10 +256,14 @@
 .quickActions {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  align-items: stretch;
 }
 
 .quickActionBtn {
-  flex: 1;
+  flex: 1 1 140px;
+  min-width: 120px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -272,6 +276,7 @@
   font-size: var(--font-size-xs);
   cursor: pointer;
   transition: all var(--transition-fast);
+  white-space: nowrap;
 }
 
 .quickActionBtn:hover:not(:disabled) {
@@ -316,6 +321,23 @@
 .instructionsInput:focus {
   outline: none;
   border-color: var(--accent-blue);
+}
+
+.overwriteOption {
+  margin-top: 6px;
+}
+
+.overwriteLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.overwriteLabel input {
+  width: 14px;
+  height: 14px;
 }
 
 /* AI Progress Section */
@@ -462,6 +484,10 @@
   opacity: 0.7;
 }
 
+.statusError {
+  opacity: 0.7;
+}
+
 .statusIconCreated {
   color: var(--accent-green);
   flex-shrink: 0;
@@ -469,6 +495,11 @@
 
 .statusIconSkipped {
   color: var(--accent-yellow);
+  flex-shrink: 0;
+}
+
+.statusIconError {
+  color: var(--accent-red);
   flex-shrink: 0;
 }
 
@@ -500,6 +531,16 @@
   background-color: rgba(251, 191, 36, 0.1);
   border-radius: var(--radius-sm);
   border-left: 2px solid var(--accent-yellow);
+}
+
+.errorReasonText {
+  margin-left: 38px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--accent-red);
+  background-color: rgba(239, 68, 68, 0.1);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--accent-red);
 }
 
 /* Creation Progress */
@@ -819,7 +860,8 @@
 /* Security Scan Wrapper and Scope Menu */
 .securityScanWrapper {
   position: relative;
-  flex: 1;
+  flex: 1 1 140px;
+  min-width: 120px;
 }
 
 .scopeMenu {

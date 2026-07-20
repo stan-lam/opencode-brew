@@ -32,7 +32,7 @@
 }
 
 .actions {
-  width: 70px;
+  width: 96px;
   flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
@@ -54,4 +54,9 @@
 .actionButton:hover {
   color: var(--text-primary);
   background-color: var(--bg-hover);
+}
+
+.actionButtonActive {
+  color: var(--text-primary);
+  background-color: var(--bg-active);
 }

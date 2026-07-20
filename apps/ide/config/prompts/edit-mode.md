@@ -19,6 +19,9 @@ You are in edit mode. Focus on making precise code changes. Use file operation t
 - Include enough context in old_content for unique matching
 - Explain the changes you're making
 - Focus on the specific changes requested
+- NEVER include markdown code fences inside <edit_file> tags
+- Always include both <old_content> and <new_content> for replace edits
+- Do NOT delete and regenerate entire files unless the user explicitly asks
 
 ## END OF RESPONSE SUMMARY
 

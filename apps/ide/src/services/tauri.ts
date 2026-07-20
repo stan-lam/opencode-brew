@@ -118,6 +118,16 @@ export interface DiffSinceResult {
   total_deletions: number;
 }
 
+export interface GitHubPullRequest {
+  number: number;
+  title: string;
+  author: string;
+  updated_at: string;
+  head_ref: string;
+  base_ref: string;
+  draft: boolean;
+}
+
 export interface MessageAttachment {
   id: string;
   type: 'image' | 'file';
@@ -149,8 +159,28 @@ export interface CopilotDeviceCode {
   interval: number;
 }
 
+export interface CopilotAccount {
+  host: string;
+  user: string;
+  source: string;
+  display_name?: string;
+  display_error?: string;
+}
+
+export interface CopilotCachedAccount {
+  host: string;
+  username: string;
+  source: string;
+  last_used?: string;
+}
+
 export interface CopilotLoginStatus {
   logged_in: boolean;
+}
+
+export interface CopilotOAuthStartResponse {
+  authorize_url: string;
+  state: string;
 }
 
 export interface CopilotBillingInfo {
@@ -410,6 +440,53 @@ export const git = {
   },
 };
 
+// GitHub operations
+export const github = {
+  listPullRequests: async (
+    owner: string,
+    repo: string,
+    token: string,
+    apiBase?: string
+  ): Promise<GitHubPullRequest[]> => {
+    const invoke = await getInvoke();
+    return invoke('github_list_pull_requests', { owner, repo, token, apiBase });
+  },
+
+  pullRequestDiff: async (
+    owner: string,
+    repo: string,
+    prNumber: number,
+    token: string,
+    apiBase?: string
+  ): Promise<string> => {
+    const invoke = await getInvoke();
+    return invoke('github_pull_request_diff', { owner, repo, prNumber, token, apiBase });
+  },
+};
+
+export const gitlab = {
+  listMergeRequests: async (
+    owner: string,
+    repo: string,
+    token: string,
+    apiBase?: string
+  ): Promise<GitHubPullRequest[]> => {
+    const invoke = await getInvoke();
+    return invoke('gitlab_list_merge_requests', { owner, repo, token, apiBase });
+  },
+
+  mergeRequestDiff: async (
+    owner: string,
+    repo: string,
+    mrNumber: number,
+    token: string,
+    apiBase?: string
+  ): Promise<string> => {
+    const invoke = await getInvoke();
+    return invoke('gitlab_merge_request_diff', { owner, repo, mrNumber, token, apiBase });
+  },
+};
+
 // AI operations
 export const ai = {
   checkOllamaStatus: async (baseUrl?: string): Promise<boolean> => {
@@ -427,19 +504,57 @@ export const ai = {
     return invoke('copilot_device_login_status');
   },
 
-  copilotDeviceLoginStart: async (clientId?: string): Promise<CopilotDeviceCode> => {
+  copilotListAccounts: async (
+    resolveDisplayNames?: boolean,
+    host?: string
+  ): Promise<CopilotAccount[]> => {
     const invoke = await getInvoke();
-    return invoke('copilot_device_login_start', { clientId });
+    return invoke('copilot_list_accounts', { resolveDisplayNames, host });
+  },
+
+  copilotImportAccount: async (host: string, user: string): Promise<boolean> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_import_account', { host, user });
+  },
+
+  copilotCachedAccountsList: async (host?: string): Promise<CopilotCachedAccount[]> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_cached_accounts_list', { host });
+  },
+
+  copilotCachedAccountImport: async (host: string, username: string): Promise<boolean> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_cached_account_import', { host, username });
+  },
+
+  copilotOAuthStart: async (clientId: string): Promise<CopilotOAuthStartResponse> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_oauth_start', { clientId });
+  },
+
+  copilotOAuthPoll: async (
+    state: string,
+    clientId: string,
+    clientSecret: string
+  ): Promise<boolean> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_oauth_poll', { state, clientId, clientSecret });
+  },
+
+  copilotDeviceLoginStart: async (host?: string, clientId?: string): Promise<CopilotDeviceCode> => {
+    const invoke = await getInvoke();
+    return invoke('copilot_device_login_start', { host, clientId });
   },
 
   copilotDeviceLoginPoll: async (
     deviceCode: string,
     interval?: number,
     expiresIn?: number,
+    host?: string,
     clientId?: string
   ): Promise<boolean> => {
     const invoke = await getInvoke();
-    return invoke('copilot_device_login_poll', { deviceCode, interval, expiresIn, clientId });
+    return invoke('copilot_device_login_poll', { deviceCode, interval, expiresIn, host, clientId });
   },
 
   copilotDeviceLogout: async (): Promise<void> => {
@@ -447,14 +562,14 @@ export const ai = {
     return invoke('copilot_device_logout');
   },
 
-  listCopilotModels: async (): Promise<string[]> => {
+  listCopilotModels: async (host?: string, enterpriseType?: string): Promise<string[]> => {
     const invoke = await getInvoke();
-    return invoke('list_copilot_models');
+    return invoke('list_copilot_models', { host, enterpriseType });
   },
 
-  listCopilotVisionModels: async (): Promise<string[]> => {
+  listCopilotVisionModels: async (host?: string, enterpriseType?: string): Promise<string[]> => {
     const invoke = await getInvoke();
-    return invoke('list_copilot_vision_models');
+    return invoke('list_copilot_vision_models', { host, enterpriseType });
   },
 
   copilotListOrgs: async (): Promise<string[]> => {

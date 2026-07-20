@@ -48,7 +48,8 @@ Click the **⚙️ Settings** icon in the top-right corner to configure your AI 
 ### Option 4: GitHub Copilot
 1. Ensure you have a GitHub Copilot subscription
 2. In Settings, select "Copilot" as provider
-3. Click "Sign in with GitHub" and authorize
+3. Click "Sign in with GitHub" (OAuth) or "Sign in with GitHub (SSO)" for Enterprise SSO
+4. Complete the authorization flow
 
 ## Choose Your App
 

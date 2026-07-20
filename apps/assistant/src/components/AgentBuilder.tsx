@@ -35,8 +35,33 @@ const DEFAULT_MODELS: Record<string, string[]> = {
   ollama: ['llama3', 'llama3.1', 'codellama', 'mistral', 'mixtral', 'phi3', 'gemma2', 'qwen2'],
   openai: ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo', 'o1-preview', 'o1-mini'],
   anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
-  copilot: ['gpt-4o', 'gpt-4', 'gpt-3.5-turbo', 'claude-3.5-sonnet'],
+  copilot: [
+    'auto',
+    'claude-haiku-4.5',
+    'claude-opus-4.5',
+    'claude-sonnet-4.5',
+    'claude-sonnet-4.6',
+    'gpt-5-mini',
+    'gpt-5.3-codex',
+  ],
   custom: [],
+};
+
+const COPILOT_MODEL_LABELS: Record<string, string> = {
+  auto: 'Auto (Variable)',
+  'claude-haiku-4.5': 'Claude Haiku 4.5 - 200K',
+  'claude-opus-4.5': 'Claude Opus 4.5 - 200K',
+  'claude-sonnet-4.5': 'Claude Sonnet 4.5 - 200K',
+  'claude-sonnet-4.6': 'Claude Sonnet 4.6 - Medium - 264K',
+  'gpt-5-mini': 'GPT-5 mini - Medium - 192K',
+  'gpt-5.3-codex': 'GPT-5.3-Codex - Medium - 400K',
+};
+
+const formatModelLabel = (provider: string, model: string) => {
+  if (provider === 'copilot') {
+    return COPILOT_MODEL_LABELS[model] ?? model;
+  }
+  return model;
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
@@ -1814,8 +1839,10 @@ function ActionEditor({ action, index, onUpdate, onRemove }: ActionEditorProps) 
                           className={styles.select}
                           disabled={loadingModels}
                         >
-                          {currentModels.map(model => (
-                            <option key={model} value={model}>{model}</option>
+                          {currentModels.map((model) => (
+                            <option key={model} value={model}>
+                              {formatModelLabel(provider, model)}
+                            </option>
                           ))}
                         </select>
                       ) : (

@@ -168,6 +168,8 @@ Test for common vulnerabilities:
 4. **Arrange-Act-Assert**: Structure tests clearly with setup, execution, and verification
 5. **Mock External Dependencies**: Don't make real API/database calls in unit tests
 6. **Test Coverage**: Aim to test all changed code paths
+7. **Test Location**: Place new tests under existing test directories; do not create new test roots
+8. **No Code Fences**: Do not wrap <create_file> content in markdown code fences
 
 ## END OF RESPONSE SUMMARY
 

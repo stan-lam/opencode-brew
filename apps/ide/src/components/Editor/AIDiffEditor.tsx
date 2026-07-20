@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { ChevronDown, ChevronRight, Check, X, Sparkles, FileText, FilePlus, FileX } from 'lucide-react';
 import { useEditorStore } from '../../store/editorStore';
+import { useWorkspaceStore } from '../../store/workspaceStore';
 import { fs } from '../../services/tauri';
 import styles from './HistoryDiffEditor.module.css';
 
@@ -9,6 +10,8 @@ interface AIDiffEditorProps {
   oldContent: string;
   newContent: string;
   operationType: 'create' | 'edit' | 'delete';
+  requiresOverwrite?: boolean;
+  isApplied?: boolean;
 }
 
 interface DiffLine {
@@ -28,9 +31,12 @@ export function AIDiffEditor({
   filePath, 
   oldContent, 
   newContent,
-  operationType
+  operationType,
+  requiresOverwrite,
+  isApplied
 }: AIDiffEditorProps) {
   const { closeFile, openFile } = useEditorStore();
+  const { currentWorkspace } = useWorkspaceStore();
   const [expandedHunks, setExpandedHunks] = useState<Set<number>>(new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]));
   const [isApplying, setIsApplying] = useState(false);
 
@@ -39,6 +45,15 @@ export function AIDiffEditor({
   }, [oldContent, newContent]);
 
   const fileName = filePath.split('/').pop() || filePath;
+  const applyLabel = requiresOverwrite ? 'Overwrite' : 'Apply';
+  const showActions = !isApplied;
+  const resolvedPath = useMemo(() => {
+    if (!currentWorkspace?.rootPath) return filePath;
+    if (filePath.startsWith(currentWorkspace.rootPath) || filePath.startsWith('/')) {
+      return filePath;
+    }
+    return `${currentWorkspace.rootPath}/${filePath}`.replace(/\/{2,}/g, '/');
+  }, [currentWorkspace?.rootPath, filePath]);
 
   const handleApply = async () => {
     setIsApplying(true);
@@ -47,7 +62,7 @@ export function AIDiffEditor({
         // For delete, we'd need to delete the file
         // For now, just close the diff
       } else {
-        await fs.writeFile(filePath, newContent);
+        await fs.writeFile(resolvedPath, newContent);
       }
       // Close this diff tab and open the actual file
       const diffPath = useEditorStore.getState().activeFile?.path;
@@ -55,7 +70,7 @@ export function AIDiffEditor({
         closeFile(diffPath);
       }
       if (operationType !== 'delete') {
-        await openFile(filePath);
+        await openFile(resolvedPath);
       }
     } catch (error) {
       console.error('Failed to apply changes:', error);
@@ -114,25 +129,29 @@ export function AIDiffEditor({
           <span className={styles.additions}>+{additions}</span>
           <span className={styles.deletions}>-{deletions}</span>
         </span>
-        <button 
-          className={styles.restoreBtn} 
-          onClick={handleApply} 
-          disabled={isApplying}
-          title="Apply these changes"
-          style={{ background: 'var(--accent-green)', marginRight: '4px' }}
-        >
-          <Check size={14} />
-          {isApplying ? 'Applying...' : 'Apply'}
-        </button>
-        <button 
-          className={styles.restoreBtn} 
-          onClick={handleDismiss}
-          title="Dismiss without applying"
-          style={{ background: 'var(--bg-tertiary)' }}
-        >
-          <X size={14} />
-          Dismiss
-        </button>
+        {showActions && (
+          <>
+            <button 
+              className={styles.restoreBtn} 
+              onClick={handleApply} 
+              disabled={isApplying}
+              title={requiresOverwrite ? 'Overwrite with AI changes' : 'Apply these changes'}
+              style={{ background: 'var(--accent-green)', marginRight: '4px' }}
+            >
+              <Check size={14} />
+              {isApplying ? 'Applying...' : applyLabel}
+            </button>
+            <button 
+              className={styles.restoreBtn} 
+              onClick={handleDismiss}
+              title="Dismiss without applying"
+              style={{ background: 'var(--bg-tertiary)' }}
+            >
+              <X size={14} />
+              Dismiss
+            </button>
+          </>
+        )}
       </div>
 
       <div className={styles.legend}>
@@ -145,6 +164,13 @@ export function AIDiffEditor({
           AI Proposed
         </span>
       </div>
+
+      {requiresOverwrite && (
+        <div className={styles.aiDiffWarning}>
+          <strong>Overwrite required.</strong>
+          <span>File exists and differs from the AI proposal. Review the diff, then overwrite if desired.</span>
+        </div>
+      )}
 
       <div className={styles.diffContent}>
         {hunks.length === 0 ? (

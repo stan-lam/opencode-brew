@@ -72,7 +72,35 @@
   font-size: var(--font-size-sm);
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.settingLabelRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 2px;
+}
+
+.tokenHelp {
+  display: flex;
+  gap: 6px;
+}
+
+.helpButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: help;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.helpButton:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .settingDescription {

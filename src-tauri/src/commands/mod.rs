@@ -1,5 +1,7 @@
 pub mod fs;
 pub mod git;
+pub mod github;
+pub mod gitlab;
 pub mod ai;
 pub mod history;
 pub mod terminal;

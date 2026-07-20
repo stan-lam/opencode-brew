@@ -424,14 +424,14 @@ export const ai = {
     return invoke('copilot_device_logout');
   },
 
-  listCopilotModels: async (): Promise<string[]> => {
+  listCopilotModels: async (host?: string, enterpriseType?: string): Promise<string[]> => {
     const invoke = await getInvoke();
-    return invoke('list_copilot_models');
+    return invoke('list_copilot_models', { host, enterpriseType });
   },
 
-  listCopilotVisionModels: async (): Promise<string[]> => {
+  listCopilotVisionModels: async (host?: string, enterpriseType?: string): Promise<string[]> => {
     const invoke = await getInvoke();
-    return invoke('list_copilot_vision_models');
+    return invoke('list_copilot_vision_models', { host, enterpriseType });
   },
 
   copilotListOrgs: async (): Promise<string[]> => {

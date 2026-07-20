@@ -330,7 +330,7 @@ export function ExecutionHistory() {
       `Duration: ${formatDuration(exec.started_at, exec.finished_at)}`,
       `Trigger: ${exec.trigger_type}`,
     ];
-    const formattedOutput = formatOutputAsMarkdown(exec.output);
+    const formattedOutput = formatOutputAsMarkdown(exec.output ?? '');
     return `${headerLines.join('\n')}\n\n${formattedOutput}`;
   };
 

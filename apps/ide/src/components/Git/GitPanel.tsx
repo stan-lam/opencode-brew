@@ -34,6 +34,23 @@ const PROVIDER_OPTIONS: { value: AIProvider; label: string }[] = [
   { value: 'custom', label: 'Custom Endpoint' },
 ];
 
+const COPILOT_MODEL_LABELS: Record<string, string> = {
+  auto: 'Auto (Variable)',
+  'claude-haiku-4.5': 'Claude Haiku 4.5 - 200K',
+  'claude-opus-4.5': 'Claude Opus 4.5 - 200K',
+  'claude-sonnet-4.5': 'Claude Sonnet 4.5 - 200K',
+  'claude-sonnet-4.6': 'Claude Sonnet 4.6 - Medium - 264K',
+  'gpt-5-mini': 'GPT-5 mini - Medium - 192K',
+  'gpt-5.3-codex': 'GPT-5.3-Codex - Medium - 400K',
+};
+
+const formatModelLabel = (provider: AIProvider, model: string) => {
+  if (provider === 'copilot') {
+    return COPILOT_MODEL_LABELS[model] ?? model;
+  }
+  return model;
+};
+
 const MAX_TOTAL_CHARS = 60000;
 const MAX_FILE_DIFF_CHARS = 8000;
 const MAX_UNTRACKED_FILE_CHARS = 6000;
@@ -86,7 +103,7 @@ const formatFileDiff = (diff: FileDiff): string => {
 export function GitPanel() {
   const { currentWorkspace } = useWorkspaceStore();
   const { openDiff } = useEditorStore();
-  const { setActiveSideTab } = useLayoutStore();
+  const { setShowAIPanel } = useLayoutStore();
   const { config: aiConfig, availableModels, sendMessage, queuePrompt, isStreaming, agentMode, setAgentMode, createConversation } = useAIStore();
   const {
     isRepo,
@@ -516,7 +533,7 @@ export function GitPanel() {
         setAgentMode('plan');
       }
       createConversation();
-      setActiveSideTab('ai');
+      setShowAIPanel(true);
       if (result.truncated) {
         showNotification('Review diff truncated to fit size limits', 'info');
       }
@@ -690,7 +707,9 @@ export function GitPanel() {
                   <option value="">No models available</option>
                 )}
                 {reviewModelOptions.map((model) => (
-                  <option key={model} value={model}>{model}</option>
+                  <option key={model} value={model}>
+                    {formatModelLabel(reviewProvider, model)}
+                  </option>
                 ))}
               </select>
               <button
