@@ -105,7 +105,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           } catch (layoutError) {
             console.log('Could not switch to Explorer tab:', layoutError);
           }
-          
+
           // Load AI chat history for this workspace
           try {
             const { useAIStore } = await import('./aiStore');

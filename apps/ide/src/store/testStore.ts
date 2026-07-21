@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { git, GitFileStatus } from '../services/tauri';
+import { dialog, fs, git, GitFileStatus } from '../services/tauri';
 import { useWorkspaceStore } from './workspaceStore';
 import { useAIStore } from './aiStore';
 
@@ -349,6 +349,369 @@ const decodeXmlEntities = (content: string): string => {
     .replace(/&amp;/gi, '&');
 };
 
+const CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
+const WINDOWS_ABS_REGEX = /^[a-zA-Z]:[\\/]/;
+
+const getInvalidPathReason = (filePath: string, workspaceRoot: string): string | null => {
+  const trimmed = filePath.trim();
+  if (!trimmed) return 'Path is empty.';
+  if (CONTROL_CHAR_REGEX.test(trimmed)) return 'Path contains control characters.';
+
+  const normalized = trimmed.replace(/\\/g, '/');
+  const isAbsolute = normalized.startsWith('/') || WINDOWS_ABS_REGEX.test(trimmed);
+  if (isAbsolute) {
+    const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!normalized.startsWith(`${rootNormalized}/`) && normalized !== rootNormalized) {
+      return 'Path is outside the workspace.';
+    }
+  }
+
+  const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+  const relativeCandidate = normalized.startsWith(rootNormalized)
+    ? normalized.slice(rootNormalized.length)
+    : normalized;
+  const parts = relativeCandidate.replace(/^\/+/, '').split('/');
+  if (parts.some((part) => part === '..')) return 'Path traversal is not allowed.';
+
+  return null;
+};
+
+const normalizeRepoRelativePath = (workspaceRoot: string, filePath: string): string => {
+  let normalized = filePath.replace(/\\/g, '/').trim();
+  if (normalized.startsWith(workspaceRoot)) {
+    normalized = normalized.slice(workspaceRoot.length);
+  }
+  normalized = normalized.replace(/^\/+/, '');
+  normalized = normalized.replace(/^\.\//, '');
+  normalized = normalized.replace(/\/\.\//g, '/');
+  normalized = normalized.replace(/\/{2,}/g, '/');
+  return normalized;
+};
+
+const TEST_ROOT_PATTERNS = [
+  'src/test/java',
+  'src/test/kotlin',
+  'src/test/groovy',
+  'src/test',
+  'src/tests',
+  'src/__tests__',
+  'test',
+  'tests',
+  '__tests__',
+  'spec',
+  'specs',
+];
+
+const TEST_ROOT_SKIP_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  'target',
+  '.gradle',
+  '.idea',
+  '.vscode',
+  '.next',
+  '.cache',
+  'out',
+]);
+
+const findTestRoots = async (workspaceRoot: string): Promise<string[]> => {
+  const roots = new Set<string>();
+  const seen = new Set<string>();
+  const queue: Array<{ path: string; depth: number }> = [{ path: workspaceRoot, depth: 0 }];
+  const maxDepth = 4;
+
+  const addIfExists = async (absolutePath: string) => {
+    try {
+      const exists = await fs.pathExists(absolutePath);
+      if (exists) {
+        const normalized = normalizeRepoRelativePath(workspaceRoot, absolutePath);
+        if (normalized) roots.add(normalized);
+      }
+    } catch {
+      // ignore path checks
+    }
+  };
+
+  while (queue.length > 0) {
+    const next = queue.shift();
+    if (!next) break;
+    const { path, depth } = next;
+    if (seen.has(path)) continue;
+    seen.add(path);
+
+    for (const pattern of TEST_ROOT_PATTERNS) {
+      await addIfExists(`${path}/${pattern}`);
+    }
+
+    if (depth >= maxDepth) continue;
+    let entries: Array<{ name: string; path: string; is_directory: boolean }> = [];
+    try {
+      entries = await fs.readDirectory(path);
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.is_directory) continue;
+      if (TEST_ROOT_SKIP_DIRS.has(entry.name)) continue;
+      queue.push({ path: entry.path, depth: depth + 1 });
+    }
+  }
+
+  return Array.from(roots);
+};
+
+const isTestPathAllowed = (normalizedPath: string, testRoots: string[]): boolean => {
+  return testRoots.some((root) => normalizedPath === root || normalizedPath.startsWith(`${root}/`));
+};
+
+const normalizeContentForCompare = (content: string): string => {
+  return content.replace(/\r\n/g, '\n').replace(/\n+$/g, '');
+};
+
+const stripCodeFences = (content: string): string => {
+  let trimmed = content.trim();
+  if (!trimmed.startsWith('```')) {
+    return trimmed;
+  }
+  const lines = trimmed.split('\n');
+  if (lines.length <= 1) {
+    return trimmed;
+  }
+  lines.shift();
+  if (lines[lines.length - 1]?.trim() === '```') {
+    lines.pop();
+  }
+  trimmed = lines.join('\n').trim();
+  return trimmed;
+};
+
+const ensureParentDir = async (workspaceRoot: string, relativePath: string): Promise<void> => {
+  const pathParts = relativePath.split('/').filter(Boolean);
+  pathParts.pop();
+  if (pathParts.length === 0) return;
+
+  let currentRelativePath = '';
+  for (const part of pathParts) {
+    currentRelativePath = currentRelativePath ? `${currentRelativePath}/${part}` : part;
+    const currentAbsolutePath = `${workspaceRoot}/${currentRelativePath}`;
+    const exists = await fs.pathExists(currentAbsolutePath);
+    if (!exists) {
+      await fs.createDirectory(currentAbsolutePath);
+    }
+  }
+};
+
+interface CreateFileBlock {
+  path: string;
+  content: string;
+}
+
+interface CreationResult {
+  status: 'created' | 'skipped' | 'error';
+  message: string;
+  normalizedPath: string;
+  originalPath: string;
+}
+
+const parseCreateFileBlocks = (content: string): CreateFileBlock[] => {
+  const blocks: CreateFileBlock[] = [];
+  const createRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)<\/create_file>/gi;
+  let match;
+  while ((match = createRegex.exec(content)) !== null) {
+    const decodedContent = decodeXmlEntities(match[2]);
+    blocks.push({
+      path: match[1].trim(),
+      content: stripCodeFences(decodedContent),
+    });
+  }
+  return blocks;
+};
+
+const applyCreateFileBlocks = async (
+  blocks: CreateFileBlock[],
+  workspaceRoot: string,
+  allowOverwrite: boolean,
+  overwriteAllInBatch: boolean,
+  messageId?: string
+): Promise<{
+  results: Map<string, CreationResult>;
+  resultList: CreationResult[];
+  operationIds: string[];
+}> => {
+  const results = new Map<string, CreationResult>();
+  const resultList: CreationResult[] = [];
+  const operationIds: string[] = [];
+  const testRoots = await findTestRoots(workspaceRoot);
+  const testRootsSummary = testRoots.length > 5
+    ? `${testRoots.slice(0, 5).join(', ')}, ...`
+    : testRoots.join(', ');
+
+  const addResult = (result: CreationResult) => {
+    const key = result.normalizedPath || result.originalPath;
+    results.set(key, result);
+    resultList.push(result);
+  };
+
+  let overwriteAllDecision: boolean | null = null;
+
+  for (const block of blocks) {
+    const invalidPathReason = getInvalidPathReason(block.path, workspaceRoot);
+    const normalizedPath = normalizeRepoRelativePath(workspaceRoot, block.path);
+    const resultBase = {
+      normalizedPath,
+      originalPath: block.path,
+    };
+
+    if (invalidPathReason || !normalizedPath) {
+      addResult({
+        ...resultBase,
+        status: 'error',
+        message: invalidPathReason || 'Invalid file path provided by AI.',
+      });
+      continue;
+    }
+
+    const fullPath = `${workspaceRoot}/${normalizedPath}`.replace(/\/+/g, '/');
+    const hasCodeFence = /```/.test(block.content);
+    const cleanContent = stripCodeFences(block.content);
+
+    if (hasCodeFence) {
+      addResult({
+        ...resultBase,
+        status: 'error',
+        message: 'AI returned fenced code; file operations must contain raw file content only.',
+      });
+      continue;
+    }
+
+    if (testRoots.length === 0) {
+      addResult({
+        ...resultBase,
+        status: 'error',
+        message: 'No existing test directories were found. Create a test root first.',
+      });
+      continue;
+    }
+
+    if (!isTestPathAllowed(normalizedPath, testRoots)) {
+      addResult({
+        ...resultBase,
+        status: 'error',
+        message: `Test files must be created under existing test roots: ${testRootsSummary}.`,
+      });
+      continue;
+    }
+
+    if (!cleanContent.trim()) {
+      addResult({
+        ...resultBase,
+        status: 'error',
+        message: 'AI returned empty file content.',
+      });
+      continue;
+    }
+
+    try {
+      const exists = await fs.pathExists(fullPath);
+      if (exists) {
+        const existingContent = await fs.readFile(fullPath);
+        const normalizedExisting = normalizeContentForCompare(existingContent);
+        const normalizedIncoming = normalizeContentForCompare(cleanContent);
+        if (normalizedExisting === normalizedIncoming && normalizedIncoming.length > 0) {
+          addResult({
+            ...resultBase,
+            status: 'created',
+            message: 'File already exists with matching content.',
+          });
+          if (messageId) {
+            operationIds.push(`${messageId}:create:${block.path}`);
+          }
+          continue;
+        }
+        if (allowOverwrite) {
+          if (overwriteAllInBatch) {
+            if (overwriteAllDecision === null) {
+              overwriteAllDecision = await dialog.confirm(
+                'Overwrite all existing test files in this batch?',
+                'Confirm overwrite'
+              );
+            }
+            if (overwriteAllDecision) {
+              await fs.writeFile(fullPath, cleanContent);
+              addResult({
+                ...resultBase,
+                status: 'created',
+                message: 'File overwritten successfully.',
+              });
+              if (messageId) {
+                operationIds.push(`${messageId}:create:${block.path}`);
+              }
+              continue;
+            }
+            addResult({
+              ...resultBase,
+              status: 'skipped',
+              message: 'Batch overwrite canceled.',
+            });
+            continue;
+          } else {
+            const confirmed = await dialog.confirm(
+              `Overwrite existing file "${normalizedPath}"?`,
+              'Confirm overwrite'
+            );
+            if (confirmed) {
+              await fs.writeFile(fullPath, cleanContent);
+              addResult({
+                ...resultBase,
+                status: 'created',
+                message: 'File overwritten successfully.',
+              });
+              if (messageId) {
+                operationIds.push(`${messageId}:create:${block.path}`);
+              }
+              continue;
+            }
+            addResult({
+              ...resultBase,
+              status: 'skipped',
+              message: 'Overwrite canceled.',
+            });
+            continue;
+          }
+        }
+        addResult({
+          ...resultBase,
+          status: 'skipped',
+          message: 'File already exists; overwrite disabled.',
+        });
+        continue;
+      }
+
+      await ensureParentDir(workspaceRoot, normalizedPath);
+      await fs.writeFile(fullPath, cleanContent);
+      addResult({
+        ...resultBase,
+        status: 'created',
+        message: 'File created successfully.',
+      });
+      if (messageId) {
+        operationIds.push(`${messageId}:create:${block.path}`);
+      }
+    } catch (error) {
+      addResult({
+        ...resultBase,
+        status: 'error',
+        message: `Failed to write file: ${error}`,
+      });
+    }
+  }
+
+  return { results, resultList, operationIds };
+};
+
 interface TestState {
   pendingChanges: PendingChange[];
   testPlan: TestPlan | null;
@@ -358,6 +721,8 @@ interface TestState {
   isCreatingTests: boolean;
   isFetchingChanges: boolean;
   customInstructions: string;
+  allowOverwrite: boolean;
+  overwriteAllInBatch: boolean;
   error: string | null;
   lastFetchedAt: string | null;
   analysisProgress: string;
@@ -385,6 +750,8 @@ interface TestState {
   fetchPendingChanges: () => Promise<void>;
   analyzeChanges: (instructions?: string, focusType?: 'unit' | 'security' | 'audit') => Promise<void>;
   setCustomInstructions: (text: string) => void;
+  setAllowOverwrite: (value: boolean) => void;
+  setOverwriteAllInBatch: (value: boolean) => void;
   toggleTestSelection: (testId: string) => void;
   selectAllTests: () => void;
   deselectAllTests: () => void;
@@ -446,6 +813,8 @@ export const useTestStore = create<TestState>((set, get) => ({
   isCreatingTests: false,
   isFetchingChanges: false,
   customInstructions: '',
+  allowOverwrite: false,
+  overwriteAllInBatch: false,
   error: null,
   lastFetchedAt: null,
   analysisProgress: '',
@@ -629,6 +998,20 @@ export const useTestStore = create<TestState>((set, get) => ({
     set({ customInstructions: text });
   },
 
+  setAllowOverwrite: (value: boolean) => {
+    set({
+      allowOverwrite: value,
+      overwriteAllInBatch: value ? get().overwriteAllInBatch : false,
+    });
+  },
+
+  setOverwriteAllInBatch: (value: boolean) => {
+    set({
+      overwriteAllInBatch: value,
+      allowOverwrite: value ? true : get().allowOverwrite,
+    });
+  },
+
   toggleTestSelection: (testId: string) => {
     set(state => {
       const newSelected = new Set(state.selectedTests);
@@ -677,7 +1060,7 @@ export const useTestStore = create<TestState>((set, get) => ({
   },
 
   createSelectedTests: async () => {
-    const { selectedTests, testPlan } = get();
+    const { selectedTests, testPlan, allowOverwrite, overwriteAllInBatch } = get();
     
     if (selectedTests.size === 0) {
       set({ error: 'No tests selected' });
@@ -686,6 +1069,12 @@ export const useTestStore = create<TestState>((set, get) => ({
 
     if (!testPlan) {
       set({ error: 'No test plan available' });
+      return;
+    }
+
+    const workspace = useWorkspaceStore.getState().currentWorkspace;
+    if (!workspace?.rootPath) {
+      set({ error: 'No workspace open' });
       return;
     }
 
@@ -728,9 +1117,9 @@ export const useTestStore = create<TestState>((set, get) => ({
     });
 
     const aiStore = useAIStore.getState();
-    const allCreatedPaths = new Set<string>();
     let totalCreated = 0;
     let totalSkipped = 0;
+    let totalErrors = 0;
 
     // Process each batch
     for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
@@ -762,19 +1151,50 @@ export const useTestStore = create<TestState>((set, get) => ({
       
       // Wait for streaming to complete
       const responseContent = await waitForStreamingComplete();
-      
-      // Parse which files were created from the response
-      const createdPaths = new Set<string>();
-      const createFileRegex = /<create_file\s+path="([^"]+)"/gi;
-      let match;
-      while ((match = createFileRegex.exec(responseContent)) !== null) {
-        createdPaths.add(match[1]);
-        allCreatedPaths.add(match[1]);
+
+      set({
+        creationProgress: batches.length > 1
+          ? `Batch ${batchIdx + 1}/${batches.length}: Applying ${batch.length} file(s)...`
+          : `Applying ${batch.length} test file(s)...`,
+      });
+
+      const aiState = useAIStore.getState();
+      const lastAssistant = [...(aiState.activeConversation?.messages ?? [])]
+        .reverse()
+        .find(m => m.role === 'assistant');
+      const createBlocks = parseCreateFileBlocks(responseContent);
+      const {
+        results: creationResults,
+        resultList: creationResultList,
+        operationIds,
+      } = await applyCreateFileBlocks(
+        createBlocks,
+        workspace.rootPath,
+        allowOverwrite,
+        overwriteAllInBatch,
+        lastAssistant?.id
+      );
+
+      if (operationIds.length > 0) {
+        aiState.markFileOperationsAsKept(operationIds);
       }
+
+      const findCreationResult = (filePath: string): CreationResult | undefined => {
+        const normalizedPath = normalizeRepoRelativePath(workspace.rootPath, filePath);
+        const direct = creationResults.get(normalizedPath);
+        if (direct) return direct;
+        const fileName = filePath.split('/').pop() || '';
+        return creationResultList.find(result => {
+          const createdFileName = result.normalizedPath.split('/').pop() || '';
+          return result.normalizedPath.includes(fileName)
+            || createdFileName.includes(fileName.replace('.test.ts', ''));
+        });
+      };
 
       // Update status for files in this batch
       let batchCreated = 0;
       let batchSkipped = 0;
+      let batchErrors = 0;
 
       set(state => {
         if (!state.testPlan) return state;
@@ -782,31 +1202,41 @@ export const useTestStore = create<TestState>((set, get) => ({
           ...cat,
           testFiles: cat.testFiles.map(file => {
             if (!batchIds.has(file.id)) return file;
-            
-            const fileName = file.path.split('/').pop() || '';
-            const wasCreated = createdPaths.has(file.path) || 
-              [...createdPaths].some(p => {
-                const createdFileName = p.split('/').pop() || '';
-                return p.includes(fileName) || createdFileName.includes(fileName.replace('.test.ts', ''));
-              });
-            
-            if (wasCreated) {
+
+            const result = findCreationResult(file.path);
+            if (result?.status === 'created') {
               batchCreated++;
               return {
                 ...file,
                 creationStatus: 'created' as const,
-                creationMessage: 'File created successfully',
+                creationMessage: result.message,
               };
-            } else {
+            }
+            if (result?.status === 'error') {
+              batchErrors++;
+              return {
+                ...file,
+                creationStatus: 'error' as const,
+                creationMessage: result.message,
+              };
+            }
+            if (result?.status === 'skipped') {
               batchSkipped++;
               return {
                 ...file,
                 creationStatus: 'skipped' as const,
-                creationMessage: createdPaths.size === 0 
-                  ? 'AI did not generate this file'
-                  : `AI created ${createdPaths.size}/${batch.length} files in this batch`,
+                creationMessage: result.message,
               };
             }
+
+            batchSkipped++;
+            return {
+              ...file,
+              creationStatus: 'skipped' as const,
+              creationMessage: createBlocks.length === 0
+                ? 'AI did not generate this file'
+                : `AI generated ${createBlocks.length}/${batch.length} file(s) in this batch`,
+            };
           }),
         }));
         return { testPlan: { ...state.testPlan, categories: newCategories, lastUpdated: Date.now() } };
@@ -814,6 +1244,7 @@ export const useTestStore = create<TestState>((set, get) => ({
 
       totalCreated += batchCreated;
       totalSkipped += batchSkipped;
+      totalErrors += batchErrors;
 
       // Small delay between batches to avoid rate limiting
       if (batchIdx < batches.length - 1) {
@@ -826,7 +1257,7 @@ export const useTestStore = create<TestState>((set, get) => ({
     set({
       isCreatingTests: false,
       creationProgress: '',
-      creationSummary: { created: totalCreated, skipped: totalSkipped, errors: 0 },
+      creationSummary: { created: totalCreated, skipped: totalSkipped, errors: totalErrors },
     });
   },
 

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import {
   Send,
   Plus,
@@ -28,13 +28,17 @@ import {
   Clock,
   ExternalLink,
   FileText,
+  List,
+  AlertTriangle,
 } from 'lucide-react';
-import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage } from '../../services/tauri';
+import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage, git } from '../../services/tauri';
+import type { CopilotCachedAccount, CopilotDeviceCode } from '../../services/tauri';
 import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
 import { ContextBreakdownModal } from './ContextBreakdownModal';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
+import { useSettingsStore } from '../../store/settingsStore';
 import styles from './AIPanel.module.css';
 import mermaid from 'mermaid';
 
@@ -57,6 +61,98 @@ mermaid.initialize({
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   },
 });
+
+// Fallback labels when metadata is not available
+const COPILOT_MODEL_LABELS: Record<string, string> = {
+  auto: 'Auto (Variable)',
+  // Hyphen format (claude-opus-4-5) - actual API model IDs
+  'claude-haiku-4-5': 'Claude Haiku 4.5 - 200K',
+  'claude-opus-4-5': 'Claude Opus 4.5 - 200K',
+  'claude-sonnet-4-5': 'Claude Sonnet 4.5 - 200K',
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6 - Medium - 264K',
+  // Dot format (legacy/display names)
+  'claude-haiku-4.5': 'Claude Haiku 4.5 - 200K',
+  'claude-opus-4.5': 'Claude Opus 4.5 - 200K',
+  'claude-sonnet-4.5': 'Claude Sonnet 4.5 - 200K',
+  'claude-sonnet-4.6': 'Claude Sonnet 4.6 - Medium - 264K',
+  'gpt-5-mini': 'GPT-5 mini - Medium - 192K',
+  'gpt-5.3-codex': 'GPT-5.3-Codex - Medium - 400K',
+};
+
+import type { CopilotModelMetadata } from '../../services/tauri';
+
+// Format context window as human-readable string (e.g., 200000 -> "200K")
+const formatContextWindow = (tokens: number | null | undefined): string => {
+  if (!tokens) return '';
+  if (tokens >= 1000000) return `${Math.round(tokens / 1000000)}M`;
+  return `${Math.round(tokens / 1000)}K`;
+};
+
+// Format model label with dynamic metadata
+const formatModelLabel = (
+  provider: string,
+  model: string,
+  metadata?: CopilotModelMetadata[]
+): string => {
+  if (provider === 'copilot') {
+    // Try to get dynamic metadata first
+    const modelMeta = metadata?.find(m => m.id === model);
+    if (modelMeta) {
+      const contextStr = formatContextWindow(modelMeta.context_window);
+      const reasoningStr = modelMeta.reasoning_efforts.length > 0 ? ' - Medium' : '';
+      // Include version suffix for dated models to avoid duplicates
+      const versionMatch = model.match(/-(\d{4}-\d{2}-\d{2})$/);
+      const versionSuffix = versionMatch ? ` (${versionMatch[1]})` : '';
+      return `${modelMeta.name}${reasoningStr}${contextStr ? ` - ${contextStr}` : ''}${versionSuffix}`;
+    }
+    // Fallback to hardcoded labels
+    return COPILOT_MODEL_LABELS[model] ?? model;
+  }
+  return model;
+};
+
+// Get pricing tooltip for a model
+const getModelPricingTooltip = (
+  model: string,
+  metadata?: CopilotModelMetadata[]
+): string | undefined => {
+  const modelMeta = metadata?.find(m => m.id === model);
+  if (!modelMeta) return undefined;
+  
+  const lines: string[] = [];
+  lines.push(modelMeta.name);
+  
+  if (modelMeta.context_window) {
+    lines.push(`Context Window: ${formatContextWindow(modelMeta.context_window)}`);
+  }
+  
+  if (modelMeta.input_price !== null || modelMeta.output_price !== null) {
+    lines.push('');
+    lines.push('Cost per 1M Tokens:');
+    if (modelMeta.input_price !== null) {
+      lines.push(`  Input: ${modelMeta.input_price} Credits`);
+    }
+    if (modelMeta.output_price !== null) {
+      lines.push(`  Output: ${modelMeta.output_price} Credits`);
+    }
+    if (modelMeta.cache_price !== null) {
+      lines.push(`  Cached: ${modelMeta.cache_price} Credits`);
+    }
+  }
+  
+  const capabilities: string[] = [];
+  if (modelMeta.supports_vision) capabilities.push('Vision');
+  if (modelMeta.supports_tools) capabilities.push('Tools');
+  if (modelMeta.reasoning_efforts.length > 0) {
+    capabilities.push(`Thinking (${modelMeta.reasoning_efforts.join('/')})`);
+  }
+  if (capabilities.length > 0) {
+    lines.push('');
+    lines.push(`Capabilities: ${capabilities.join(', ')}`);
+  }
+  
+  return lines.join('\n');
+};
 
 // Component to render code blocks with copy button, expand/collapse, and diff support
 interface CodeBlockProps {
@@ -397,6 +493,7 @@ interface FileOperation {
   newContent?: string;
   mode?: 'replace' | 'insert';
   line?: number;
+  invalidReason?: string;
 }
 
 interface PendingFileOperation {
@@ -406,7 +503,249 @@ interface PendingFileOperation {
   previousContent?: string;
   previousExists?: boolean;
   wasSkipped?: boolean;
+  requiresOverwrite?: boolean;
+  errorMessage?: string;
 }
+
+const CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
+const WINDOWS_ABS_REGEX = /^[a-zA-Z]:[\\/]/;
+const SEVERITY_PATTERN = /\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?/i;
+
+const getSeverityClassName = (severity: string): string => {
+  switch (severity) {
+    case 'CRITICAL':
+      return styles.severityCritical;
+    case 'HIGH':
+      return styles.severityHigh;
+    case 'MEDIUM':
+      return styles.severityMedium;
+    case 'LOW':
+      return styles.severityLow;
+    case 'INFO':
+      return styles.severityInfo;
+    case 'TEST':
+      return styles.severityTest;
+    default:
+      return '';
+  }
+};
+
+const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string | null => {
+  const trimmed = filePath.trim();
+  if (!trimmed) return 'Path is empty.';
+  if (CONTROL_CHAR_REGEX.test(trimmed)) return 'Path contains control characters.';
+
+  const normalized = trimmed.replace(/\\/g, '/');
+  const isAbsolute = normalized.startsWith('/') || WINDOWS_ABS_REGEX.test(trimmed);
+  if (isAbsolute && !workspaceRoot) {
+    return 'Absolute paths are not allowed.';
+  }
+
+  if (isAbsolute && workspaceRoot) {
+    const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!normalized.startsWith(`${rootNormalized}/`) && normalized !== rootNormalized) {
+      return 'Path is outside the workspace.';
+    }
+  }
+
+  const rootNormalized = workspaceRoot ? workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  const relativeCandidate = rootNormalized && normalized.startsWith(rootNormalized)
+    ? normalized.slice(rootNormalized.length)
+    : normalized;
+  const parts = relativeCandidate.replace(/^\/+/, '').split('/');
+  if (parts.some((part) => part === '..')) return 'Path traversal is not allowed.';
+
+  return null;
+};
+
+const normalizeRepoRelativePath = (workspaceRoot: string, filePath: string): string => {
+  let normalized = filePath.replace(/\\/g, '/').trim();
+  if (normalized.startsWith(workspaceRoot)) {
+    normalized = normalized.slice(workspaceRoot.length);
+  }
+  normalized = normalized.replace(/^\/+/, '');
+  normalized = normalized.replace(/^\.\//, '');
+  normalized = normalized.replace(/\/\.\//g, '/');
+  normalized = normalized.replace(/\/{2,}/g, '/');
+  return normalized;
+};
+
+const resolveWorkspaceRelativePath = (workspaceRoot: string, filePath: string): string => {
+  return normalizeRepoRelativePath(workspaceRoot, filePath);
+};
+
+const normalizeContentForCompare = (content: string): string => {
+  return content.replace(/\r\n/g, '\n').replace(/\n+$/g, '');
+};
+
+const applyEditOperation = (currentContent: string, operation: FileOperation) => {
+  if (operation.mode === 'insert' && operation.line && operation.newContent) {
+    const lines = currentContent.split('\n');
+    const insertIdx = Math.max(0, Math.min(operation.line - 1, lines.length));
+    lines.splice(insertIdx, 0, operation.newContent);
+    const updatedContent = lines.join('\n');
+    return { updatedContent, changed: updatedContent !== currentContent };
+  }
+
+  const oldContent = operation.oldContent ?? '';
+  const newContent = operation.newContent ?? '';
+  const oldTrimmed = oldContent.trim();
+  const newTrimmed = newContent.trim();
+
+  const candidates: Array<{ oldText: string; newText: string }> = [];
+  if (oldContent && newContent) {
+    candidates.push({ oldText: oldContent, newText: newContent });
+  }
+  if (oldTrimmed && newTrimmed) {
+    candidates.push({ oldText: oldTrimmed, newText: newTrimmed });
+  }
+
+  for (const { oldText, newText } of candidates) {
+    if (currentContent.includes(oldText)) {
+      const updatedContent = currentContent.replace(oldText, newText);
+      return { updatedContent, changed: updatedContent !== currentContent };
+    }
+  }
+
+  const normalizedContent = currentContent.replace(/\r\n/g, '\n');
+  for (const { oldText, newText } of candidates) {
+    const normalizedOld = oldText.replace(/\r\n/g, '\n');
+    const normalizedNew = newText.replace(/\r\n/g, '\n');
+    if (normalizedOld && normalizedContent.includes(normalizedOld)) {
+      const updatedContent = normalizedContent.replace(normalizedOld, normalizedNew);
+      return { updatedContent, changed: updatedContent !== normalizedContent };
+    }
+  }
+
+  if (newTrimmed && currentContent.includes(newTrimmed)) {
+    return { updatedContent: currentContent, changed: false, reason: 'already-applied' as const };
+  }
+
+  return { updatedContent: currentContent, changed: false, reason: 'no-match' as const };
+};
+
+const readWorkspaceFile = async (workspaceRoot: string | null, filePath: string): Promise<string | null> => {
+  if (!workspaceRoot) return null;
+  const invalidReason = getInvalidPathReason(filePath, workspaceRoot);
+  if (invalidReason) return null;
+  const normalizedPath = normalizeRepoRelativePath(workspaceRoot, filePath);
+  if (!normalizedPath) return null;
+  const fullPath = `${workspaceRoot}/${normalizedPath}`.replace(/\/+/g, '/');
+  try {
+    return await fs.readFile(fullPath);
+  } catch {
+    return null;
+  }
+};
+
+const getDiffStatusFromOperation = (operation: FileOperation): 'added' | 'deleted' | 'modified' => {
+  if (operation.type === 'create') return 'added';
+  if (operation.type === 'delete') return 'deleted';
+  return 'modified';
+};
+
+const buildAIOperationDiffFromDisk = async (
+  workspaceRoot: string | null,
+  operation: FileOperation,
+  pending?: PendingFileOperation
+): Promise<{
+  oldContent: string;
+  newContent: string;
+  operationType: 'create' | 'edit' | 'delete';
+  requiresOverwrite?: boolean;
+}> => {
+  const operationType = operation.type;
+  const opContent = operation.content ?? '';
+  const opOld = operation.oldContent ?? '';
+  const opNew = operation.newContent ?? opContent;
+
+  const diskContent = await readWorkspaceFile(workspaceRoot, operation.path);
+  const previousContent = pending?.previousContent;
+
+  if (operationType === 'create') {
+    const existingContent = previousContent ?? diskContent ?? '';
+    const normalizedExisting = normalizeContentForCompare(existingContent);
+    const normalizedIncoming = normalizeContentForCompare(opContent);
+    const requiresOverwrite = Boolean(
+      normalizedExisting && normalizedIncoming && normalizedExisting !== normalizedIncoming
+    );
+    const newContent = opContent || diskContent || '';
+    return { oldContent: existingContent, newContent, operationType, requiresOverwrite };
+  }
+
+  if (operationType === 'delete') {
+    const oldContent = previousContent ?? diskContent ?? opOld;
+    return { oldContent, newContent: '', operationType, requiresOverwrite: false };
+  }
+
+  if (previousContent && diskContent) {
+    return { oldContent: previousContent, newContent: diskContent, operationType, requiresOverwrite: false };
+  }
+
+  const baseContent = previousContent ?? diskContent ?? opOld;
+  if (baseContent) {
+    const { updatedContent } = applyEditOperation(baseContent, operation);
+    return { oldContent: baseContent, newContent: updatedContent, operationType, requiresOverwrite: false };
+  }
+
+  return { oldContent: opOld, newContent: opNew, operationType, requiresOverwrite: false };
+};
+
+const buildDiscardCandidates = (
+  workspaceRoot: string,
+  filePath: string,
+  statusPaths: string[]
+): string[] => {
+  const normalized = normalizeRepoRelativePath(workspaceRoot, filePath);
+  const candidates = new Set<string>();
+  if (normalized) {
+    candidates.add(normalized);
+  }
+  const basename = normalized.split('/').pop() || normalized;
+  statusPaths.forEach((path) => {
+    if (!path) return;
+    if (path === normalized || path.endsWith(`/${normalized}`)) {
+      candidates.add(path);
+    }
+    if (basename && (path === basename || path.endsWith(`/${basename}`))) {
+      candidates.add(path);
+    }
+  });
+  return Array.from(candidates);
+};
+
+const discardGitChanges = async (
+  workspaceRoot: string,
+  filePath: string,
+  statusPaths?: string[]
+): Promise<boolean> => {
+  try {
+    const isRepo = await git.isGitRepo(workspaceRoot);
+    if (!isRepo) return false;
+    let paths = statusPaths;
+    if (!paths) {
+      const status = await git.status(workspaceRoot);
+      paths = [
+        ...status.staged.map((entry) => entry.path),
+        ...status.unstaged.map((entry) => entry.path),
+        ...status.untracked.map((entry) => entry.path),
+      ];
+    }
+    const candidates = buildDiscardCandidates(workspaceRoot, filePath, paths);
+    for (const candidate of candidates) {
+      try {
+        await git.discardChanges(workspaceRoot, candidate);
+        return true;
+      } catch (error) {
+        console.warn('Discard candidate failed:', candidate, error);
+      }
+    }
+    return false;
+  } catch (error) {
+    console.warn('Failed to discard git changes:', error);
+    return false;
+  }
+};
 
 // Detect actionable tasks in plan mode responses
 // Looks for numbered lists with actionable items
@@ -462,38 +801,34 @@ function detectActionableTasks(content: string): string[] {
 }
 
 // Parse file operations from AI response
-function parseFileOperations(content: string): FileOperation[] {
+function parseFileOperations(content: string, workspaceRoot?: string): FileOperation[] {
   const operations: FileOperation[] = [];
+  const combineReasons = (...reasons: Array<string | null | undefined>) =>
+    reasons.filter(Boolean).join(' ');
+  const hasCodeFence = (value?: string) => Boolean(value && /```/.test(value));
   
-  // Parse create_file tags — complete (with closing tag) first
+  // Parse create_file tags — complete (with closing tag) only
   const createRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)<\/create_file>/g;
   let match;
-  const completePaths = new Set<string>();
   while ((match = createRegex.exec(content)) !== null) {
-    completePaths.add(match[1]);
+    const path = match[1].trim();
+    const opContent = match[2].trim();
+    const invalidReason = combineReasons(
+      getInvalidPathReason(path, workspaceRoot),
+      hasCodeFence(opContent) ? 'Code fences are not allowed inside file operation tags.' : null
+    );
     operations.push({
       type: 'create',
-      path: match[1],
-      content: match[2].trim(),
+      path,
+      content: opContent,
+      invalidReason: invalidReason || undefined,
     });
-  }
-
-  // Also parse INCOMPLETE create_file tags (streaming — no closing tag yet)
-  // Capture from the open tag up to the next open tag, closing tag, or end of string
-  const incompleteCreateRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)(?=<create_file|<edit_file|<delete_file|<\/create_file|$)/g;
-  let m2;
-  while ((m2 = incompleteCreateRegex.exec(content)) !== null) {
-    if (completePaths.has(m2[1])) continue; // already captured as complete
-    const code = m2[2].trim();
-    if (code.length > 0) {
-      operations.push({ type: 'create', path: m2[1], content: code });
-    }
   }
   
   // Parse edit_file tags - first find all edit_file blocks, then extract old/new content
   const editBlockRegex = /<edit_file\s+path="([^"]+)"(?:\s+mode="(replace|insert)")?(?:\s+line="(\d+)")?>([\s\S]*?)<\/edit_file>/g;
   while ((match = editBlockRegex.exec(content)) !== null) {
-    const path = match[1];
+    const path = match[1].trim();
     const mode = (match[2] as 'replace' | 'insert') || 'replace';
     const line = match[3] ? parseInt(match[3]) : undefined;
     const body = match[4];
@@ -505,10 +840,22 @@ function parseFileOperations(content: string): FileOperation[] {
     let oldContent = oldMatch ? oldMatch[1].trim() : undefined;
     let newContent = newMatch ? newMatch[1].trim() : undefined;
     
-    // If no old/new tags found, treat entire body as new content (simple edit)
-    if (!oldContent && !newContent) {
+    if (!oldContent && !newContent && mode === 'insert') {
       newContent = body.trim();
     }
+
+    const missingReplaceContent = mode === 'replace' && (!oldContent || !newContent);
+    const missingInsertContent = mode === 'insert' && !newContent;
+    const invalidLine = mode === 'insert' && (!line || Number.isNaN(line) || line < 1);
+    const invalidReason = combineReasons(
+      getInvalidPathReason(path, workspaceRoot),
+      hasCodeFence(oldContent) || hasCodeFence(newContent) || hasCodeFence(body)
+        ? 'Code fences are not allowed inside file operation tags.'
+        : null,
+      missingReplaceContent ? 'Edit operations must include <old_content> and <new_content>.' : null,
+      missingInsertContent ? 'Insert operations must include content.' : null,
+      invalidLine ? 'Insert operations require a valid line number.' : null
+    );
     
     operations.push({
       type: 'edit',
@@ -517,15 +864,19 @@ function parseFileOperations(content: string): FileOperation[] {
       line,
       oldContent,
       newContent,
+      invalidReason: invalidReason || undefined,
     });
   }
   
   // Parse delete_file tags
   const deleteRegex = /<delete_file\s+path="([^"]+)"\s*\/>/g;
   while ((match = deleteRegex.exec(content)) !== null) {
+    const path = match[1].trim();
+    const invalidReason = getInvalidPathReason(path, workspaceRoot);
     operations.push({
       type: 'delete',
-      path: match[1],
+      path,
+      invalidReason: invalidReason || undefined,
     });
   }
   
@@ -760,6 +1111,19 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
     setEditingText('');
   };
 
+  const taskCounts = useMemo(() => {
+    const counts = { total: tasks.length, completed: 0, skipped: 0, inProgress: 0, pending: 0 };
+    tasks.forEach((task) => {
+      if (task.status === 'completed') counts.completed += 1;
+      else if (task.status === 'skipped') counts.skipped += 1;
+      else if (task.status === 'in-progress') counts.inProgress += 1;
+      else counts.pending += 1;
+    });
+    const addressed = counts.completed + counts.skipped;
+    const remaining = Math.max(0, counts.total - addressed);
+    return { ...counts, addressed, remaining };
+  }, [tasks]);
+
   const getTaskStatusIcon = (status: 'pending' | 'in-progress' | 'completed' | 'skipped') => {
     switch (status) {
       case 'pending': return { icon: '○', color: '#808080', label: 'Pending (click to start)' };
@@ -904,7 +1268,15 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
       <div className={styles.planHeader}>
         <div className={styles.planHeaderLeft}>
           <span className={styles.planIcon}>📋</span>
-          <h3 className={styles.planTitle}>{plan.title}</h3>
+          <div className={styles.planHeaderText}>
+            <h3 className={styles.planTitle}>{plan.title}</h3>
+            {taskCounts.total > 0 && (
+              <div className={styles.planStatus}>
+                {taskCounts.addressed} addressed · {taskCounts.remaining} remaining
+                {taskCounts.inProgress > 0 && ` · ${taskCounts.inProgress} in progress`}
+              </div>
+            )}
+          </div>
         </div>
         <div className={styles.planHeaderActions}>
           <button 
@@ -1156,6 +1528,7 @@ function ChecklistView({ checklist, onImplementInAgent }: {
   const completedCount = checked.filter(Boolean).length;
   const totalCount = checklist.items.length;
   const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
+  const remainingCount = Math.max(0, totalCount - completedCount);
 
   const toggleItem = (idx: number) => {
     setChecked(prev => prev.map((v, i) => (i === idx ? !v : v)));
@@ -1166,11 +1539,30 @@ function ChecklistView({ checklist, onImplementInAgent }: {
       <div className={styles.checklistHeader}>
         <div className={styles.checklistHeaderLeft}>
           <ListChecks size={15} className={styles.checklistIcon} />
-          <h4 className={styles.checklistTitle}>{checklist.title}</h4>
+          <div className={styles.checklistHeaderText}>
+            <h4 className={styles.checklistTitle}>{checklist.title}</h4>
+            {totalCount > 0 && (
+              <div className={styles.checklistStatus}>
+                {completedCount} addressed · {remainingCount} remaining
+              </div>
+            )}
+          </div>
         </div>
-        <span className={styles.checklistProgress}>
-          {completedCount}/{totalCount}
-        </span>
+        <div className={styles.checklistHeaderRight}>
+          <span className={styles.checklistProgress}>
+            {completedCount}/{totalCount}
+          </span>
+          {onImplementInAgent && remainingCount > 0 && (
+            <button
+              className={styles.checklistFixBtn}
+              onClick={() => onImplementInAgent(checklist.items.filter((_, idx) => !checked[idx]))}
+              title="Fix remaining items in Agent Mode"
+            >
+              <Zap size={12} />
+              Fix in Agent Mode
+            </button>
+          )}
+        </div>
       </div>
       <div className={styles.checklistProgressBar}>
         <div
@@ -1191,7 +1583,9 @@ function ChecklistView({ checklist, onImplementInAgent }: {
               onChange={() => {}}
               className={styles.checklistCheckbox}
             />
-            <span className={styles.checklistItemText}>{item}</span>
+            <div className={styles.checklistItemText}>
+              <MarkdownRenderer content={item} />
+            </div>
           </li>
         ))}
       </ul>
@@ -1465,6 +1859,57 @@ function MessageBubble({ message, onOperationsChange }: {
   const { openFile } = useEditorStore();
   const { agentMode, setAgentMode, sendMessage, setAgentTasks, queuePrompt } = useAIStore();
 
+  const removeChecklistSections = useCallback((content: string, checklists: Checklist[]): string => {
+    if (checklists.length === 0) return content;
+    const titles = checklists
+      .map((c) => c.title.trim().toLowerCase())
+      .filter((t) => t.length > 0);
+    if (titles.length === 0) return content;
+
+    const lines = content.split('\n');
+    const result: string[] = [];
+    let skipping = false;
+
+    const isHeading = (line: string) => /^#{1,6}\s+/.test(line.trim());
+    const isChecklistItem = (line: string) =>
+      /^[\s]*[-*+]\s+/.test(line) ||
+      /^[\s]*\d+\.\s+/.test(line) ||
+      /^[\s]*\[[ xX]\]\s+/.test(line) ||
+      /^[\s]*[-*+]\s*\[[ xX>-]\]\s+/.test(line);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      const lower = trimmed.toLowerCase();
+      const matchesTitle = titles.some((title) => lower.includes(title));
+
+      if (!skipping && matchesTitle && (isHeading(trimmed) || lower === titles.find((t) => lower === t) || lower.includes('review fix plan'))) {
+        skipping = true;
+        continue;
+      }
+
+      if (skipping) {
+        if (trimmed.length === 0 || isChecklistItem(line)) {
+          continue;
+        }
+        if (isHeading(trimmed) && !matchesTitle) {
+          skipping = false;
+          result.push(line);
+          continue;
+        }
+        if (!isChecklistItem(line)) {
+          skipping = false;
+          result.push(line);
+          continue;
+        }
+      } else {
+        result.push(line);
+      }
+    }
+
+    return result.join('\n');
+  }, []);
+
   const copyToClipboard = () => {
     navigator.clipboard.writeText(message.content);
   };
@@ -1490,7 +1935,7 @@ function MessageBubble({ message, onOperationsChange }: {
     if (!isUser && message.content) {
       // Only parse file operations if NOT in plan mode
       if (agentMode !== 'plan') {
-        const ops = parseFileOperations(message.content);
+        const ops = parseFileOperations(message.content, currentWorkspace?.rootPath);
         setPendingOps(ops);
         // Notify parent of operations
         if (onOperationsChange) {
@@ -1736,6 +2181,11 @@ function MessageBubble({ message, onOperationsChange }: {
     return cleaned;
   };
 
+  const assistantContent = useMemo(() => {
+    const cleaned = getCleanedContent(message.content);
+    return removeChecklistSections(cleaned, planComponents.checklists);
+  }, [message.content, planComponents.checklists, removeChecklistSections]);
+
   return (
     <div className={`${styles.message} ${isUser ? styles.userMessage : styles.assistantMessage}`}>
       <div className={styles.messageHeader}>
@@ -1768,7 +2218,11 @@ function MessageBubble({ message, onOperationsChange }: {
         </div>
       )}
       <div className={styles.messageContent}>
-        {isUser ? message.content : <MarkdownRenderer content={getCleanedContent(message.content)} />}
+        {isUser ? (
+          <MarkdownRenderer content={message.content} />
+        ) : (
+          <MarkdownRenderer content={assistantContent} />
+        )}
       </div>
       {!isUser && pendingOps.length > 0 && (
         <div className={styles.fileOperations}>
@@ -1799,7 +2253,7 @@ function MessageBubble({ message, onOperationsChange }: {
             <ChecklistView
               key={idx}
               checklist={checklist}
-              onImplementInAgent={agentMode === 'plan' ? handleImplementInAgent : undefined}
+              onImplementInAgent={agentMode !== 'agent' ? handleImplementInAgent : undefined}
             />
           ))}
           {planComponents.decisions.map((decision, idx) => (
@@ -1846,6 +2300,31 @@ function MessageBubble({ message, onOperationsChange }: {
     </div>
   );
 }
+
+const MemoizedMessageBubble = memo(
+  MessageBubble,
+  (prev, next) => {
+    if (prev.message.id !== next.message.id) return false;
+    if (prev.message.role !== next.message.role) return false;
+    if (prev.message.content !== next.message.content) return false;
+    if ((prev.message.attachments?.length || 0) !== (next.message.attachments?.length || 0)) return false;
+    const prevAttachmentIds = prev.message.attachments?.map(a => a.id).join(',') || '';
+    const nextAttachmentIds = next.message.attachments?.map(a => a.id).join(',') || '';
+    if (prevAttachmentIds !== nextAttachmentIds) return false;
+    const prevUsage = prev.message.usage;
+    const nextUsage = next.message.usage;
+    if (prevUsage || nextUsage) {
+      if (!prevUsage || !nextUsage) return false;
+      if (prevUsage.totalTokens !== nextUsage.totalTokens) return false;
+      if (prevUsage.promptTokens !== nextUsage.promptTokens) return false;
+      if (prevUsage.completionTokens !== nextUsage.completionTokens) return false;
+      if (prevUsage.cacheCreationTokens !== nextUsage.cacheCreationTokens) return false;
+      if (prevUsage.cacheReadTokens !== nextUsage.cacheReadTokens) return false;
+      if (prevUsage.estimatedCostUsd !== nextUsage.estimatedCostUsd) return false;
+    }
+    return true;
+  }
+);
 
 // ─── Agent Task Progress Panel ────────────────────────────────────────────────
 function AgentTaskProgress({ tasks, onClear }: { tasks: AgentTask[]; onClear: () => void }) {
@@ -2812,6 +3291,29 @@ function MarkdownRenderer({ content }: { content: string }) {
       });
     }
 
+    // Severity badges like **[CRITICAL]**, HIGH, or LOW / CODE QUALITY
+    const severityRegex = /^\s*(\*\*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(\*\*)?(?=\s|$)/i;
+    const severityMatch = text.match(severityRegex);
+    if (severityMatch) {
+      const severity = severityMatch[2].toUpperCase();
+      const suffix = severityMatch[3] ? ` / ${severityMatch[3].toUpperCase()}` : '';
+      const end = severityMatch[0].length;
+      if (noOverlap(0, end)) {
+        matches.push({
+          start: 0,
+          end,
+          element: (
+            <span
+              key={key++}
+              className={`${styles.severityBadge} ${getSeverityClassName(severity)}`}
+            >
+              {`${severity}${suffix}`}
+            </span>
+          ),
+        });
+      }
+    }
+
     // Bold **text** — use .+? (lazy) so * inside content doesn't break the match
     const boldRegex = /\*\*(.+?)\*\*/g;
     while ((m = boldRegex.exec(text)) !== null) {
@@ -2907,7 +3409,7 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
   const [isExpanded, setIsExpanded] = useState(true);
   const [isCodeExpanded, setIsCodeExpanded] = useState(false);
   const codeRef = useRef<HTMLPreElement>(null);
-  const { openDiff } = useEditorStore();
+  const { openAIDiff } = useEditorStore();
 
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -2937,16 +3439,15 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
     const { currentWorkspace } = useWorkspaceStore.getState();
     if (!currentWorkspace) return;
 
-    const normalizedOpPath = operation.path.replace(/^\/+/, '');
-    const fullPath = operation.path.startsWith('/')
-      ? operation.path
-      : `${currentWorkspace.rootPath}/${normalizedOpPath}`;
-    const normalizedFullPath = fullPath.replace(/\/+/g, '/');
-    const relativePath = normalizedFullPath.startsWith(`${currentWorkspace.rootPath}/`)
-      ? normalizedFullPath.slice(currentWorkspace.rootPath.length + 1)
-      : normalizedOpPath;
-
-    openDiff(currentWorkspace.rootPath, relativePath, false);
+    const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, operation);
+    openAIDiff(
+      operation.path,
+      diffPayload.oldContent,
+      diffPayload.newContent,
+      diffPayload.operationType,
+      diffPayload.requiresOverwrite,
+      false
+    );
   };
   
   const getLineStats = () => {
@@ -3016,6 +3517,12 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
         </button>
         <span className={styles.fileOpExpand}>{isExpanded ? '▼' : '▶'}</span>
       </div>
+      {operation.invalidReason && (
+        <div className={styles.fileOpInvalid}>
+          <AlertTriangle size={12} />
+          <span>{operation.invalidReason}</span>
+        </div>
+      )}
       {isExpanded && (
         <>
           {operation.type === 'create' && (
@@ -3047,7 +3554,7 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
           )}
           {onApprove && onReject && (
             <div className={styles.fileOpActions}>
-              <button className={styles.fileOpApprove} onClick={onApprove}>
+              <button className={styles.fileOpApprove} onClick={onApprove} disabled={Boolean(operation.invalidReason)}>
                 Apply
               </button>
               <button className={styles.fileOpReject} onClick={onReject}>
@@ -3114,7 +3621,10 @@ function FileOperationsBar({
   onToggleExpanded,
   onKeepAll, 
   onUndoAll, 
+  onSoftUndoAll,
   onReview,
+  onViewAll,
+  onViewFile,
   onAcceptFile,
   onUndoFile
 }: { 
@@ -3123,7 +3633,11 @@ function FileOperationsBar({
   onToggleExpanded: () => void;
   onKeepAll: () => void;
   onUndoAll: () => void;
+  onSoftUndoAll: () => void;
   onReview: () => void;
+  onViewAll: () => void;
+  onDismiss: () => void;
+  onViewFile: (path: string) => void;
   onAcceptFile: (index: number) => void;
   onUndoFile: (index: number) => void;
 }) {
@@ -3193,12 +3707,33 @@ function FileOperationsBar({
         </div>
         {allApplied ? (
           <div className={styles.fileOpsBarActions}>
+            <button
+              className={styles.fileOpsBarBtn}
+              onClick={(e) => { e.stopPropagation(); onDismiss(); }}
+              title="Dismiss file operations"
+            >
+              Dismiss
+            </button>
             <button 
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
               title="Undo All"
             >
               Undo All
+            </button>
+            <button
+              className={styles.fileOpsBarBtn}
+              onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
+              title="Soft undo (restore pre-apply content only)"
+            >
+              Soft Undo
+            </button>
+            <button
+              className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
+              onClick={(e) => { e.stopPropagation(); onViewAll(); }}
+              title="View All Changes"
+            >
+              View All
             </button>
           </div>
         ) : showBatchActions && (
@@ -3210,6 +3745,13 @@ function FileOperationsBar({
             >
               Undo All
             </button>
+            <button
+              className={styles.fileOpsBarBtn}
+              onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
+              title="Soft undo (restore pre-apply content only)"
+            >
+              Soft Undo
+            </button>
             <button 
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onKeepAll(); }}
@@ -3219,10 +3761,10 @@ function FileOperationsBar({
             </button>
             <button 
               className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
-              onClick={(e) => { e.stopPropagation(); onReview(); }}
-              title="Review Changes"
+              onClick={(e) => { e.stopPropagation(); onViewAll(); }}
+              title="View All Changes"
             >
-              Review
+              View All
             </button>
           </div>
         )}
@@ -3234,6 +3776,7 @@ function FileOperationsBar({
             <div 
               key={groupIndex} 
               className={`${styles.fileOpsItem} ${group.allApplied ? styles.fileOpsItemApplied : ''}`}
+              onClick={() => onViewFile(group.path)}
             >
               <span className={`${styles.fileOpsItemIcon} ${getFileIconClass(group.operations[0].op.operation.type)}`}>
                 {getFileIcon(group.operations[0].op.operation.type)}
@@ -3251,7 +3794,8 @@ function FileOperationsBar({
                   <>
                     <button
                       className={styles.fileOpsItemBtnAccept}
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         // Accept all operations for this file
                         group.operations.forEach(({ originalIndex }) => {
                           if (!operations[originalIndex].applied) {
@@ -3265,7 +3809,8 @@ function FileOperationsBar({
                     </button>
                     <button
                       className={styles.fileOpsItemBtnReject}
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         // Reject all operations for this file
                         group.operations.forEach(({ originalIndex }) => {
                           if (!operations[originalIndex].applied) {
@@ -3281,7 +3826,8 @@ function FileOperationsBar({
                 ) : (
                   <button
                     className={styles.fileOpsItemBtnUndo}
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       // Undo all operations for this file
                       group.operations.forEach(({ originalIndex }) => {
                         if (operations[originalIndex].applied) {
@@ -3310,6 +3856,8 @@ export function AIPanel() {
     conversations,
     isStreaming,
     thinkingStatus,
+    streamContinuationPending,
+    autoContinuePending,
     promptQueue,
     agentMode,
     agentTasks,
@@ -3328,6 +3876,8 @@ export function AIPanel() {
     stopStreaming,
     finalizeStreaming,
     refreshAvailableModels,
+    availableModels,
+    copilotModelsMetadata,
     clearAgentTasks,
     updateSessionUsage,
     resetSessionUsage,
@@ -3336,6 +3886,9 @@ export function AIPanel() {
   } = useAIStore();
 
   const { currentWorkspace } = useWorkspaceStore();
+  const { setShowEditorPanel } = useLayoutStore();
+  const { openDiff, openAIDiff } = useEditorStore();
+  const { aiAutoApplyFileOps } = useSettingsStore();
 
   const [input, setInput] = useState('');
   const [showSettings, setShowSettings] = useState(false);
@@ -3346,25 +3899,68 @@ export function AIPanel() {
   const [isDragging, setIsDragging] = useState(false);
   const [allPendingOps, setAllPendingOps] = useState<PendingFileOperation[]>([]);
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
+  const [showFileOps, setShowFileOps] = useState(false);
   const [showProcessingIndicator, setShowProcessingIndicator] = useState(false);
   const [pendingResponse, setPendingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const forceScrollRef = useRef(false);
   const { deleteConversation, importConversationsFromPath } = useAIStore();
-  const prevIsStreamingRef = useRef(false);
   const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastScrollRef = useRef(0);
   const lastAutoSummaryMessageIdRef = useRef<string | null>(null);
   const [summaryExpanded, setSummaryExpanded] = useState(true);
   const autoApplyInFlightRef = useRef(false);
   const lastAutoApplyKeyRef = useRef<string | null>(null);
+  const autoApplyArmedRef = useRef(false);
+  const verifyOpsInFlightRef = useRef(false);
+  const lastPendingOpsCountRef = useRef(0);
+  const autoScrollLockRef = useRef(true);
+  const [hasReviewedPendingOps, setHasReviewedPendingOps] = useState(false);
   const hasQueuedPrompts = promptQueue.length > 0;
-  const processingLabel = thinkingStatus?.trim()
-    || (pendingResponse ? 'Waiting for model...' : (isStreaming ? 'Generating response...' : (hasQueuedPrompts ? `Queued prompt${promptQueue.length > 1 ? 's' : ''} pending...` : '')));
+  const displayThinkingStatus = autoContinuePending ? null : thinkingStatus;
+  const processingLabel = displayThinkingStatus?.trim()
+    || (isStreaming
+      ? 'Generating response...'
+      : (pendingResponse || streamContinuationPending || autoContinuePending
+        ? 'Waiting for model...'
+        : (hasQueuedPrompts ? `Queued prompt${promptQueue.length > 1 ? 's' : ''} pending...` : '')));
   const showProcessingStatus = Boolean(processingLabel);
-  const showQueueIcon = showProcessingStatus && !isStreaming && !thinkingStatus && !pendingResponse && hasQueuedPrompts;
+  const showQueueIcon = showProcessingStatus
+    && !isStreaming
+    && !displayThinkingStatus
+    && !pendingResponse
+    && !streamContinuationPending
+    && !autoContinuePending
+    && hasQueuedPrompts;
+  const hasFileOps = allPendingOps.length > 0;
+  const buildQueuePreview = useCallback((content: string): React.ReactNode => {
+    const trimmed = content.replace(/\s+/g, ' ').trim();
+    if (!trimmed) return '';
+    const match = trimmed.match(SEVERITY_PATTERN);
+    if (!match) {
+      const plain = trimmed.slice(0, 60);
+      return trimmed.length > 60 ? `${plain}...` : plain;
+    }
+
+    const severity = match[1].toUpperCase();
+    const suffix = match[2] ? ` / ${match[2].toUpperCase()}` : '';
+    let remainder = trimmed.replace(match[0], '').replace(/\*\*/g, '').trim();
+    remainder = remainder.replace(/^\s*[:\-–—]\s*/, '');
+    const previewText = remainder.slice(0, 60);
+    const preview = remainder.length > 60 ? `${previewText}...` : previewText;
+
+    return (
+      <>
+        <span className={`${styles.severityBadge} ${getSeverityClassName(severity)}`}>
+          {`${severity}${suffix}`}
+        </span>
+        <span className={styles.queuePreviewText}>{preview}</span>
+      </>
+    );
+  }, []);
 
   const getModelContextLimit = (model: string) => {
     const lower = model.toLowerCase();
@@ -3382,13 +3978,13 @@ export function AIPanel() {
       processingTimerRef.current = null;
     }
 
-    if (thinkingStatus) {
+    if (displayThinkingStatus) {
       setShowProcessingIndicator(true);
     } else if (isStreaming) {
       processingTimerRef.current = setTimeout(() => {
         setShowProcessingIndicator(true);
       }, 1200);
-    } else if (pendingResponse) {
+    } else if (pendingResponse || streamContinuationPending || autoContinuePending) {
       processingTimerRef.current = setTimeout(() => {
         setShowProcessingIndicator(true);
       }, 600);
@@ -3402,15 +3998,42 @@ export function AIPanel() {
         processingTimerRef.current = null;
       }
     };
-  }, [isStreaming, thinkingStatus, pendingResponse]);
+  }, [isStreaming, displayThinkingStatus, pendingResponse, streamContinuationPending, autoContinuePending]);
 
   useEffect(() => {
-    if (isStreaming || thinkingStatus) {
+    if (isStreaming || displayThinkingStatus || autoContinuePending) {
       setPendingResponse(false);
     }
-  }, [isStreaming, thinkingStatus]);
+  }, [isStreaming, displayThinkingStatus, autoContinuePending]);
 
   useEffect(() => {
+    if (!aiAutoApplyFileOps) {
+      autoApplyArmedRef.current = false;
+      return;
+    }
+    if (pendingResponse || isStreaming) {
+      autoApplyArmedRef.current = true;
+    }
+  }, [pendingResponse, isStreaming, aiAutoApplyFileOps]);
+
+  useEffect(() => {
+    if (allPendingOps.length > 0) {
+      setHasReviewedPendingOps(false);
+    }
+  }, [allPendingOps]);
+
+  useEffect(() => {
+    const prevCount = lastPendingOpsCountRef.current;
+    const nextCount = allPendingOps.length;
+    if (nextCount > 0 && prevCount === 0) {
+      setShowFileOps(true);
+    }
+    lastPendingOpsCountRef.current = nextCount;
+  }, [allPendingOps.length]);
+
+  useEffect(() => {
+    if (!aiAutoApplyFileOps) return;
+    if (!autoApplyArmedRef.current) return;
     if (isStreaming || autoApplyInFlightRef.current) return;
     if (allPendingOps.length === 0) return;
 
@@ -3424,8 +4047,9 @@ export function AIPanel() {
     autoApplyInFlightRef.current = true;
 
     setTimeout(() => {
-      void handleKeepAllOperations().finally(() => {
+      void handleKeepAllOperations({ skipReview: true }).finally(() => {
         autoApplyInFlightRef.current = false;
+        autoApplyArmedRef.current = false;
       });
     }, 200);
   }, [allPendingOps, isStreaming]);
@@ -3451,30 +4075,103 @@ export function AIPanel() {
   // Verify and update applied status of pending operations based on actual file state
   useEffect(() => {
     if (!currentWorkspace || allPendingOps.length === 0) return;
+    if (verifyOpsInFlightRef.current) return;
+    verifyOpsInFlightRef.current = true;
 
     const verifyOperationsStatus = async () => {
       let hasChanges = false;
-      const updatedOps = [...allPendingOps];
+      let updatedOps = [...allPendingOps];
+      let statusPaths: string[] = [];
+      let hasStatusPaths = false;
 
+      const matchesStatusPath = (opPath: string) => {
+        if (statusPaths.length === 0) return false;
+        const normalizedOpPath = normalizeRepoRelativePath(currentWorkspace.rootPath, opPath);
+        return statusPaths.some((path) => {
+          const normalizedStatus = normalizeRepoRelativePath(currentWorkspace.rootPath, path);
+          return normalizedStatus === normalizedOpPath
+            || normalizedStatus.endsWith(`/${normalizedOpPath}`)
+            || normalizedOpPath.endsWith(`/${normalizedStatus}`);
+        });
+      };
+
+      try {
+        const status = await git.status(currentWorkspace.rootPath);
+        statusPaths = [
+          ...status.staged.map((entry) => entry.path),
+          ...status.unstaged.map((entry) => entry.path),
+          ...status.untracked.map((entry) => entry.path),
+        ];
+        hasStatusPaths = statusPaths.length > 0;
+      } catch (error) {
+        console.warn('Failed to check git status for file ops:', error);
+      }
       for (let i = 0; i < updatedOps.length; i++) {
         const item = updatedOps[i];
-        
-        // Skip if already marked as applied
-        if (item.applied) continue;
-
-        // Check if file operation has actually been applied
-        if (item.operation.type === 'create') {
-          const fullPath = `${currentWorkspace.rootPath}/${item.operation.path}`;
-          try {
+        const { fullPath, error } = normalizeOperationPath(
+          item.operation.path,
+          currentWorkspace.rootPath
+        );
+        if (error) {
+          updatedOps[i] = {
+            ...item,
+            applied: false,
+            wasSkipped: true,
+            errorMessage: error,
+            operation: { ...item.operation, invalidReason: error },
+          };
+          hasChanges = true;
+          continue;
+        }
+        try {
+          let shouldApply = false;
+          let requiresOverwrite = false;
+          if (item.operation.type === 'create') {
             const exists = await fs.pathExists(fullPath);
             if (exists) {
-              console.log(`Marking operation as applied (file exists): ${item.operation.path}`);
-              updatedOps[i] = { ...item, applied: true, previousExists: true, wasSkipped: true };
-              hasChanges = true;
+              const onDisk = await fs.readFile(fullPath);
+              const normalizedDisk = normalizeContentForCompare(onDisk);
+              const normalizedIncoming = normalizeContentForCompare(item.operation.content || '');
+              shouldApply = normalizedDisk === normalizedIncoming && normalizedIncoming.length > 0;
+              requiresOverwrite = !shouldApply && normalizedIncoming.length > 0;
             }
-          } catch (err) {
-            console.error('Error checking file existence:', err);
+          } else if (item.operation.type === 'delete') {
+            const exists = await fs.pathExists(fullPath);
+            shouldApply = !exists;
+          } else if (item.operation.type === 'edit') {
+            const onDisk = await fs.readFile(fullPath);
+            const { changed, reason } = applyEditOperation(onDisk, item.operation);
+            shouldApply = !changed && reason === 'already-applied';
           }
+
+          if (shouldApply && !item.applied) {
+            updatedOps[i] = { ...item, applied: true, wasSkipped: true, requiresOverwrite: false };
+            hasChanges = true;
+          } else if (!shouldApply && item.applied) {
+            updatedOps[i] = { ...item, applied: false, wasSkipped: true, requiresOverwrite };
+            hasChanges = true;
+          } else if (!shouldApply && !item.applied && item.requiresOverwrite !== requiresOverwrite) {
+            updatedOps[i] = { ...item, requiresOverwrite };
+            hasChanges = true;
+          }
+        } catch (err) {
+          console.error('Error checking file existence:', err);
+          if (item.applied) {
+            updatedOps[i] = { ...item, applied: false, wasSkipped: true };
+            hasChanges = true;
+          }
+        }
+      }
+
+      if (hasStatusPaths) {
+        // Remove applied operations that are no longer present in git status
+        const prunedOps = updatedOps.filter((item) => {
+          if (!item.applied) return true;
+          return matchesStatusPath(item.operation.path);
+        });
+        if (prunedOps.length !== updatedOps.length) {
+          updatedOps = prunedOps;
+          hasChanges = true;
         }
       }
 
@@ -3486,38 +4183,80 @@ export function AIPanel() {
 
     // Run verification after a short delay to ensure operations are loaded
     const timeoutId = setTimeout(() => {
-      verifyOperationsStatus();
+      void verifyOperationsStatus().finally(() => {
+        verifyOpsInFlightRef.current = false;
+      });
     }, 100);
 
-    return () => clearTimeout(timeoutId);
-  }, [currentWorkspace?.rootPath, activeConversation?.id]); // Only depend on workspace and conversation ID
+    return () => {
+      clearTimeout(timeoutId);
+      verifyOpsInFlightRef.current = false;
+    };
+  }, [currentWorkspace?.rootPath, activeConversation?.id, allPendingOps]);
 
-  // Check if user is near bottom - called directly before scrolling
   const isNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return true;
-    
     const { scrollTop, scrollHeight, clientHeight } = container;
-    // User is "near bottom" if within 150px of the bottom
     return scrollHeight - scrollTop - clientHeight < 150;
   }, []);
 
-  // Auto-scroll only if user is near the bottom (checked at scroll time)
-  useEffect(() => {
-    // Only auto-scroll if forced (new message sent) or user is near bottom
-    if (forceScrollRef.current || isNearBottom()) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      forceScrollRef.current = false;
-    }
-  }, [activeConversation?.messages, isNearBottom]);
+  const updateScrollLock = useCallback(() => {
+    autoScrollLockRef.current = isNearBottom();
+  }, [isNearBottom]);
 
-  // Force scroll when user sends a new message
-  const resetScrollLock = useCallback(() => {
-    forceScrollRef.current = true;
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const container = messagesContainerRef.current;
+    if (!container || container.offsetParent === null) return;
+    if (behavior === 'smooth') {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
   }, []);
 
-  // Dummy handler to keep the ref working (scroll position is checked directly)
-  const handleScroll = useCallback(() => {}, []);
+  const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    if (!autoScrollLockRef.current) return;
+    const now = Date.now();
+    const runScroll = () => {
+      scrollToBottom(behavior);
+      lastScrollRef.current = Date.now();
+      scrollTimerRef.current = null;
+    };
+    if (now - lastScrollRef.current < 80) {
+      if (scrollTimerRef.current) return;
+      scrollTimerRef.current = setTimeout(runScroll, 80);
+      return;
+    }
+    runScroll();
+  }, [scrollToBottom]);
+
+  // Throttled auto-scroll while near bottom
+  useEffect(() => {
+    scheduleScrollToBottom('auto');
+  }, [activeConversation?.messages, scheduleScrollToBottom]);
+
+  useEffect(() => {
+    setShowFileOps(false);
+    autoScrollLockRef.current = true;
+    scheduleScrollToBottom('auto');
+  }, [activeConversation?.id, scheduleScrollToBottom]);
+
+  const resetScrollLock = useCallback(() => {
+    scheduleScrollToBottom('smooth');
+  }, [scheduleScrollToBottom]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    updateScrollLock();
+  }, [updateScrollLock]);
 
   // Auto-resize textarea based on content
   const resizeTextarea = useCallback(() => {
@@ -3545,6 +4284,39 @@ export function AIPanel() {
     if (config.provider === 'ollama' || config.provider === 'copilot') {
       refreshAvailableModels();
     }
+  }, [config.provider, refreshAvailableModels]);
+
+  // Watch for Copilot login status changes and refresh models when logged in
+  useEffect(() => {
+    if (config.provider !== 'copilot') return;
+
+    let isActive = true;
+    let lastLoggedIn: boolean | null = null;
+
+    const checkLoginAndRefresh = async () => {
+      try {
+        const status = await ai.copilotLoginStatus();
+        if (!isActive) return;
+        
+        // Only refresh if login status changed to true
+        if (status.logged_in && lastLoggedIn !== true) {
+          console.log('[AIPanel] Copilot login detected, refreshing models...');
+          refreshAvailableModels();
+        }
+        lastLoggedIn = status.logged_in;
+      } catch {
+        // Ignore errors
+      }
+    };
+
+    // Check immediately and then periodically (in case login happens in settings modal)
+    checkLoginAndRefresh();
+    const interval = setInterval(checkLoginAndRefresh, 3000);
+
+    return () => {
+      isActive = false;
+      clearInterval(interval);
+    };
   }, [config.provider, refreshAvailableModels]);
 
   // Listen for token usage events and update session tracking
@@ -3928,8 +4700,16 @@ export function AIPanel() {
   };
 
   const normalizeOperationPath = (opPath: string, workspaceRoot: string) => {
-    const normalizedOpPath = opPath.replace(/^\/+/, '');
-    const fullPath = `${workspaceRoot}/${normalizedOpPath}`.replace(/\/+/g, '/');
+    const invalidReason = getInvalidPathReason(opPath, workspaceRoot);
+    if (invalidReason) {
+      return { normalizedOpPath: '', fullPath: '', error: invalidReason };
+    }
+    const normalizedOpPath = normalizeRepoRelativePath(workspaceRoot, opPath);
+    const rootNormalized = workspaceRoot.replace(/\/+$/, '');
+    const fullPath = `${rootNormalized}/${normalizedOpPath}`.replace(/\/+/g, '/');
+    if (!fullPath.startsWith(`${rootNormalized}/`) && fullPath !== rootNormalized) {
+      return { normalizedOpPath, fullPath, error: 'Path is outside the workspace.' };
+    }
     return { normalizedOpPath, fullPath };
   };
 
@@ -3966,57 +4746,7 @@ export function AIPanel() {
     }
   };
 
-  const applyEditOperation = (currentContent: string, operation: FileOperation) => {
-    if (operation.mode === 'insert' && operation.line && operation.newContent) {
-      const lines = currentContent.split('\n');
-      const insertIdx = Math.max(0, Math.min(operation.line - 1, lines.length));
-      lines.splice(insertIdx, 0, operation.newContent);
-      const updatedContent = lines.join('\n');
-      return { updatedContent, changed: updatedContent !== currentContent };
-    }
-
-    const oldContent = operation.oldContent ?? '';
-    const newContent = operation.newContent ?? '';
-    const oldTrimmed = oldContent.trim();
-    const newTrimmed = newContent.trim();
-
-    const candidates: Array<{ oldText: string; newText: string }> = [];
-    if (oldContent && newContent) {
-      candidates.push({ oldText: oldContent, newText: newContent });
-    }
-    if (oldTrimmed && newTrimmed) {
-      candidates.push({ oldText: oldTrimmed, newText: newTrimmed });
-    }
-
-    for (const { oldText, newText } of candidates) {
-      if (currentContent.includes(oldText)) {
-        const updatedContent = currentContent.replace(oldText, newText);
-        return { updatedContent, changed: updatedContent !== currentContent };
-      }
-    }
-
-    const normalizedContent = currentContent.replace(/\r\n/g, '\n');
-    for (const { oldText, newText } of candidates) {
-      const normalizedOld = oldText.replace(/\r\n/g, '\n');
-      const normalizedNew = newText.replace(/\r\n/g, '\n');
-      if (normalizedOld && normalizedContent.includes(normalizedOld)) {
-        const updatedContent = normalizedContent.replace(normalizedOld, normalizedNew);
-        return { updatedContent, changed: updatedContent !== normalizedContent };
-      }
-    }
-
-    if (newTrimmed) {
-      if (currentContent.includes(newTrimmed)) {
-        return { updatedContent: currentContent, changed: false };
-      }
-      const updatedContent = `${currentContent}\n${newTrimmed}`;
-      return { updatedContent, changed: true };
-    }
-
-    return { updatedContent: currentContent, changed: false };
-  };
-
-  const handleKeepAllOperations = async () => {
+  const handleKeepAllOperations = async (options?: { skipReview?: boolean }) => {
     const { currentWorkspace } = useWorkspaceStore.getState();
     const { openFile } = useEditorStore.getState();
     
@@ -4025,8 +4755,18 @@ export function AIPanel() {
       return;
     }
 
+    if (!options?.skipReview && !hasReviewedPendingOps) {
+      handleReviewOperations();
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: { message: 'Review opened. Click Keep All again to apply.', type: 'info' }
+      }));
+      return;
+    }
+
     let successCount = 0;
     let skippedCount = 0;
+    let overwriteRequiredCount = 0;
+    let invalidCount = 0;
     const updatedOps = [...allPendingOps];
 
     // Apply all unapplied operations
@@ -4038,8 +4778,35 @@ export function AIPanel() {
       }
 
       try {
+        if (item.operation.invalidReason) {
+          updatedOps[i] = {
+            ...updatedOps[i],
+            operation: { ...item.operation, invalidReason: item.operation.invalidReason },
+            applied: false,
+            wasSkipped: true,
+            errorMessage: item.operation.invalidReason,
+          };
+          skippedCount++;
+          invalidCount++;
+          continue;
+        }
         // Normalize paths: remove leading slashes from operation path, normalize double slashes
-        const { normalizedOpPath, fullPath } = normalizeOperationPath(item.operation.path, currentWorkspace.rootPath);
+        const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
+          item.operation.path,
+          currentWorkspace.rootPath
+        );
+        if (error) {
+          updatedOps[i] = {
+            ...updatedOps[i],
+            operation: { ...item.operation, invalidReason: error },
+            applied: false,
+            wasSkipped: true,
+            errorMessage: error,
+          };
+          skippedCount++;
+          invalidCount++;
+          continue;
+        }
         console.log(`[FileOps] Workspace root: ${currentWorkspace.rootPath}`);
         console.log(`[FileOps] Operation path (raw): ${item.operation.path}`);
         console.log(`[FileOps] Operation path (normalized): ${normalizedOpPath}`);
@@ -4049,10 +4816,27 @@ export function AIPanel() {
           // Check if file already exists
           const fileExists = await fs.pathExists(fullPath);
           if (fileExists) {
-            console.log(`[FileOps] File already exists, skipping: ${item.operation.path}`);
-            // Mark as applied even though we skipped it
-            updatedOps[i] = { ...updatedOps[i], applied: true, wasSkipped: true, previousExists: true };
+            const existingContent = await fs.readFile(fullPath);
+            const normalizedExisting = normalizeContentForCompare(existingContent);
+            const normalizedIncoming = normalizeContentForCompare(item.operation.content || '');
+            if (normalizedExisting === normalizedIncoming && normalizedIncoming.length > 0) {
+              console.log(`[FileOps] File already exists, content matches: ${item.operation.path}`);
+              // Mark as applied even though we skipped it
+              updatedOps[i] = { ...updatedOps[i], applied: true, wasSkipped: true, previousExists: true, previousContent: existingContent };
+              skippedCount++;
+              continue;
+            }
+
+            updatedOps[i] = {
+              ...updatedOps[i],
+              applied: false,
+              wasSkipped: true,
+              previousExists: true,
+              previousContent: existingContent,
+              requiresOverwrite: true,
+            };
             skippedCount++;
+            overwriteRequiredCount++;
             continue;
           }
           
@@ -4082,22 +4866,36 @@ export function AIPanel() {
             ...updatedOps[i],
             applied: true,
             previousExists: false,
-            previousContent: undefined,
+            previousContent: '',
             wasSkipped: false,
           };
         } else if (item.operation.type === 'edit') {
           const previousContent = await fs.readFile(fullPath);
-          const { updatedContent, changed } = applyEditOperation(previousContent, item.operation);
+          const { updatedContent, changed, reason } = applyEditOperation(previousContent, item.operation);
 
           if (!changed) {
+            if (reason === 'already-applied') {
+              updatedOps[i] = {
+                ...updatedOps[i],
+                applied: true,
+                previousExists: true,
+                previousContent,
+                wasSkipped: true,
+              };
+              skippedCount++;
+              continue;
+            }
             updatedOps[i] = {
               ...updatedOps[i],
-              applied: true,
+              operation: { ...item.operation, invalidReason: 'Edit failed: <old_content> did not match the file.' },
+              applied: false,
               previousExists: true,
               previousContent,
               wasSkipped: true,
+              errorMessage: 'Edit failed: <old_content> did not match the file.',
             };
             skippedCount++;
+            invalidCount++;
             continue;
           }
 
@@ -4160,6 +4958,24 @@ export function AIPanel() {
     );
     markFileOperationsAsKept(operationIds);
 
+    if (overwriteRequiredCount > 0) {
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: {
+          message: `${overwriteRequiredCount} file(s) require overwrite. Review the AI diff to apply.`,
+          type: 'info'
+        }
+      }));
+    }
+
+    if (invalidCount > 0) {
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: {
+          message: `${invalidCount} file operation(s) were blocked due to invalid paths or unmatched edits.`,
+          type: 'error'
+        }
+      }));
+    }
+
     if (successCount > 0) {
       console.log(`[FileOps] SUCCESS: Applied ${successCount} file(s) to: ${currentWorkspace.rootPath}`);
       window.dispatchEvent(new CustomEvent('show-notification', {
@@ -4173,19 +4989,6 @@ export function AIPanel() {
   };
 
   // Auto-apply file operations when streaming ends
-  useEffect(() => {
-    const wasStreaming = prevIsStreamingRef.current;
-    prevIsStreamingRef.current = isStreaming;
-
-    if (wasStreaming && !isStreaming) {
-      const pending = allPendingOps.filter(op => !op.applied);
-      if (pending.length === 0) return;
-      // Small delay to let parseFileOperations finish updating allPendingOps state
-      setTimeout(() => { handleKeepAllOperations(); }, 400);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isStreaming]);
-
   const revertOperation = async (item: PendingFileOperation) => {
     const { currentWorkspace } = useWorkspaceStore.getState();
     const { openFile } = useEditorStore.getState();
@@ -4193,10 +4996,11 @@ export function AIPanel() {
 
     if (item.wasSkipped) return false;
 
-    const { normalizedOpPath, fullPath } = normalizeOperationPath(
+    const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
       item.operation.path,
       currentWorkspace.rootPath
     );
+    if (error) return false;
 
     if (item.operation.type === 'create') {
       if (item.previousExists) return false;
@@ -4217,17 +5021,48 @@ export function AIPanel() {
     void (async () => {
       const { unmarkFileOperationsAsKept } = useAIStore.getState();
       let undoneCount = 0;
+      const undonePaths = new Set<string>();
+      const workspaceRoot = useWorkspaceStore.getState().currentWorkspace?.rootPath;
+      const uniquePaths = Array.from(new Set(allPendingOps.map((op) => op.operation.path)));
+      const discardResults = new Map<string, boolean>();
+      let statusPaths: string[] = [];
+
+      if (workspaceRoot) {
+        try {
+          const status = await git.status(workspaceRoot);
+          statusPaths = [
+            ...status.staged.map((entry) => entry.path),
+            ...status.unstaged.map((entry) => entry.path),
+            ...status.untracked.map((entry) => entry.path),
+          ];
+        } catch (error) {
+          console.warn('Failed to load git status for undo:', error);
+        }
+        for (const path of uniquePaths) {
+          const discarded = await discardGitChanges(workspaceRoot, path, statusPaths);
+          discardResults.set(path, discarded);
+          if (discarded) {
+            undonePaths.add(path);
+          }
+        }
+      }
 
       for (const item of allPendingOps) {
         if (item.applied) {
           try {
+            if (discardResults.get(item.operation.path)) {
+              continue;
+            }
             const undone = await revertOperation(item);
-            if (undone) undoneCount++;
+            if (undone) {
+              undonePaths.add(item.operation.path);
+            }
           } catch (error) {
             console.error('Failed to undo file operation:', error);
           }
         }
       }
+      undoneCount = undonePaths.size;
 
       const operationIds = allPendingOps.map(item =>
         `${item.messageId}:${item.operation.type}:${item.operation.path}`
@@ -4243,6 +5078,51 @@ export function AIPanel() {
     })();
   };
 
+  const handleSoftUndoAllOperations = () => {
+    void (async () => {
+      const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      let undoneCount = 0;
+
+      for (const item of allPendingOps) {
+        if (item.applied) {
+          try {
+            const undone = await revertOperation(item);
+            if (undone) undoneCount++;
+          } catch (error) {
+            console.error('Failed to soft-undo file operation:', error);
+          }
+        }
+      }
+
+      const operationIds = allPendingOps.map(item =>
+        `${item.messageId}:${item.operation.type}:${item.operation.path}`
+      );
+      if (operationIds.length > 0) {
+        unmarkFileOperationsAsKept(operationIds);
+      }
+
+      setAllPendingOps([]);
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: { message: undoneCount > 0 ? `Soft-undoed ${undoneCount} file(s)` : 'Removed all file operations', type: 'info' }
+      }));
+    })();
+  };
+
+  const handleDismissFileOperations = () => {
+    const { unmarkFileOperationsAsKept } = useAIStore.getState();
+    const operationIds = allPendingOps.map(item =>
+      `${item.messageId}:${item.operation.type}:${item.operation.path}`
+    );
+    if (operationIds.length > 0) {
+      unmarkFileOperationsAsKept(operationIds);
+    }
+    setAllPendingOps([]);
+    setShowFileOps(false);
+    window.dispatchEvent(new CustomEvent('show-notification', {
+      detail: { message: 'Dismissed file operations', type: 'info' }
+    }));
+  };
+
   const handleAcceptFileOperation = async (index: number) => {
     const { currentWorkspace } = useWorkspaceStore.getState();
     const { openFile } = useEditorStore.getState();
@@ -4256,24 +5136,71 @@ export function AIPanel() {
     if (!item || item.applied) return;
 
     try {
+      if (item.operation.invalidReason) {
+        setAllPendingOps(prev => prev.map((op, idx) =>
+          idx === index
+            ? { ...op, applied: false, wasSkipped: true, errorMessage: item.operation.invalidReason, operation: { ...op.operation, invalidReason: item.operation.invalidReason } }
+            : op
+        ));
+        window.dispatchEvent(new CustomEvent('show-notification', {
+          detail: { message: item.operation.invalidReason, type: 'error' }
+        }));
+        return;
+      }
       // Normalize paths: remove leading slashes from operation path, normalize double slashes
-      const { normalizedOpPath, fullPath } = normalizeOperationPath(item.operation.path, currentWorkspace.rootPath);
+      const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
+        item.operation.path,
+        currentWorkspace.rootPath
+      );
+      if (error) {
+        setAllPendingOps(prev => prev.map((op, idx) =>
+          idx === index
+            ? { ...op, applied: false, wasSkipped: true, errorMessage: error, operation: { ...op.operation, invalidReason: error } }
+            : op
+        ));
+        window.dispatchEvent(new CustomEvent('show-notification', {
+          detail: { message: error, type: 'error' }
+        }));
+        return;
+      }
       console.log(`[FileOps] Single accept - full path: ${fullPath}`);
       
-      if (item.operation.type === 'create') {
-        // Check if file already exists
-        const fileExists = await fs.pathExists(fullPath);
-        if (fileExists) {
-          console.log(`[FileOps] File already exists, skipping: ${normalizedOpPath}`);
-          // Mark as applied even though we skipped it
-          setAllPendingOps(prev => prev.map((op, idx) => 
-            idx === index ? { ...op, applied: true, wasSkipped: true, previousExists: true } : op
-          ));
-          window.dispatchEvent(new CustomEvent('show-notification', {
-            detail: { message: `File already exists: ${normalizedOpPath}`, type: 'info' }
-          }));
-          return;
-        }
+        if (item.operation.type === 'create') {
+          // Check if file already exists
+          const fileExists = await fs.pathExists(fullPath);
+          if (fileExists) {
+            const existingContent = await fs.readFile(fullPath);
+            const normalizedExisting = normalizeContentForCompare(existingContent);
+            const normalizedIncoming = normalizeContentForCompare(item.operation.content || '');
+            if (normalizedExisting === normalizedIncoming && normalizedIncoming.length > 0) {
+              console.log(`[FileOps] File already exists, content matches: ${normalizedOpPath}`);
+              // Mark as applied even though we skipped it
+              setAllPendingOps(prev => prev.map((op, idx) =>
+                idx === index ? { ...op, applied: true, wasSkipped: true, previousExists: true, previousContent: existingContent } : op
+              ));
+              window.dispatchEvent(new CustomEvent('show-notification', {
+                detail: { message: `File already exists: ${normalizedOpPath}`, type: 'info' }
+              }));
+              return;
+            }
+
+            setAllPendingOps(prev => prev.map((op, idx) =>
+              idx === index
+                ? {
+                  ...op,
+                  applied: false,
+                  wasSkipped: true,
+                  previousExists: true,
+                  previousContent: existingContent,
+                  requiresOverwrite: true,
+                }
+                : op
+            ));
+            window.dispatchEvent(new CustomEvent('show-notification', {
+              detail: { message: `Overwrite required: ${normalizedOpPath}. Review the AI diff to apply.`, type: 'info' }
+            }));
+            return;
+          }
         
         // Ensure parent directory exists
         await ensureParentDir(fullPath, normalizedOpPath);
@@ -4285,18 +5212,29 @@ export function AIPanel() {
         await history.save(normalizedOpPath, item.operation.content || '').catch(console.error);
         await openFile(fullPath);
         setAllPendingOps(prev => prev.map((op, idx) => 
-          idx === index ? { ...op, applied: true, previousExists: false, previousContent: undefined, wasSkipped: false } : op
+          idx === index ? { ...op, applied: true, previousExists: false, previousContent: '', wasSkipped: false } : op
         ));
       } else if (item.operation.type === 'edit') {
         const previousContent = await fs.readFile(fullPath);
-        const { updatedContent, changed } = applyEditOperation(previousContent, item.operation);
+        const { updatedContent, changed, reason } = applyEditOperation(previousContent, item.operation);
 
         if (!changed) {
-          setAllPendingOps(prev => prev.map((op, idx) => 
-            idx === index ? { ...op, applied: true, previousExists: true, previousContent, wasSkipped: true } : op
+          if (reason === 'already-applied') {
+            setAllPendingOps(prev => prev.map((op, idx) => 
+              idx === index ? { ...op, applied: true, previousExists: true, previousContent, wasSkipped: true } : op
+            ));
+            window.dispatchEvent(new CustomEvent('show-notification', {
+              detail: { message: `No changes applied: ${item.operation.path}`, type: 'info' }
+            }));
+            return;
+          }
+          setAllPendingOps(prev => prev.map((op, idx) =>
+            idx === index
+              ? { ...op, applied: false, previousExists: true, previousContent, wasSkipped: true, errorMessage: 'Edit failed: <old_content> did not match the file.', operation: { ...op.operation, invalidReason: 'Edit failed: <old_content> did not match the file.' } }
+              : op
           ));
           window.dispatchEvent(new CustomEvent('show-notification', {
-            detail: { message: `No changes applied: ${item.operation.path}`, type: 'info' }
+            detail: { message: `Edit failed for ${item.operation.path}: <old_content> did not match.`, type: 'error' }
           }));
           return;
         }
@@ -4356,7 +5294,11 @@ export function AIPanel() {
 
       if (item.applied) {
         try {
-          undone = await revertOperation(item);
+          const workspaceRoot = useWorkspaceStore.getState().currentWorkspace?.rootPath;
+          const discarded = workspaceRoot
+            ? await discardGitChanges(workspaceRoot, item.operation.path)
+            : false;
+          undone = discarded || await revertOperation(item);
         } catch (error) {
           console.error('Failed to undo file operation:', error);
           window.dispatchEvent(new CustomEvent('show-notification', {
@@ -4376,12 +5318,76 @@ export function AIPanel() {
     })();
   };
 
-  const handleReviewOperations = () => {
-    // Scroll to first file operation in messages
-    const firstOpMessage = document.querySelector(`.${styles.fileOperations}`);
-    if (firstOpMessage) {
-      firstOpMessage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const openAIOperationPreview = useCallback(async (item: PendingFileOperation) => {
+    if (!currentWorkspace) return;
+    if (item.applied) {
+      const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, item.operation.path);
+      try {
+        const status = await git.status(currentWorkspace.rootPath);
+        const normalizedTarget = normalizeRepoRelativePath(currentWorkspace.rootPath, relativePath);
+        const matchesPath = (entryPath: string) => {
+          const normalizedEntry = normalizeRepoRelativePath(currentWorkspace.rootPath, entryPath);
+          return normalizedEntry === normalizedTarget
+            || normalizedEntry.endsWith(`/${normalizedTarget}`)
+            || normalizedTarget.endsWith(`/${normalizedEntry}`);
+        };
+        const stagedEntry = status.staged.find((entry) => matchesPath(entry.path));
+        const unstagedEntry = status.unstaged.find((entry) => matchesPath(entry.path));
+        const untrackedEntry = status.untracked.find((entry) => matchesPath(entry.path));
+        const entry = stagedEntry ?? unstagedEntry ?? untrackedEntry;
+        const diffStatus = (entry?.status as 'modified' | 'added' | 'deleted' | 'untracked' | 'renamed')
+          || getDiffStatusFromOperation(item.operation);
+        openDiff(currentWorkspace.rootPath, normalizedTarget, Boolean(stagedEntry), diffStatus);
+      } catch (error) {
+        const status = getDiffStatusFromOperation(item.operation);
+        openDiff(currentWorkspace.rootPath, relativePath, false, status);
+      }
+      return;
     }
+    const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
+    openAIDiff(
+      item.operation.path,
+      diffPayload.oldContent,
+      diffPayload.newContent,
+      diffPayload.operationType,
+      diffPayload.requiresOverwrite,
+      item.applied
+    );
+  }, [currentWorkspace, openAIDiff, openDiff]);
+
+  const handleReviewOperations = async () => {
+    if (!currentWorkspace) return;
+    setShowEditorPanel(true);
+    if (allPendingOps.length === 0) return;
+    const grouped = new Map<string, PendingFileOperation[]>();
+    allPendingOps.forEach((item) => {
+      const list = grouped.get(item.operation.path) || [];
+      list.push(item);
+      grouped.set(item.operation.path, list);
+    });
+
+    for (const items of grouped.values()) {
+      const item = items.find((entry) => entry.applied) || items[0];
+      if (item) {
+        await openAIOperationPreview(item);
+      }
+    }
+    setHasReviewedPendingOps(true);
+  };
+
+  const handleViewFileOperation = async (path: string) => {
+    if (!currentWorkspace) return;
+    setShowEditorPanel(true);
+    const matches = allPendingOps.filter((op) => op.operation.path === path);
+    if (matches.length > 0) {
+      const item = matches.find((entry) => entry.applied) || matches[0];
+      await openAIOperationPreview(item);
+      setHasReviewedPendingOps(true);
+      return;
+    }
+    const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, path);
+    openDiff(currentWorkspace.rootPath, relativePath, false);
+    setHasReviewedPendingOps(true);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -4405,6 +5411,11 @@ export function AIPanel() {
     } else {
       await sendMessage(message, messageAttachments);
     }
+  };
+
+  const handleNewChat = () => {
+    setShowFileOps(false);
+    createConversation();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -4488,7 +5499,7 @@ export function AIPanel() {
         <div className={styles.headerActions}>
           <button
             className={styles.newChatBtn}
-            onClick={createConversation}
+            onClick={handleNewChat}
             title="New Chat"
           >
             <Plus size={14} />
@@ -4508,6 +5519,14 @@ export function AIPanel() {
             title="Chat History"
           >
             <History size={16} />
+          </button>
+          <button
+            className={`${styles.headerBtn} ${showFileOps ? styles.active : ''}`}
+            onClick={() => setShowFileOps((prev) => !prev)}
+            title={hasFileOps ? (showFileOps ? 'Hide file operations' : 'Show file operations') : 'No file operations'}
+            disabled={!hasFileOps}
+          >
+            <List size={16} />
           </button>
         </div>
       </div>
@@ -4714,9 +5733,13 @@ export function AIPanel() {
                   </strong>
                   <p>
                     {agentMode === 'agent' 
-                      ? 'The AI can create, edit, and delete files in your workspace. Changes apply automatically, and you can undo them in File Operations.'
+                      ? aiAutoApplyFileOps
+                        ? 'The AI can create, edit, and delete files in your workspace. Changes apply automatically, and you can undo them in File Operations.'
+                        : 'The AI can create, edit, and delete files in your workspace. Review changes in File Operations before applying.'
                       : agentMode === 'edit'
-                      ? 'The AI will help you edit existing files with precise changes. Edits apply automatically, and you can undo them in File Operations.'
+                      ? aiAutoApplyFileOps
+                        ? 'The AI will help you edit existing files with precise changes. Edits apply automatically, and you can undo them in File Operations.'
+                        : 'The AI will help you edit existing files with precise changes. Review edits in File Operations before applying.'
                       : agentMode === 'plan'
                       ? 'The AI will help you plan and design solutions before implementation. Focus on architecture, approaches, and breaking down tasks.'
                       : 'The AI will analyze pending changes and generate comprehensive tests including unit, integration, security, and dependency audits.'}
@@ -4731,7 +5754,7 @@ export function AIPanel() {
               />
             )}
             {activeConversation.messages.map((message) => (
-              <MessageBubble 
+              <MemoizedMessageBubble 
                 key={message.id} 
                 message={message} 
                 onOperationsChange={async (ops) => {
@@ -4747,19 +5770,58 @@ export function AIPanel() {
                         console.log(`Operation marked as kept in history: ${op.path}`);
                         return { operation: op, messageId: message.id, applied: true };
                       }
+
+                      if (op.invalidReason) {
+                        return {
+                          operation: { ...op, invalidReason: op.invalidReason },
+                          messageId: message.id,
+                          applied: false,
+                          errorMessage: op.invalidReason,
+                        };
+                      }
                       
-                      // Otherwise check if file exists
+                      // Otherwise check if operation already applied on disk
                       let alreadyApplied = false;
-                      if (op.type === 'create' && currentWorkspace) {
-                        const fullPath = `${currentWorkspace.rootPath}/${op.path}`;
+                      let requiresOverwrite = false;
+                      if (currentWorkspace) {
+                        const { fullPath, error } = normalizeOperationPath(op.path, currentWorkspace.rootPath);
+                        if (error) {
+                          return {
+                            operation: { ...op, invalidReason: error },
+                            messageId: message.id,
+                            applied: false,
+                            errorMessage: error,
+                          };
+                        }
                         try {
-                          alreadyApplied = await fs.pathExists(fullPath);
+                          if (op.type === 'create') {
+                            const exists = await fs.pathExists(fullPath);
+                            if (exists) {
+                              const onDisk = await fs.readFile(fullPath);
+                              const normalizedDisk = normalizeContentForCompare(onDisk);
+                              const normalizedIncoming = normalizeContentForCompare(op.content || '');
+                              alreadyApplied = normalizedDisk === normalizedIncoming && normalizedIncoming.length > 0;
+                              requiresOverwrite = !alreadyApplied && normalizedIncoming.length > 0;
+                            }
+                          } else if (op.type === 'delete') {
+                            const exists = await fs.pathExists(fullPath);
+                            alreadyApplied = !exists;
+                          } else if (op.type === 'edit') {
+                            const onDisk = await fs.readFile(fullPath);
+                            const { changed, reason } = applyEditOperation(onDisk, op);
+                            alreadyApplied = !changed && reason === 'already-applied';
+                          }
                         } catch (err) {
                           console.error('Error checking file existence:', err);
                         }
                       }
                       
-                      return { operation: op, messageId: message.id, applied: alreadyApplied };
+                      return {
+                        operation: op,
+                        messageId: message.id,
+                        applied: alreadyApplied,
+                        requiresOverwrite,
+                      };
                     })
                   );
                   
@@ -4876,8 +5938,7 @@ export function AIPanel() {
           <div className={styles.queueInfo}>
             <span className={styles.queueCount}>{promptQueue.length} prompt{promptQueue.length > 1 ? 's' : ''} queued</span>
             <span className={styles.queuePreview}>
-              {promptQueue[0].content.slice(0, 50)}
-              {promptQueue[0].content.length > 50 ? '...' : ''}
+              {buildQueuePreview(promptQueue[0].content)}
             </span>
           </div>
           <button 
@@ -4890,16 +5951,22 @@ export function AIPanel() {
         </div>
       )}
 
-      <FileOperationsBar
-        operations={allPendingOps}
-        expanded={fileOpsExpanded}
-        onToggleExpanded={() => setFileOpsExpanded(!fileOpsExpanded)}
-        onKeepAll={handleKeepAllOperations}
-        onUndoAll={handleUndoAllOperations}
-        onReview={handleReviewOperations}
-        onAcceptFile={handleAcceptFileOperation}
-        onUndoFile={handleUndoFileOperation}
-      />
+      {showFileOps && (
+        <FileOperationsBar
+          operations={allPendingOps}
+          expanded={fileOpsExpanded}
+          onToggleExpanded={() => setFileOpsExpanded(!fileOpsExpanded)}
+          onKeepAll={handleKeepAllOperations}
+          onUndoAll={handleUndoAllOperations}
+          onSoftUndoAll={handleSoftUndoAllOperations}
+          onDismiss={handleDismissFileOperations}
+          onReview={handleReviewOperations}
+          onViewAll={handleReviewOperations}
+          onViewFile={handleViewFileOperation}
+          onAcceptFile={handleAcceptFileOperation}
+          onUndoFile={handleUndoFileOperation}
+        />
+      )}
 
       <div 
         className={`${styles.inputContainer} ${isDragging ? styles.dragging : ''}`}
@@ -4993,10 +6060,13 @@ export function AIPanel() {
                   useAIStore.getState().setConfig({ model: selectedModel });
                 }}
                 className={styles.modelDropdown}
+                title={config.provider === 'copilot' ? getModelPricingTooltip(config.model, copilotModelsMetadata) : undefined}
               >
                 <optgroup label={config.provider}>
-                  {useAIStore.getState().availableModels[config.provider].map(model => (
-                    <option key={model} value={model}>{model}</option>
+                  {(availableModels[config.provider] || []).map((model) => (
+                    <option key={model} value={model}>
+                      {formatModelLabel(config.provider, model, copilotModelsMetadata)}
+                    </option>
                   ))}
                 </optgroup>
               </select>
@@ -5005,7 +6075,7 @@ export function AIPanel() {
               <button
                 type="button"
                 className={styles.controlBtn}
-                onClick={createConversation}
+                onClick={handleNewChat}
                 title="New Chat"
               >
                 <Plus size={16} />
@@ -5157,15 +6227,6 @@ export function AIPanel() {
   );
 }
 
-type CopilotDeviceCode = {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete?: string;
-  expires_in: number;
-  interval: number;
-};
-
 type CopilotUsageInfo = {
   total: number;
   added_this_cycle: number;
@@ -5178,11 +6239,23 @@ type CopilotUsageInfo = {
 };
 
 function AISettings({ onClose }: { onClose: () => void }) {
-  const { config, setConfig, availableModels, refreshAvailableModels } = useAIStore();
+  const { config, setConfig, availableModels, copilotModelsMetadata, refreshAvailableModels } = useAIStore();
   const [copilotLoggedIn, setCopilotLoggedIn] = useState<boolean | null>(null);
-  const [copilotDevice, setCopilotDevice] = useState<CopilotDeviceCode | null>(null);
   const [copilotPolling, setCopilotPolling] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
+  const [copilotAccounts, setCopilotAccounts] = useState<CopilotCachedAccount[]>([]);
+  const [copilotAccountsLoading, setCopilotAccountsLoading] = useState(false);
+  const [copilotAccountsError, setCopilotAccountsError] = useState<string | null>(null);
+  const [copilotAccountsNotice, setCopilotAccountsNotice] = useState<string | null>(null);
+  const [copilotUseDeveloperOAuth, setCopilotUseDeveloperOAuth] = useState(false);
+  const [showCopilotAccountPicker, setShowCopilotAccountPicker] = useState(false);
+  const [copilotDeviceCode, setCopilotDeviceCode] = useState<CopilotDeviceCode | null>(null);
+  const [showEnterpriseModal, setShowEnterpriseModal] = useState(false);
+  const [enterpriseTypeDraft, setEnterpriseTypeDraft] = useState<'ghe' | 'ghes'>('ghes');
+  const [enterpriseHostDraft, setEnterpriseHostDraft] = useState('');
+  const [enterpriseModalError, setEnterpriseModalError] = useState<string | null>(null);
+  const [enterpriseLoginStarted, setEnterpriseLoginStarted] = useState(false);
+  const [pendingEnterpriseLogin, setPendingEnterpriseLogin] = useState(false);
   const [copilotUsage, setCopilotUsage] = useState<CopilotUsageInfo | null>(null);
   const [copilotUsageError, setCopilotUsageError] = useState<string | null>(null);
   const [copilotUsageLoading, setCopilotUsageLoading] = useState(false);
@@ -5190,13 +6263,67 @@ function AISettings({ onClose }: { onClose: () => void }) {
   const [copilotOrgsError, setCopilotOrgsError] = useState<string | null>(null);
   const [copilotOrgsLoading, setCopilotOrgsLoading] = useState(false);
 
+  const resolveEnterpriseHost = useCallback((value: string, type: 'ghe' | 'ghes') => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return '';
+    }
+    const stripProtocol = (input: string) =>
+      input.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    if (type === 'ghe') {
+      if (trimmed.includes('://')) {
+        try {
+          return new URL(trimmed).host;
+        } catch {
+          return stripProtocol(trimmed);
+        }
+      }
+      const normalized = stripProtocol(trimmed);
+      if (normalized.includes('.')) {
+        return normalized;
+      }
+      return `${normalized}.ghe.com`;
+    }
+    return stripProtocol(trimmed);
+  }, []);
+
+  const copilotAuthMode = config.copilotAuthMode || 'github';
+  const copilotEnterpriseType = (config.copilotEnterpriseType || 'ghes') as 'ghe' | 'ghes';
+  const enterpriseHostInput = (config.copilotAuthHost || '').trim();
+  const resolvedEnterpriseHost = useMemo(
+    () => resolveEnterpriseHost(enterpriseHostInput, copilotEnterpriseType),
+    [copilotEnterpriseType, enterpriseHostInput, resolveEnterpriseHost]
+  );
+  const draftResolvedEnterpriseHost = useMemo(
+    () => resolveEnterpriseHost(enterpriseHostDraft, enterpriseTypeDraft),
+    [enterpriseHostDraft, enterpriseTypeDraft, resolveEnterpriseHost]
+  );
+  const copilotAuthHost = useMemo(() => {
+    if (copilotAuthMode === 'enterprise') {
+      return resolvedEnterpriseHost;
+    }
+    return 'github.com';
+  }, [copilotAuthMode, resolvedEnterpriseHost]);
+  const copilotNeedsEnterpriseHost = copilotAuthMode === 'enterprise' && !enterpriseHostInput;
+  const copilotEnterpriseClientId = (config.copilotClientId || '').trim();
+  const copilotCanStartDeviceFlow = copilotAuthMode === 'enterprise' || !copilotNeedsEnterpriseHost;
+
   useEffect(() => {
     let isActive = true;
     if (config.provider !== 'copilot') {
-      setCopilotDevice(null);
       setCopilotPolling(false);
       setCopilotError(null);
       setCopilotLoggedIn(null);
+      setCopilotAccounts([]);
+      setCopilotAccountsLoading(false);
+      setCopilotAccountsError(null);
+      setCopilotAccountsNotice(null);
+      setCopilotUseDeveloperOAuth(false);
+      setShowCopilotAccountPicker(false);
+      setCopilotDeviceCode(null);
+      setShowEnterpriseModal(false);
+      setEnterpriseModalError(null);
+      setEnterpriseLoginStarted(false);
       setCopilotUsage(null);
       setCopilotUsageError(null);
       setCopilotUsageLoading(false);
@@ -5224,6 +6351,85 @@ function AISettings({ onClose }: { onClose: () => void }) {
       isActive = false;
     };
   }, [config.provider]);
+
+  // Auto-refresh models when Copilot login status changes to logged in
+  useEffect(() => {
+    if (config.provider === 'copilot' && copilotLoggedIn === true) {
+      console.log('[AISettings] Copilot logged in, refreshing models...');
+      refreshAvailableModels();
+    }
+  }, [config.provider, copilotLoggedIn, refreshAvailableModels]);
+
+  useEffect(() => {
+    if (copilotAuthMode === 'enterprise' && copilotUseDeveloperOAuth) {
+      setCopilotUseDeveloperOAuth(false);
+    }
+    if (copilotAuthMode !== 'enterprise') {
+      setEnterpriseLoginStarted(false);
+      setCopilotAccountsNotice(null);
+    }
+  }, [copilotAuthMode, copilotUseDeveloperOAuth]);
+
+  const reloadCopilotAccounts = useCallback(async (): Promise<CopilotCachedAccount[]> => {
+    setCopilotAccountsError(null);
+    setCopilotAccountsLoading(true);
+    try {
+      if (copilotAuthMode === 'enterprise' && !copilotAuthHost) {
+        setCopilotAccounts([]);
+        setCopilotAccountsError('Enter your Enterprise host to load cached accounts.');
+        return [];
+      }
+      const cached = await ai.copilotCachedAccountsList(copilotAuthHost || undefined);
+      console.debug('[copilot] reload accounts', cached);
+      setCopilotAccounts(cached);
+      if (cached.length > 0) {
+        setCopilotAccountsError(null);
+        setCopilotAccountsNotice(null);
+        if (enterpriseLoginStarted) {
+          setEnterpriseLoginStarted(false);
+        }
+      } else if (!enterpriseLoginStarted) {
+        setCopilotAccountsError('No Copilot accounts found for this host.');
+      } else {
+        setCopilotAccountsError(null);
+      }
+      return cached;
+    } catch (error) {
+      console.debug('[copilot] reload accounts failed', error);
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to load Copilot accounts.';
+      setCopilotAccountsError(message);
+      return [];
+    } finally {
+      setCopilotAccountsLoading(false);
+    }
+  }, [copilotAuthHost, copilotAuthMode, enterpriseLoginStarted]);
+
+  useEffect(() => {
+    if (config.provider !== 'copilot') {
+      return;
+    }
+    let isActive = true;
+    reloadCopilotAccounts().finally(() => {
+      if (!isActive) {
+        return;
+      }
+    });
+    return () => {
+      isActive = false;
+    };
+  }, [config.provider, reloadCopilotAccounts]);
+
+  useEffect(() => {
+    if (config.provider !== 'copilot') {
+      return;
+    }
+    setCopilotDeviceCode(null);
+    void reloadCopilotAccounts();
+  }, [config.provider, copilotAuthHost, copilotAuthMode, reloadCopilotAccounts]);
 
   useEffect(() => {
     let isActive = true;
@@ -5292,36 +6498,23 @@ function AISettings({ onClose }: { onClose: () => void }) {
 
   const handleCopilotLogin = async () => {
     setCopilotError(null);
-    setCopilotDevice(null);
     setCopilotPolling(false);
 
+    const clientId = (config.copilotClientId || '').trim();
+    const clientSecret = (config.copilotClientSecret || '').trim();
+
+    if (!clientId || !clientSecret) {
+      setCopilotError('GitHub OAuth client ID and secret are required.');
+      return;
+    }
+
     try {
-      const device = await ai.copilotDeviceLoginStart(config.copilotClientId || undefined);
-      setCopilotDevice(device);
-
-      const verificationUrl = device.verification_uri_complete || device.verification_uri;
-      if (verificationUrl) {
-        await shell.openExternal(verificationUrl);
-      }
-
-      if (navigator.clipboard?.writeText) {
-        try {
-          await navigator.clipboard.writeText(device.user_code);
-        } catch {
-          // Ignore clipboard failures
-        }
-      }
-
+      const start = await ai.copilotOAuthStart(clientId);
+      await shell.openExternal(start.authorize_url);
       setCopilotPolling(true);
-      await ai.copilotDeviceLoginPoll(
-        device.device_code,
-        device.interval,
-        device.expires_in,
-        config.copilotClientId || undefined
-      );
+      await ai.copilotOAuthPoll(start.state, clientId, clientSecret);
       setCopilotLoggedIn(true);
-      setCopilotDevice(null);
-      refreshAvailableModels();
+      await refreshAvailableModels();
     } catch (error) {
       const errorMessage = error instanceof Error
         ? error.message
@@ -5335,12 +6528,187 @@ function AISettings({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const openEnterpriseModal = (startLogin: boolean) => {
+    setEnterpriseTypeDraft(copilotEnterpriseType);
+    setEnterpriseHostDraft(enterpriseHostInput);
+    setEnterpriseModalError(null);
+    setPendingEnterpriseLogin(startLogin);
+    setShowEnterpriseModal(true);
+  };
+
+  const handleEnterpriseLogin = async (
+    hostInput: string = enterpriseHostInput,
+    type: 'ghe' | 'ghes' = copilotEnterpriseType
+  ) => {
+    const resolvedHost = resolveEnterpriseHost(hostInput, type);
+    if (!resolvedHost) {
+      openEnterpriseModal(true);
+      return;
+    }
+    const loginUrl = `https://${resolvedHost}/login`;
+    try {
+      await shell.openExternal(loginUrl);
+      setEnterpriseLoginStarted(true);
+      setCopilotAccountsNotice(
+        'Finish signing in with GitHub Enterprise, then click Reload accounts.'
+      );
+      setCopilotAccountsError(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to open Enterprise login.';
+      setCopilotAccountsError(errorMessage);
+    }
+  };
+
+  const handleEnterpriseModalContinue = async () => {
+    const trimmedHost = enterpriseHostDraft.trim();
+    if (!trimmedHost) {
+      setEnterpriseModalError('Enterprise host is required.');
+      return;
+    }
+    setConfig({
+      copilotEnterpriseType: enterpriseTypeDraft,
+      copilotAuthHost: trimmedHost,
+    });
+    setShowEnterpriseModal(false);
+    setEnterpriseModalError(null);
+    const shouldLogin = pendingEnterpriseLogin;
+    setPendingEnterpriseLogin(false);
+    if (shouldLogin) {
+      await handleEnterpriseLogin(trimmedHost, enterpriseTypeDraft);
+    }
+  };
+
+  const copyCopilotCode = useCallback(async (code: string) => {
+    if (!code) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(code);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = code;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    } catch (error) {
+      console.error('Failed to copy Copilot code:', error);
+    }
+  }, []);
+
+  const handleCopilotDeviceFlow = async () => {
+    setCopilotError(null);
+    setCopilotAccountsError(null);
+    setCopilotAccountsNotice(null);
+    setCopilotPolling(false);
+    setCopilotDeviceCode(null);
+
+    if (copilotAuthMode === 'enterprise') {
+      await handleEnterpriseLogin();
+      return;
+    }
+
+    try {
+      const deviceFlowClientId =
+        copilotAuthMode === 'enterprise' ? copilotEnterpriseClientId || undefined : undefined;
+      const deviceCode = await ai.copilotDeviceLoginStart(
+        copilotAuthHost || undefined,
+        deviceFlowClientId
+      );
+      setCopilotDeviceCode(deviceCode);
+      await shell.openExternal(deviceCode.verification_uri);
+      setCopilotPolling(true);
+      await ai.copilotDeviceLoginPoll(
+        deviceCode.device_code,
+        deviceCode.interval,
+        deviceCode.expires_in,
+        copilotAuthHost || undefined,
+        deviceFlowClientId
+      );
+      setCopilotLoggedIn(true);
+      setShowCopilotAccountPicker(false);
+      await reloadCopilotAccounts();
+      await refreshAvailableModels();
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to connect to Copilot';
+      setCopilotError(errorMessage);
+      setCopilotAccountsError(errorMessage);
+      setCopilotLoggedIn(false);
+    } finally {
+      setCopilotPolling(false);
+    }
+  };
+
+  const handleCopilotSignIn = async () => {
+    if (copilotUseDeveloperOAuth) {
+      await handleCopilotLogin();
+      return;
+    }
+    setCopilotError(null);
+    setCopilotDeviceCode(null);
+    setShowCopilotAccountPicker(true);
+    const accounts = await reloadCopilotAccounts();
+    if (accounts.length === 0) {
+      await handleCopilotDeviceFlow();
+      return;
+    }
+  };
+
+  const handleCopilotChangeAccount = async () => {
+    setCopilotError(null);
+    setCopilotUseDeveloperOAuth(false);
+    setCopilotDeviceCode(null);
+    setShowCopilotAccountPicker(true);
+    const accounts = await reloadCopilotAccounts();
+    if (accounts.length === 0) {
+      await handleCopilotDeviceFlow();
+      return;
+    }
+  };
+
+  const handleCopilotAccountSelect = async (account: CopilotCachedAccount) => {
+    setCopilotError(null);
+    setCopilotPolling(false);
+    try {
+      setCopilotPolling(true);
+      await ai.copilotCachedAccountImport(account.host, account.username);
+      setCopilotLoggedIn(true);
+      setShowCopilotAccountPicker(false);
+      await refreshAvailableModels();
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to reuse Copilot account';
+      setCopilotError(errorMessage);
+      setCopilotLoggedIn(false);
+    } finally {
+      setCopilotPolling(false);
+    }
+  };
+
   const handleCopilotLogout = async () => {
     setCopilotError(null);
     try {
       await ai.copilotDeviceLogout();
       setCopilotLoggedIn(false);
-      setCopilotDevice(null);
+      setCopilotUseDeveloperOAuth(false);
+      setShowCopilotAccountPicker(true);
+      setCopilotDeviceCode(null);
+      await reloadCopilotAccounts({ includeLocal: false });
     } catch (error) {
       const errorMessage = error instanceof Error
         ? error.message
@@ -5348,17 +6716,6 @@ function AISettings({ onClose }: { onClose: () => void }) {
         ? error
         : 'Failed to disconnect Copilot';
       setCopilotError(errorMessage);
-    }
-  };
-
-  const handleCopilotCopyCode = async () => {
-    if (!copilotDevice?.user_code || !navigator.clipboard?.writeText) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(copilotDevice.user_code);
-    } catch {
-      // Ignore clipboard failures
     }
   };
 
@@ -5413,6 +6770,174 @@ function AISettings({ onClose }: { onClose: () => void }) {
           <>
             <div className={styles.settingGroup}>
               <label>GitHub Copilot</label>
+              <div className={styles.copilotHostRow}>
+                <label className={styles.copilotHostOption}>
+                  <input
+                    type="radio"
+                    name="copilot-host"
+                    checked={copilotAuthMode === 'github'}
+                    onChange={() => {
+                      setConfig({ copilotAuthMode: 'github', copilotAuthHost: 'github.com' });
+                      setCopilotDeviceCode(null);
+                    }}
+                  />
+                  GitHub.com
+                </label>
+                <label className={styles.copilotHostOption}>
+                  <input
+                    type="radio"
+                    name="copilot-host"
+                    checked={copilotAuthMode === 'enterprise'}
+                    onChange={() => {
+                      setConfig({
+                        copilotAuthMode: 'enterprise',
+                        copilotAuthHost:
+                          config.copilotAuthHost === 'github.com'
+                            ? ''
+                            : (config.copilotAuthHost || ''),
+                        copilotEnterpriseType: config.copilotEnterpriseType || 'ghes',
+                      });
+                      setCopilotDeviceCode(null);
+                    }}
+                  />
+                  Enterprise
+                </label>
+              </div>
+              {copilotAuthMode === 'enterprise' && (
+                <div className={styles.copilotEnterpriseRow}>
+                  <div className={styles.copilotEnterpriseInfo}>
+                    <span className={styles.copilotEnterpriseLabel}>
+                      {enterpriseHostInput
+                        ? copilotEnterpriseType === 'ghe'
+                          ? 'GHE.com (Enterprise Cloud)'
+                          : 'GitHub Enterprise Server'
+                        : 'Enterprise not configured'}
+                    </span>
+                    {enterpriseHostInput && (
+                      <span className={styles.settingHint}>
+                        Using {resolvedEnterpriseHost}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    className={styles.copilotButton}
+                    type="button"
+                    onClick={() => openEnterpriseModal(false)}
+                  >
+                    Configure Enterprise
+                  </button>
+                </div>
+              )}
+              {!copilotUseDeveloperOAuth && showCopilotAccountPicker && (
+                <>
+                  {copilotAccountsLoading && (
+                    <p className={styles.settingHint}>Loading cached Copilot accounts...</p>
+                  )}
+                  {!copilotAccountsLoading && (
+                    <div className={styles.copilotAccountBox}>
+                      <div className={styles.copilotAccountHeader}>
+                        <span>
+                          {copilotAuthMode === 'enterprise'
+                            ? `Enterprise accounts on ${resolvedEnterpriseHost || 'Enterprise'}`
+                            : 'Cached GitHub.com accounts'}
+                        </span>
+                        <div className={styles.copilotAccountActions}>
+                          <button
+                            className={styles.copilotButton}
+                            type="button"
+                            onClick={handleCopilotDeviceFlow}
+                            disabled={copilotPolling || !copilotCanStartDeviceFlow}
+                            title={
+                              copilotCanStartDeviceFlow
+                                ? copilotAuthMode === 'enterprise'
+                                  ? 'Open Enterprise login'
+                                  : 'Start device login'
+                                : 'Enter an Enterprise host first.'
+                            }
+                          >
+                            {copilotAuthMode === 'enterprise' ? 'Open login' : 'Add account'}
+                          </button>
+                            <button
+                              className={styles.copilotButton}
+                              type="button"
+                              onClick={() => void reloadCopilotAccounts()}
+                            >
+                            {copilotAuthMode === 'enterprise' && enterpriseLoginStarted
+                              ? "I've signed in"
+                              : 'Reload'}
+                          </button>
+                          <button
+                            className={styles.copilotButton}
+                            type="button"
+                            onClick={() => setShowCopilotAccountPicker(false)}
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                      {copilotDeviceCode && (
+                        <div className={styles.copilotDeviceBox}>
+                          <div className={styles.copilotDeviceRow}>
+                            <span>Enter code</span>
+                            <span className={styles.copilotDeviceCode}>{copilotDeviceCode.user_code}</span>
+                            <button
+                              className={styles.copilotButton}
+                              type="button"
+                              onClick={() => void copyCopilotCode(copilotDeviceCode.user_code)}
+                            >
+                              Copy
+                            </button>
+                          </div>
+                          <div className={styles.copilotDeviceRow}>
+                            <span>Verification</span>
+                            <button
+                              className={styles.copilotButton}
+                              type="button"
+                              onClick={() => void shell.openExternal(copilotDeviceCode.verification_uri)}
+                            >
+                              Open page
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {copilotAccounts.length === 0 ? (
+                        <p className={styles.copilotError}>
+                          No accounts detected yet. Use {copilotAuthMode === 'enterprise' ? '"Open login"' : '"Add account"'} to sign in.
+                        </p>
+                      ) : (
+                        <>
+                          {copilotAccounts.length > 0 && (
+                            <>
+                              <p className={styles.settingHint}>Cached accounts</p>
+                              {copilotAccounts.map((account, index) => (
+                                <div
+                                  key={`${account.host}-${account.username}-${index}`}
+                                  className={styles.copilotAccountRow}
+                                >
+                                  <div className={styles.copilotAccountInfo}>
+                                    <span className={styles.copilotAccountUser}>{account.username}</span>
+                                    <span className={styles.copilotAccountSource}>{account.source}</span>
+                                  </div>
+                                  <button
+                                    className={styles.copilotButton}
+                                    type="button"
+                                    onClick={() => handleCopilotAccountSelect(account)}
+                                    disabled={copilotPolling}
+                                  >
+                                    Select
+                                  </button>
+                                </div>
+                              ))}
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {copilotAccountsError && <p className={styles.copilotError}>{copilotAccountsError}</p>}
+                  {copilotAccountsNotice && <p className={styles.settingHint}>{copilotAccountsNotice}</p>}
+                </>
+              )}
               <div className={styles.copilotStatusRow}>
                 <span
                   className={`${styles.copilotStatus} ${
@@ -5422,65 +6947,167 @@ function AISettings({ onClose }: { onClose: () => void }) {
                   {copilotLoggedIn ? 'Connected' : 'Not connected'}
                 </span>
                 {copilotLoggedIn ? (
-                  <button
-                    className={styles.copilotButton}
-                    onClick={handleCopilotLogout}
-                    type="button"
-                  >
-                    Sign out
-                  </button>
-                ) : (
-                  <button
-                    className={styles.copilotButton}
-                    onClick={handleCopilotLogin}
-                    type="button"
-                  >
-                    Sign in
-                  </button>
-                )}
-              </div>
-              {copilotDevice && (
-                <div className={styles.copilotDeviceBox}>
-                  <div className={styles.copilotDeviceRow}>
-                    <span className={styles.copilotDeviceCode}>{copilotDevice.user_code}</span>
+                  <div className={styles.copilotAuthActions}>
                     <button
                       className={styles.copilotButton}
-                      onClick={handleCopilotCopyCode}
+                      onClick={handleCopilotChangeAccount}
                       type="button"
                     >
-                      Copy code
+                      Change account
                     </button>
                     <button
                       className={styles.copilotButton}
-                      onClick={() => shell.openExternal(copilotDevice.verification_uri_complete || copilotDevice.verification_uri)}
+                      onClick={handleCopilotLogout}
                       type="button"
                     >
-                      Open GitHub
+                      Sign out
                     </button>
                   </div>
-                  <p className={styles.settingHint}>
-                    Enter the code at GitHub to finish connecting.
-                    {copilotPolling ? ' Waiting for authorization...' : ''}
-                  </p>
-                </div>
+                ) : (
+                  <div className={styles.copilotAuthActions}>
+                    <button
+                      className={styles.copilotButton}
+                      onClick={handleCopilotSignIn}
+                      type="button"
+                      disabled={copilotPolling}
+                    >
+                      {copilotPolling ? 'Connecting...' : 'Select account'}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {copilotPolling && (
+                <p className={styles.settingHint}>Connecting to Copilot...</p>
               )}
-              {!copilotDevice && copilotPolling && (
-                <p className={styles.settingHint}>Waiting for authorization...</p>
+              {!copilotLoggedIn && copilotAuthMode === 'github' && (
+                <label className={styles.copilotCheckboxRow}>
+                  <input
+                    className={styles.copilotCheckbox}
+                    type="checkbox"
+                    checked={copilotUseDeveloperOAuth}
+                    onChange={(event) => {
+                      setCopilotUseDeveloperOAuth(event.target.checked);
+                      setShowCopilotAccountPicker(false);
+                      setCopilotAccountsError(null);
+                      setCopilotDeviceCode(null);
+                    }}
+                  />
+                  Use developer OAuth client ID + secret
+                </label>
               )}
+              {!copilotLoggedIn && (
+                <p className={styles.settingHint}>
+                  {copilotAuthMode === 'enterprise'
+                    ? 'Enterprise login opens your instance in the browser. After signing in, click Reload accounts.'
+                    : "Device login uses GitHub's device flow and caches accounts locally. OAuth app login uses a client ID + secret with a local callback."}
+                </p>
+              )}
+              {copilotAccountsError && <p className={styles.copilotError}>{copilotAccountsError}</p>}
               {copilotError && <p className={styles.copilotError}>{copilotError}</p>}
             </div>
-            <div className={styles.settingGroup}>
-              <label>OAuth Client ID (optional)</label>
-              <input
-                type="text"
-                value={config.copilotClientId || ''}
-                onChange={(e) => setConfig({ copilotClientId: e.target.value })}
-                placeholder="Leave empty to use the default"
-              />
-              <p className={styles.settingHint}>
-                If you see a "Not Found" error, provide a GitHub OAuth app client ID with device flow enabled.
-              </p>
-            </div>
+            {copilotUseDeveloperOAuth && copilotAuthMode === 'github' && (
+              <>
+                <div className={styles.settingGroup}>
+                  <label>OAuth Client ID</label>
+                  <input
+                    type="text"
+                    value={config.copilotClientId || ''}
+                    onChange={(e) => setConfig({ copilotClientId: e.target.value })}
+                    placeholder="GitHub OAuth App client ID"
+                  />
+                  <p className={styles.settingHint}>
+                    Create a GitHub OAuth App with redirect URL set to http://127.0.0.1:1717/callback.
+                  </p>
+                </div>
+                <div className={styles.settingGroup}>
+                  <label>OAuth Client Secret</label>
+                  <input
+                    type="password"
+                    value={config.copilotClientSecret || ''}
+                    onChange={(e) => setConfig({ copilotClientSecret: e.target.value })}
+                    placeholder="GitHub OAuth App client secret"
+                  />
+                  <p className={styles.settingHint}>
+                    Stored locally to complete the OAuth token exchange.
+                  </p>
+                </div>
+              </>
+            )}
+            {showEnterpriseModal && (
+              <div className={styles.enterpriseModalBackdrop}>
+                <div className={styles.enterpriseModal}>
+                  <div className={styles.enterpriseModalHeader}>
+                    Sign in with GitHub Enterprise
+                  </div>
+                  <p className={styles.settingHint}>
+                    Select your GitHub Enterprise type and enter instance details.
+                  </p>
+                  <div className={styles.enterpriseModalOptions}>
+                    <label className={styles.enterpriseModalOption}>
+                      <input
+                        type="radio"
+                        name="enterprise-type"
+                        checked={enterpriseTypeDraft === 'ghe'}
+                        onChange={() => setEnterpriseTypeDraft('ghe')}
+                      />
+                      GHE.com (Enterprise Cloud)
+                    </label>
+                    <label className={styles.enterpriseModalOption}>
+                      <input
+                        type="radio"
+                        name="enterprise-type"
+                        checked={enterpriseTypeDraft === 'ghes'}
+                        onChange={() => setEnterpriseTypeDraft('ghes')}
+                      />
+                      GitHub Enterprise Server
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={enterpriseHostDraft}
+                    onChange={(event) => setEnterpriseHostDraft(event.target.value)}
+                    placeholder={
+                      enterpriseTypeDraft === 'ghe'
+                        ? 'octocat or https://octocat.ghe.com/'
+                        : 'scm.company.com'
+                    }
+                  />
+                  {enterpriseTypeDraft === 'ghe' ? (
+                    <p className={styles.settingHint}>
+                      Enter a GHE.com instance name or URL.
+                    </p>
+                  ) : (
+                    <p className={styles.settingHint}>
+                      Will resolve to https://{draftResolvedEnterpriseHost || 'scm.company.com'}/
+                    </p>
+                  )}
+                  {enterpriseModalError && (
+                    <p className={styles.copilotError}>{enterpriseModalError}</p>
+                  )}
+                  <div className={styles.enterpriseModalActions}>
+                    <button
+                      className={styles.copilotButton}
+                      type="button"
+                      onClick={() => {
+                        setShowEnterpriseModal(false);
+                        setEnterpriseModalError(null);
+                        setPendingEnterpriseLogin(false);
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className={styles.copilotButton}
+                      type="button"
+                      onClick={handleEnterpriseModalContinue}
+                      disabled={!enterpriseHostDraft.trim()}
+                    >
+                      Continue
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className={styles.settingGroup}>
               <label>Quota usage (organization)</label>
               {copilotOrgs.length > 0 ? (
@@ -5577,10 +7204,14 @@ function AISettings({ onClose }: { onClose: () => void }) {
             <select
               value={config.model}
               onChange={(e) => setConfig({ model: e.target.value })}
+              title={config.provider === 'copilot' ? getModelPricingTooltip(config.model, copilotModelsMetadata) : undefined}
             >
               {availableModels[config.provider]?.map((model) => (
-                <option key={model} value={model}>
-                  {model}
+                <option 
+                  key={model} 
+                  value={model}
+                >
+                  {formatModelLabel(config.provider, model, copilotModelsMetadata)}
                 </option>
               ))}
             </select>
@@ -5594,6 +7225,71 @@ function AISettings({ onClose }: { onClose: () => void }) {
               </button>
             )}
           </div>
+          {/* Model info panel for Copilot models */}
+          {config.provider === 'copilot' && config.model !== 'auto' && (() => {
+            const modelMeta = copilotModelsMetadata?.find(m => m.id === config.model);
+            
+            if (!modelMeta) {
+              // Show basic info when metadata isn't available
+              return (
+                <div className={styles.modelInfoPanel}>
+                  <div className={styles.modelInfoHeader}>{config.model}</div>
+                  <div className={styles.modelInfoRow} style={{ color: 'var(--text-muted)' }}>
+                    <span>Pricing info not available. Click refresh to load model details.</span>
+                  </div>
+                </div>
+              );
+            }
+            
+            const capabilities: string[] = [];
+            if (modelMeta.supports_vision) capabilities.push('Vision');
+            if (modelMeta.supports_tools) capabilities.push('Tools');
+            if (modelMeta.reasoning_efforts.length > 0) {
+              capabilities.push(`Thinking (${modelMeta.reasoning_efforts.join('/')})`);
+            }
+            
+            return (
+              <div className={styles.modelInfoPanel}>
+                <div className={styles.modelInfoHeader}>{modelMeta.name}</div>
+                {modelMeta.context_window && (
+                  <div className={styles.modelInfoRow}>
+                    <span>Context Window:</span>
+                    <span>{formatContextWindow(modelMeta.context_window)}</span>
+                  </div>
+                )}
+                {(modelMeta.input_price !== null || modelMeta.output_price !== null) && (
+                  <>
+                    <div className={styles.modelInfoSection}>Cost per 1M Tokens</div>
+                    {modelMeta.input_price !== null && (
+                      <div className={styles.modelInfoRow}>
+                        <span>Input:</span>
+                        <span>{modelMeta.input_price} Credits</span>
+                      </div>
+                    )}
+                    {modelMeta.output_price !== null && (
+                      <div className={styles.modelInfoRow}>
+                        <span>Output:</span>
+                        <span>{modelMeta.output_price} Credits</span>
+                      </div>
+                    )}
+                    {modelMeta.cache_price !== null && (
+                      <div className={styles.modelInfoRow}>
+                        <span>Cached:</span>
+                        <span>{modelMeta.cache_price} Credits</span>
+                      </div>
+                    )}
+                  </>
+                )}
+                {capabilities.length > 0 && (
+                  <div className={styles.modelInfoCapabilities}>
+                    {capabilities.map(cap => (
+                      <span key={cap} className={styles.capabilityBadge}>{cap}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {config.provider === 'ollama' && (() => {
             const modelLower = config.model.toLowerCase();
             const isVisionModel = modelLower.includes('llava') || 

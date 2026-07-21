@@ -8,6 +8,10 @@ export interface Settings {
   // Appearance
   theme: 'dark' | 'light' | 'system';
   fontSize: number;
+  // Layout
+  aiPanelMaxPercent: number;
+  aiPanelMaxPercentSolo: number;
+  editorPanelMinPercent: number;
   // Editor
   tabSize: number;
   wordWrap: boolean;
@@ -18,9 +22,12 @@ export interface Settings {
   // AI
   aiEnabled: boolean;
   inlineCompletions: boolean;
+  aiAutoApplyFileOps: boolean;
   // Git
   autoFetch: boolean;
   confirmSync: boolean;
+  githubToken: string;
+  githubApiBase: string;
   // Plugins
   autoUpdatePlugins: boolean;
   // Security / Snyk
@@ -42,6 +49,9 @@ const defaultSettings: Settings = {
   autoSaveDelay: 1000,
   theme: 'dark',
   fontSize: 14,
+  aiPanelMaxPercent: 70,
+  aiPanelMaxPercentSolo: 85,
+  editorPanelMinPercent: 20,
   tabSize: 2,
   wordWrap: true,
   minimap: true,
@@ -49,8 +59,11 @@ const defaultSettings: Settings = {
   keymap: 'default',
   aiEnabled: true,
   inlineCompletions: true,
+  aiAutoApplyFileOps: false,
   autoFetch: true,
   confirmSync: true,
+  githubToken: '',
+  githubApiBase: '',
   autoUpdatePlugins: true,
   snykEnabled: false,
   snykCliPath: 'snyk',

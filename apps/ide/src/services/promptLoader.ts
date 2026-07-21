@@ -120,6 +120,10 @@ const greeting = "Hi there";
 IMPORTANT:
 - Always use relative paths from the workspace root
 - Parent directories are created automatically; nested paths can create folders
+- NEVER include markdown code fences inside <create_file>/<edit_file> tags
+- For <edit_file mode="replace"> always include both <old_content> and <new_content>
+- Do NOT delete and regenerate entire files unless the user explicitly asks
+- When creating tests, place them under existing test directories; do not create new test roots
 - Output tool calls as RAW XML - never inside code blocks
 - Explain what you're doing before each operation
 - For edits, include enough context in old_content to uniquely identify the location
@@ -157,6 +161,9 @@ You are in edit mode. Focus on making precise code changes. Use file operation t
 - Include enough context in old_content for unique matching
 - Explain the changes you're making
 - Focus on the specific changes requested
+- NEVER include markdown code fences inside <edit_file> tags
+- Always include both <old_content> and <new_content> for replace edits
+- Do NOT delete and regenerate entire files unless the user explicitly asks
 
 ## ⚠️ REQUIRED: CHANGES SUMMARY ⚠️
 
@@ -497,6 +504,8 @@ Test for common vulnerabilities:
 4. **Arrange-Act-Assert**: Structure tests clearly with setup, execution, and verification
 5. **Mock External Dependencies**: Don't make real API/database calls in unit tests
 6. **Test Coverage**: Aim to test all changed code paths
+7. **Test Location**: Place new tests under existing test directories; do not create new test roots
+8. **No Code Fences**: Do not wrap <create_file> content in markdown code fences
 
 ## ⚠️ FINAL REMINDER: CHANGES SUMMARY IS REQUIRED ⚠️
 

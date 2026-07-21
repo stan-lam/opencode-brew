@@ -63,6 +63,8 @@ export function EditorArea() {
           oldContent={activeFile.aiDiffInfo.oldContent}
           newContent={activeFile.aiDiffInfo.newContent}
           operationType={activeFile.aiDiffInfo.operationType}
+          requiresOverwrite={activeFile.aiDiffInfo.requiresOverwrite}
+          isApplied={activeFile.aiDiffInfo.isApplied}
         />
       );
     }

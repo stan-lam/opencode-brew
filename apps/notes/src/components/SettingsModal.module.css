@@ -640,6 +640,238 @@
   cursor: not-allowed;
 }
 
+.copilotStatusRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.copilotAuthActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.copilotStatus {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--bg-tertiary, #252525);
+}
+
+.copilotConnected {
+  color: var(--accent-blue, #0066cc);
+  background-color: rgba(0, 102, 204, 0.15);
+}
+
+.copilotDisconnected {
+  color: var(--text-secondary, #888);
+}
+
+.copilotButton {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--bg-tertiary, #252525);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.copilotButton:hover {
+  background: var(--bg-hover, #333);
+}
+
+.copilotButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.copilotAccountBox {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 12px;
+  background: var(--bg-tertiary, #252525);
+  border: 1px solid var(--border-color, #333);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.copilotAccountHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.copilotAccountActions {
+  display: flex;
+  gap: 6px;
+}
+
+.copilotAccountRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.copilotAccountInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copilotAccountUser {
+  font-size: 13px;
+  color: var(--text-primary, #ddd);
+}
+
+.copilotAccountSource {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.copilotAccountError {
+  font-size: 12px;
+  color: var(--error-color, #ff6b6b);
+}
+
+.copilotCheckboxRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  margin-top: 6px;
+}
+
+.copilotCheckbox {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-blue, #0066cc);
+  cursor: pointer;
+}
+
+.copilotEnterpriseRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.copilotEnterpriseInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copilotEnterpriseLabel {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.enterpriseModalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.enterpriseModal {
+  width: min(520px, 90vw);
+  background: var(--bg-secondary, #1b1b1b);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.enterpriseModalHeader {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+}
+
+.enterpriseModalOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.enterpriseModalOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.enterpriseModalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.copilotHostRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.copilotHostOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.copilotDeviceBox {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg-tertiary, #252525);
+  border: 1px solid var(--border-color, #333);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.copilotDeviceRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.copilotDeviceCode {
+  font-family: var(--font-family-code, 'Fira Code', monospace);
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-secondary, #1e1e1e);
+  color: var(--text-primary, #fff);
+}
+
+.copilotError {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--error-color, #dc3545);
+}
+
 @media (max-width: 600px) {
   .usageSummary {
     grid-template-columns: repeat(2, 1fr);

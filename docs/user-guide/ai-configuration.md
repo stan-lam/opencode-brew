@@ -93,9 +93,17 @@ OpenCodeBrew supports multiple AI providers. This guide covers how to configure 
 ### Configuration
 1. Open Settings (⚙️)
 2. Select **Copilot** as provider
-3. Click **Sign in with GitHub**
-4. Authorize OpenCodeBrew in the browser
-5. Return to the app - you're connected!
+3. Choose **GitHub.com** or **Enterprise**
+4. Click **Select account** to open the account picker
+5. **GitHub.com**: use **Add account** to start device login, enter the code on the verification page, and the account is cached locally
+6. **Enterprise**: click **Open login**, pick **GHE.com** or **GHES**, enter your instance, and complete login in the browser. Then click **Reload accounts** to detect the signed-in account
+7. **Developer OAuth login** (GitHub.com only): enable **Use developer OAuth client ID + secret**, enter credentials, then click **Select account**
+8. Return to the app - you're connected!
+
+**Notes**
+- Device login opens a verification page and caches accounts per host.
+- Enterprise login opens your instance login page and reuses local editor sessions.
+- OAuth app login requires the callback URL `http://127.0.0.1:1717/callback`.
 
 ### Features
 - Uses your existing Copilot subscription

@@ -45,6 +45,8 @@ export interface OpenFile {
     oldContent: string;
     newContent: string;
     operationType: 'create' | 'edit' | 'delete';
+    requiresOverwrite?: boolean;
+    isApplied?: boolean;
   };
   pendingAIEdit?: {
     oldContent: string;
@@ -62,7 +64,14 @@ interface EditorState {
   openFile: (path: string) => Promise<void>;
   openDiff: (repoPath: string, filePath: string, staged: boolean, status?: DiffFileStatus) => void;
   openHistoryDiff: (filePath: string, fileName: string, historyId: number, timestamp: string, oldContent: string, newContent: string) => void;
-  openAIDiff: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete') => void;
+  openAIDiff: (
+    filePath: string,
+    oldContent: string,
+    newContent: string,
+    operationType: 'create' | 'edit' | 'delete',
+    requiresOverwrite?: boolean,
+    isApplied?: boolean
+  ) => void;
   openFileWithAIEdit: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete', insertLine?: number) => Promise<void>;
   clearAIEdit: (path: string) => void;
   applyAIEdit: (path: string) => void;
@@ -224,7 +233,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }));
   },
 
-  openAIDiff: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete') => {
+  openAIDiff: (
+    filePath: string,
+    oldContent: string,
+    newContent: string,
+    operationType: 'create' | 'edit' | 'delete',
+    requiresOverwrite?: boolean,
+    isApplied?: boolean
+  ) => {
     const { openFiles } = get();
     const diffId = `ai:${Date.now()}:${filePath}`;
     const existingDiff = openFiles.find((f) => f.path === diffId);
@@ -249,6 +265,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         oldContent,
         newContent,
         operationType,
+        requiresOverwrite,
+        isApplied,
       },
     };
 

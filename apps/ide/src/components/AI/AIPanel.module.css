@@ -8,11 +8,13 @@
 .panelHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-secondary);
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .conversationTitle {
@@ -23,6 +25,8 @@
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .conversationTitle span {
@@ -40,6 +44,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
 }
 
 .newChatBtn {
@@ -83,6 +89,21 @@
 .headerBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .headerActions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+
+  .newChatBtn span {
+    display: none;
+  }
+
+  .newChatBtn {
+    padding: 4px 6px;
+  }
 }
 
 .toolbar {
@@ -346,6 +367,59 @@
   width: 100%;
 }
 
+/* Model info panel for displaying pricing and capabilities */
+.modelInfoPanel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  font-size: var(--font-size-xs);
+}
+
+.modelInfoHeader {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  font-size: var(--font-size-sm);
+}
+
+.modelInfoSection {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 8px;
+  margin-bottom: 4px;
+}
+
+.modelInfoRow {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.modelInfoRow span:last-child {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.modelInfoCapabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.capabilityBadge {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
 .settingsDivider {
   display: flex;
   align-items: center;
@@ -399,6 +473,13 @@
   gap: 8px;
 }
 
+.copilotAuthActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .copilotStatus {
   font-size: var(--font-size-xs);
   padding: 2px 8px;
@@ -433,6 +514,155 @@
 .copilotButton:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.copilotAccountBox {
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.copilotAccountHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.copilotAccountActions {
+  display: flex;
+  gap: 6px;
+}
+
+.copilotAccountRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.copilotAccountInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copilotAccountUser {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.copilotAccountSource {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.copilotAccountError {
+  font-size: var(--font-size-xs);
+  color: var(--error-color);
+}
+
+.copilotCheckboxRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+
+.copilotCheckbox {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.copilotEnterpriseRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.copilotEnterpriseInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copilotEnterpriseLabel {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.enterpriseModalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.enterpriseModal {
+  width: min(520px, 90vw);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.enterpriseModalHeader {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.enterpriseModalOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.enterpriseModalOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.enterpriseModalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.copilotHostRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.copilotHostOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .copilotDeviceBox {
@@ -1131,6 +1361,15 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.queuePreviewText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .queueClearBtn {
@@ -1328,18 +1567,31 @@
   align-items: center;
   gap: 8px;
   padding-top: 4px;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .controlsRight {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+  margin-left: 0;
+  justify-content: flex-end;
 }
 
 .modeSelector,
 .modelSelector {
-  flex-shrink: 0;
+  min-width: 0;
+}
+
+.modeSelector {
+  flex: 0 0 auto;
+}
+
+.modelSelector {
+  flex: 1 1 160px;
 }
 
 .modeDropdown,
@@ -1353,6 +1605,9 @@
   cursor: pointer;
   transition: all 0.15s ease;
   outline: none;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .modeDropdown:hover,
@@ -1365,8 +1620,7 @@
 }
 
 .modelDropdown {
-  min-width: 160px;
-  max-width: 200px;
+  min-width: 120px;
 }
 
 .controlBtn {
@@ -1498,6 +1752,7 @@
   font-size: var(--font-size-sm);
   line-height: 1.6;
   color: var(--text-primary);
+  font-family: var(--font-family);
 }
 
 .markdown > *:first-child {
@@ -1659,6 +1914,56 @@
 .markdown em {
   font-style: italic;
   color: var(--text-secondary);
+}
+
+.severityBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.severityCritical {
+  background: rgba(244, 67, 54, 0.2);
+  border-color: rgba(244, 67, 54, 0.35);
+  color: #ff8a80;
+}
+
+.severityHigh {
+  background: rgba(255, 152, 0, 0.2);
+  border-color: rgba(255, 152, 0, 0.35);
+  color: #ffb74d;
+}
+
+.severityMedium {
+  background: rgba(255, 193, 7, 0.2);
+  border-color: rgba(255, 193, 7, 0.35);
+  color: #ffd54f;
+}
+
+.severityLow {
+  background: rgba(96, 125, 139, 0.2);
+  border-color: rgba(96, 125, 139, 0.35);
+  color: #b0bec5;
+}
+
+.severityInfo {
+  background: rgba(33, 150, 243, 0.2);
+  border-color: rgba(33, 150, 243, 0.35);
+  color: #90caf9;
+}
+
+.severityTest {
+  background: rgba(33, 150, 243, 0.2);
+  border-color: rgba(33, 150, 243, 0.35);
+  color: #90caf9;
 }
 
 /* Mermaid Diagram Styles */
@@ -2076,6 +2381,19 @@
   border-left: 3px solid transparent;
 }
 
+.fileOpInvalid {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-error, #f44336);
+}
+
+.fileOpInvalid svg {
+  flex-shrink: 0;
+}
+
 .fileOpHeader:hover {
   background: rgba(255, 255, 255, 0.03);
   border-left-color: rgba(0, 122, 204, 0.5);
@@ -2321,6 +2639,14 @@
   box-shadow: 0 4px 12px rgba(0, 122, 204, 0.35);
 }
 
+.fileOpApprove:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.4);
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .fileOpReject {
   background: rgba(255, 255, 255, 0.05);
   color: rgba(255, 255, 255, 0.7);
@@ -2399,6 +2725,13 @@
   flex: 1;
 }
 
+.planHeaderText {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
 .planHeaderActions {
   display: flex;
   align-items: center;
@@ -2447,6 +2780,11 @@
   font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.planStatus {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
 }
 
 .exportPlanBtn {
@@ -2901,10 +3239,23 @@
   border-bottom: 1px solid var(--border-color);
 }
 
+.checklistHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .checklistHeaderLeft {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.checklistHeaderText {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 
 .checklistIcon {
@@ -2919,6 +3270,11 @@
   color: var(--text-primary);
 }
 
+.checklistStatus {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
 .checklistProgress {
   font-size: 11px;
   font-weight: 600;
@@ -2928,6 +3284,33 @@
   border-radius: 10px;
   letter-spacing: 0.02em;
   flex-shrink: 0;
+}
+
+.checklistFixBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ff9800 0%, #f57c00 100%);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 2px 4px rgba(255, 152, 0, 0.25);
+}
+
+.checklistFixBtn:hover {
+  background: linear-gradient(135deg, #f57c00 0%, #ef6c00 100%);
+  box-shadow: 0 3px 6px rgba(255, 152, 0, 0.35);
+  transform: translateY(-1px);
+}
+
+.checklistFixBtn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(255, 152, 0, 0.2);
 }
 
 .checklistProgressBar {
@@ -3014,6 +3397,22 @@
   font-size: var(--font-size-sm);
   line-height: 1.5;
   transition: all 0.15s ease;
+}
+
+.checklistItemText .markdown {
+  display: inline;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.checklistItemText .markdown > * {
+  display: inline;
+  margin: 0;
+}
+
+.checklistItemText .mdParagraph {
+  display: inline;
+  margin: 0;
 }
 
 .checklistItemDone .checklistItemText {
@@ -3422,11 +3821,12 @@
 .fileOpsBarHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 16px;
   padding: 12px 16px;
   cursor: pointer;
   transition: background-color 0.2s ease;
+  flex-wrap: wrap;
 }
 
 .fileOpsBarHeader:hover {
@@ -3437,6 +3837,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .fileOpsBarChevron {
@@ -3449,12 +3851,17 @@
   font-size: var(--font-size-sm);
   font-weight: 500;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fileOpsBarActions {
   display: flex;
   align-items: center;
   gap: 10px;
+  margin-left: auto;
+  flex-wrap: wrap;
 }
 
 .fileOpsBarBtn {
@@ -3486,6 +3893,18 @@
   box-shadow: 0 2px 4px rgba(0, 122, 204, 0.2);
 }
 
+@media (max-width: 640px) {
+  .fileOpsBarActions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+
+  .fileOpsBarBtn {
+    padding: 6px 10px;
+    font-size: var(--font-size-xs);
+  }
+}
+
 /* File Operations List */
 .fileOpsList {
   background-color: var(--bg-primary);
@@ -3501,6 +3920,7 @@
   padding: 10px 16px;
   border-bottom: 1px solid var(--border-color);
   transition: background-color 0.2s ease;
+  cursor: pointer;
 }
 
 .fileOpsItem:hover {

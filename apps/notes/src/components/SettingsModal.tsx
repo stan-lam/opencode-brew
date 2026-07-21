@@ -36,6 +36,25 @@ interface OverallStats {
   by_model: UsageStats[];
 }
 
+interface CopilotLoginStatus {
+  logged_in: boolean;
+}
+
+interface CopilotDeviceCode {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in?: number;
+  interval?: number;
+}
+
+interface CopilotCachedAccount {
+  host: string;
+  username: string;
+  source: string;
+  last_used?: string;
+}
+
 interface Settings {
   theme: 'dark' | 'light' | 'system';
   fontSize: number;
@@ -44,6 +63,11 @@ interface Settings {
   ollamaUrl: string;
   openaiKey: string;
   anthropicKey: string;
+  copilotClientId: string;
+  copilotClientSecret: string;
+  copilotAuthHost: string;
+  copilotAuthMode: 'github' | 'enterprise';
+  copilotEnterpriseType: 'ghe' | 'ghes';
   customBaseUrl: string;
   customApiKey: string;
   temperature: number;
@@ -61,6 +85,7 @@ interface SettingsModalProps {
 
 const STORAGE_KEY = 'opencodebrew-notes-settings';
 const GLOBAL_SETTINGS_KEY = 'opencodebrew-settings';
+const COPILOT_MODELS_KEY = 'opencodebrew-copilot-models';
 
 const BUILT_IN_MCP_SERVERS: MCPServer[] = [
   {
@@ -101,8 +126,39 @@ const DEFAULT_MODELS: Record<AIProvider, string[]> = {
   ollama: ['llama3', 'llama3.1', 'codellama', 'mistral', 'mixtral', 'phi3', 'gemma2', 'qwen2'],
   openai: ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo', 'o1-preview', 'o1-mini'],
   anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
-  copilot: ['gpt-4o', 'gpt-4', 'gpt-3.5-turbo', 'claude-3.5-sonnet'],
+  copilot: [
+    'auto',
+    'claude-haiku-4.5',
+    'claude-opus-4.5',
+    'claude-sonnet-4.5',
+    'claude-sonnet-4.6',
+    'gpt-5-mini',
+    'gpt-5.3-codex',
+  ],
   custom: [],
+};
+
+const COPILOT_MODEL_LABELS: Record<string, string> = {
+  auto: 'Auto (Variable)',
+  // Hyphen format (claude-opus-4-5) - actual API model IDs
+  'claude-haiku-4-5': 'Claude Haiku 4.5 - 200K',
+  'claude-opus-4-5': 'Claude Opus 4.5 - 200K',
+  'claude-sonnet-4-5': 'Claude Sonnet 4.5 - 200K',
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6 - Medium - 264K',
+  // Dot format (legacy/display names)
+  'claude-haiku-4.5': 'Claude Haiku 4.5 - 200K',
+  'claude-opus-4.5': 'Claude Opus 4.5 - 200K',
+  'claude-sonnet-4.5': 'Claude Sonnet 4.5 - 200K',
+  'claude-sonnet-4.6': 'Claude Sonnet 4.6 - Medium - 264K',
+  'gpt-5-mini': 'GPT-5 mini - Medium - 192K',
+  'gpt-5.3-codex': 'GPT-5.3-Codex - Medium - 400K',
+};
+
+const formatModelLabel = (provider: AIProvider, model: string) => {
+  if (provider === 'copilot') {
+    return COPILOT_MODEL_LABELS[model] ?? model;
+  }
+  return model;
 };
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
@@ -114,6 +170,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     ollamaUrl: 'http://localhost:11434',
     openaiKey: '',
     anthropicKey: '',
+    copilotClientId: '',
+    copilotClientSecret: '',
+    copilotAuthHost: 'github.com',
+    copilotAuthMode: 'github',
+    copilotEnterpriseType: 'ghes',
     customBaseUrl: '',
     customApiKey: '',
     temperature: 0.7,
@@ -130,6 +191,59 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [loadingModels, setLoadingModels] = useState(false);
   const [usageStats, setUsageStats] = useState<OverallStats | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
+  const [copilotLoggedIn, setCopilotLoggedIn] = useState<boolean | null>(null);
+  const [copilotPolling, setCopilotPolling] = useState(false);
+  const [copilotError, setCopilotError] = useState<string | null>(null);
+  const [copilotModels, setCopilotModels] = useState<string[]>([]);
+  const [copilotAccounts, setCopilotAccounts] = useState<CopilotCachedAccount[]>([]);
+  const [copilotAccountsLoading, setCopilotAccountsLoading] = useState(false);
+  const [copilotAccountsError, setCopilotAccountsError] = useState<string | null>(null);
+  const [copilotAccountsNotice, setCopilotAccountsNotice] = useState<string | null>(null);
+  const [copilotUseDeveloperOAuth, setCopilotUseDeveloperOAuth] = useState(false);
+  const [showCopilotAccountPicker, setShowCopilotAccountPicker] = useState(false);
+  const [copilotDeviceCode, setCopilotDeviceCode] = useState<CopilotDeviceCode | null>(null);
+  const [showEnterpriseModal, setShowEnterpriseModal] = useState(false);
+  const [enterpriseTypeDraft, setEnterpriseTypeDraft] = useState<'ghe' | 'ghes'>('ghes');
+  const [enterpriseHostDraft, setEnterpriseHostDraft] = useState('');
+  const [enterpriseModalError, setEnterpriseModalError] = useState<string | null>(null);
+  const [enterpriseLoginStarted, setEnterpriseLoginStarted] = useState(false);
+  const [pendingEnterpriseLogin, setPendingEnterpriseLogin] = useState(false);
+
+  const resolveEnterpriseHost = useCallback((value: string, type: 'ghe' | 'ghes') => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return '';
+    }
+    const stripProtocol = (input: string) =>
+      input.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    if (type === 'ghe') {
+      if (trimmed.includes('://')) {
+        try {
+          return new URL(trimmed).host;
+        } catch {
+          return stripProtocol(trimmed);
+        }
+      }
+      const normalized = stripProtocol(trimmed);
+      if (normalized.includes('.')) {
+        return normalized;
+      }
+      return `${normalized}.ghe.com`;
+    }
+    return stripProtocol(trimmed);
+  }, []);
+
+  const copilotAuthMode = settings.copilotAuthMode || 'github';
+  const copilotEnterpriseType = (settings.copilotEnterpriseType || 'ghes') as 'ghe' | 'ghes';
+  const enterpriseHostInput = settings.copilotAuthHost.trim();
+  const resolvedEnterpriseHost = resolveEnterpriseHost(enterpriseHostInput, copilotEnterpriseType);
+  const draftResolvedEnterpriseHost = resolveEnterpriseHost(enterpriseHostDraft, enterpriseTypeDraft);
+  const copilotAuthHost = copilotAuthMode === 'enterprise'
+    ? resolvedEnterpriseHost
+    : 'github.com';
+  const copilotEnterpriseClientId = settings.copilotClientId.trim();
+  const copilotNeedsEnterpriseHost = copilotAuthMode === 'enterprise' && !enterpriseHostInput;
+  const copilotCanStartDeviceFlow = copilotAuthMode === 'enterprise' || !copilotNeedsEnterpriseHost;
 
   const mergeGlobalAISettings = useCallback((base: Settings) => {
     const stored = localStorage.getItem(GLOBAL_SETTINGS_KEY);
@@ -143,6 +257,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         ollamaUrl: global.ollamaUrl ?? base.ollamaUrl,
         openaiKey: global.openaiKey ?? base.openaiKey,
         anthropicKey: global.anthropicKey ?? base.anthropicKey,
+        copilotClientId: global.copilotClientId ?? base.copilotClientId,
+        copilotClientSecret: global.copilotClientSecret ?? base.copilotClientSecret,
+        copilotAuthHost: global.copilotAuthHost ?? base.copilotAuthHost,
+        copilotAuthMode: global.copilotAuthMode ?? base.copilotAuthMode,
+        copilotEnterpriseType: global.copilotEnterpriseType ?? base.copilotEnterpriseType,
         customBaseUrl: global.customBaseUrl ?? base.customBaseUrl,
         customApiKey: global.customApiKey ?? base.customApiKey,
         temperature: global.temperature ?? base.temperature,
@@ -205,17 +324,459 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, []);
 
+  const openCopilotVerification = useCallback(async (url: string) => {
+    if (!url) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('plugin:shell|open', { path: url });
+    } catch (error) {
+      console.error('Failed to open Copilot verification URL:', error);
+    }
+  }, []);
+
+  const copyCopilotCode = useCallback(async (code: string) => {
+    if (!code) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(code);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = code;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    } catch (error) {
+      console.error('Failed to copy Copilot code:', error);
+    }
+  }, []);
+
+  const applyCopilotModels = useCallback((models: string[], persist = true) => {
+    setCopilotModels(models);
+    if (models.length > 0 && settings.aiProvider === 'copilot' && !models.includes(settings.model)) {
+      setSettings((prev) => ({ ...prev, model: models[0] }));
+    }
+    // Persist to localStorage for all apps to share
+    if (persist && models.length > 0) {
+      localStorage.setItem(COPILOT_MODELS_KEY, JSON.stringify(models));
+      console.log('[Notes] Persisted copilot models to localStorage:', models.length);
+    }
+  }, [settings.aiProvider, settings.model]);
+
+  const loadCachedCopilotModels = useCallback(async () => {
+    // First try localStorage (faster, shared across apps)
+    try {
+      const stored = localStorage.getItem(COPILOT_MODELS_KEY);
+      if (stored) {
+        const models = JSON.parse(stored) as string[];
+        if (models.length > 0) {
+          console.log('[Notes] Loaded copilot models from localStorage:', models.length);
+          applyCopilotModels(models, false); // Don't re-persist
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load copilot models from localStorage:', e);
+    }
+    
+    // Then try backend cache
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const host = copilotAuthMode === 'enterprise' ? copilotAuthHost || undefined : undefined;
+      const cached = await invoke<string[]>('copilot_cached_models_list', { host });
+      if (cached.length > 0) {
+        applyCopilotModels(cached);
+      }
+      return cached;
+    } catch (error) {
+      console.error('Failed to load cached Copilot models:', error);
+      return [] as string[];
+    }
+  }, [applyCopilotModels, copilotAuthMode, copilotAuthHost]);
+
+  const refreshCopilotModels = useCallback(async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const host = copilotAuthMode === 'enterprise' ? copilotAuthHost || undefined : undefined;
+      const enterpriseType = copilotAuthMode === 'enterprise' ? copilotEnterpriseType : undefined;
+      const models = await invoke<string[]>('list_copilot_models', { host, enterpriseType });
+      applyCopilotModels(models);
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to fetch Copilot models.';
+      console.error('Failed to fetch Copilot models:', error);
+      if (message.toLowerCase().includes('403') || message.toLowerCase().includes('forbidden')) {
+        const cached = await loadCachedCopilotModels();
+        if (cached.length > 0) {
+          return;
+        }
+      }
+    }
+  }, [
+    applyCopilotModels,
+    loadCachedCopilotModels,
+    copilotAuthMode,
+    copilotAuthHost,
+    copilotEnterpriseType,
+  ]);
+
+  const reloadCopilotAccounts = useCallback(async (): Promise<CopilotCachedAccount[]> => {
+    setCopilotAccountsError(null);
+    setCopilotAccountsLoading(true);
+    try {
+      if (copilotAuthMode === 'enterprise' && !copilotAuthHost) {
+        setCopilotAccounts([]);
+        setCopilotAccountsError('Enter your Enterprise host to load cached accounts.');
+        return [];
+      }
+      const { invoke } = await import('@tauri-apps/api/core');
+      const cached = await invoke<CopilotCachedAccount[]>('copilot_cached_accounts_list', {
+        host: copilotAuthHost || undefined,
+      });
+      console.debug('[copilot] reload accounts', cached);
+      setCopilotAccounts(cached);
+      if (cached.length > 0) {
+        setCopilotAccountsError(null);
+        setCopilotAccountsNotice(null);
+        if (enterpriseLoginStarted) {
+          setEnterpriseLoginStarted(false);
+        }
+      } else if (!enterpriseLoginStarted) {
+        setCopilotAccountsError('No Copilot accounts found for this host.');
+      } else {
+        setCopilotAccountsError(null);
+      }
+      return cached;
+    } catch (error) {
+      console.debug('[copilot] reload accounts failed', error);
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to load Copilot accounts.';
+      setCopilotAccountsError(message);
+      return [];
+    } finally {
+      setCopilotAccountsLoading(false);
+    }
+  }, [copilotAuthHost, copilotAuthMode, enterpriseLoginStarted]);
+
+  const handleCopilotLogin = useCallback(async () => {
+    setCopilotError(null);
+    setCopilotPolling(false);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const clientId = settings.copilotClientId.trim();
+      const clientSecret = settings.copilotClientSecret.trim();
+
+      if (!clientId || !clientSecret) {
+        setCopilotError('GitHub OAuth client ID and secret are required.');
+        return;
+      }
+
+      const start = await invoke<{ authorize_url: string; state: string }>('copilot_oauth_start', {
+        clientId,
+      });
+
+      await openCopilotVerification(start.authorize_url);
+      setCopilotPolling(true);
+      await invoke('copilot_oauth_poll', {
+        state: start.state,
+        clientId,
+        clientSecret,
+      });
+      setCopilotLoggedIn(true);
+      await refreshCopilotModels();
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to connect to Copilot';
+      setCopilotError(message);
+      setCopilotLoggedIn(false);
+    } finally {
+      setCopilotPolling(false);
+    }
+  }, [openCopilotVerification, refreshCopilotModels, settings.copilotClientId, settings.copilotClientSecret]);
+
+  const openEnterpriseModal = useCallback((startLogin: boolean) => {
+    setEnterpriseTypeDraft(copilotEnterpriseType);
+    setEnterpriseHostDraft(enterpriseHostInput);
+    setEnterpriseModalError(null);
+    setPendingEnterpriseLogin(startLogin);
+    setShowEnterpriseModal(true);
+  }, [copilotEnterpriseType, enterpriseHostInput]);
+
+  const handleEnterpriseLogin = useCallback(async (
+    hostInput: string = enterpriseHostInput,
+    type: 'ghe' | 'ghes' = copilotEnterpriseType
+  ) => {
+    const resolvedHost = resolveEnterpriseHost(hostInput, type);
+    if (!resolvedHost) {
+      openEnterpriseModal(true);
+      return;
+    }
+    const loginUrl = `https://${resolvedHost}/login`;
+    try {
+      await openCopilotVerification(loginUrl);
+      setEnterpriseLoginStarted(true);
+      setCopilotAccountsNotice('Finish signing in with GitHub Enterprise, then click Reload accounts.');
+      setCopilotAccountsError(null);
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to open Enterprise login.';
+      setCopilotAccountsError(message);
+    }
+  }, [copilotEnterpriseType, enterpriseHostInput, openCopilotVerification, openEnterpriseModal, resolveEnterpriseHost]);
+
+  const handleEnterpriseModalContinue = useCallback(async () => {
+    const trimmedHost = enterpriseHostDraft.trim();
+    if (!trimmedHost) {
+      setEnterpriseModalError('Enterprise host is required.');
+      return;
+    }
+    setSettings((prev) => ({
+      ...prev,
+      copilotEnterpriseType: enterpriseTypeDraft,
+      copilotAuthHost: trimmedHost,
+    }));
+    setShowEnterpriseModal(false);
+    setEnterpriseModalError(null);
+    const shouldLogin = pendingEnterpriseLogin;
+    setPendingEnterpriseLogin(false);
+    if (shouldLogin) {
+      await handleEnterpriseLogin(trimmedHost, enterpriseTypeDraft);
+    }
+  }, [
+    enterpriseHostDraft,
+    enterpriseTypeDraft,
+    handleEnterpriseLogin,
+    pendingEnterpriseLogin,
+    setSettings,
+  ]);
+
+  const handleCopilotDeviceFlow = useCallback(async () => {
+    setCopilotError(null);
+    setCopilotAccountsError(null);
+    setCopilotAccountsNotice(null);
+    setCopilotPolling(false);
+    setCopilotDeviceCode(null);
+
+    if (copilotAuthMode === 'enterprise') {
+      await handleEnterpriseLogin();
+      return;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const deviceFlowClientId =
+        copilotAuthMode === 'enterprise' ? copilotEnterpriseClientId || undefined : undefined;
+      const deviceCode = await invoke<CopilotDeviceCode>('copilot_device_login_start', {
+        host: copilotAuthHost || undefined,
+        clientId: deviceFlowClientId,
+      });
+      setCopilotDeviceCode(deviceCode);
+      await openCopilotVerification(deviceCode.verification_uri);
+      setCopilotPolling(true);
+      await invoke('copilot_device_login_poll', {
+        deviceCode: deviceCode.device_code,
+        interval: deviceCode.interval,
+        expiresIn: deviceCode.expires_in,
+        host: copilotAuthHost || undefined,
+        clientId: deviceFlowClientId,
+      });
+      setCopilotLoggedIn(true);
+      setShowCopilotAccountPicker(false);
+      await reloadCopilotAccounts();
+      await refreshCopilotModels();
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to connect to Copilot';
+      setCopilotError(message);
+      setCopilotAccountsError(message);
+      setCopilotLoggedIn(false);
+    } finally {
+      setCopilotPolling(false);
+    }
+  }, [
+    copilotAuthHost,
+    copilotAuthMode,
+    handleEnterpriseLogin,
+    openCopilotVerification,
+    refreshCopilotModels,
+    reloadCopilotAccounts,
+  ]);
+
+  const handleCopilotSignIn = useCallback(async () => {
+    if (copilotUseDeveloperOAuth) {
+      await handleCopilotLogin();
+      return;
+    }
+    setCopilotError(null);
+    setCopilotDeviceCode(null);
+    setShowCopilotAccountPicker(true);
+    const accounts = await reloadCopilotAccounts();
+    if (accounts.length === 0) {
+      await handleCopilotDeviceFlow();
+      return;
+    }
+  }, [copilotUseDeveloperOAuth, handleCopilotDeviceFlow, handleCopilotLogin, reloadCopilotAccounts]);
+
+  const handleCopilotChangeAccount = useCallback(async () => {
+    setCopilotError(null);
+    setCopilotUseDeveloperOAuth(false);
+    setCopilotDeviceCode(null);
+    setShowCopilotAccountPicker(true);
+    const accounts = await reloadCopilotAccounts();
+    if (accounts.length === 0) {
+      await handleCopilotDeviceFlow();
+      return;
+    }
+  }, [handleCopilotDeviceFlow, reloadCopilotAccounts]);
+
+  const handleCopilotAccountSelect = useCallback(async (account: CopilotCachedAccount) => {
+    setCopilotError(null);
+    setCopilotPolling(false);
+    try {
+      setCopilotPolling(true);
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('copilot_cached_account_import', { host: account.host, username: account.username });
+      setCopilotLoggedIn(true);
+      setShowCopilotAccountPicker(false);
+      await refreshCopilotModels();
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to reuse Copilot account';
+      setCopilotError(message);
+      setCopilotLoggedIn(false);
+    } finally {
+      setCopilotPolling(false);
+    }
+  }, []);
+
+  const handleCopilotLogout = useCallback(async () => {
+    setCopilotError(null);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('copilot_device_logout');
+      setCopilotLoggedIn(false);
+      setCopilotUseDeveloperOAuth(false);
+      setShowCopilotAccountPicker(true);
+      setCopilotDeviceCode(null);
+      await reloadCopilotAccounts();
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : 'Failed to disconnect Copilot';
+      setCopilotError(message);
+    }
+  }, []);
+
   useEffect(() => {
     if (isOpen && settings.aiProvider === 'ollama') {
       fetchOllamaModels(settings.ollamaUrl);
     }
   }, [isOpen, settings.aiProvider, settings.ollamaUrl, fetchOllamaModels]);
 
+  // Load cached copilot models when modal opens with copilot provider
+  useEffect(() => {
+    if (isOpen && settings.aiProvider === 'copilot') {
+      loadCachedCopilotModels();
+    }
+  }, [isOpen, settings.aiProvider, loadCachedCopilotModels]);
+
   useEffect(() => {
     if (isOpen && activeTab === 'usage') {
       fetchUsageStats();
     }
   }, [isOpen, activeTab, fetchUsageStats]);
+
+  useEffect(() => {
+    let isActive = true;
+    if (!isOpen || settings.aiProvider !== 'copilot') {
+      setCopilotPolling(false);
+      setCopilotError(null);
+      setCopilotLoggedIn(null);
+      setCopilotAccounts([]);
+      setCopilotAccountsLoading(false);
+      setCopilotAccountsError(null);
+      setCopilotAccountsNotice(null);
+      setCopilotUseDeveloperOAuth(false);
+      setShowCopilotAccountPicker(false);
+      setShowEnterpriseModal(false);
+      setEnterpriseModalError(null);
+      setEnterpriseLoginStarted(false);
+      setCopilotDeviceCode(null);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const loadStatus = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const status = await invoke<CopilotLoginStatus>('copilot_device_login_status');
+        if (isActive) {
+          setCopilotLoggedIn(status.logged_in);
+        }
+      } catch {
+        if (isActive) {
+          setCopilotLoggedIn(false);
+        }
+      }
+    };
+
+    loadStatus();
+
+    return () => {
+      isActive = false;
+    };
+  }, [isOpen, settings.aiProvider]);
+
+  useEffect(() => {
+    if (copilotAuthMode === 'enterprise' && copilotUseDeveloperOAuth) {
+      setCopilotUseDeveloperOAuth(false);
+    }
+    if (copilotAuthMode !== 'enterprise') {
+      setEnterpriseLoginStarted(false);
+      setCopilotAccountsNotice(null);
+    }
+  }, [copilotAuthMode, copilotUseDeveloperOAuth]);
+
+  useEffect(() => {
+    if (!isOpen || settings.aiProvider !== 'copilot') {
+      return;
+    }
+    let isActive = true;
+    setCopilotDeviceCode(null);
+    reloadCopilotAccounts().finally(() => {
+      if (!isActive) {
+        return;
+      }
+    });
+    return () => {
+      isActive = false;
+    };
+  }, [isOpen, settings.aiProvider, copilotAuthHost, copilotAuthMode, reloadCopilotAccounts]);
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -304,6 +865,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       ollamaUrl: settings.ollamaUrl,
       openaiKey: settings.openaiKey,
       anthropicKey: settings.anthropicKey,
+      copilotClientId: settings.copilotClientId,
+      copilotClientSecret: settings.copilotClientSecret,
       customBaseUrl: settings.customBaseUrl,
       customApiKey: settings.customApiKey,
       temperature: settings.temperature,
@@ -347,6 +910,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   const currentModels = settings.aiProvider === 'ollama' && ollamaModels.length > 0
     ? ollamaModels
+    : settings.aiProvider === 'copilot' && copilotModels.length > 0
+    ? copilotModels
     : DEFAULT_MODELS[settings.aiProvider] || [];
 
   if (!isOpen) return null;
@@ -472,8 +1037,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         className={styles.select}
                         disabled={loadingModels}
                       >
-                        {currentModels.map(model => (
-                          <option key={model} value={model}>{model}</option>
+                        {currentModels.map((model) => (
+                          <option key={model} value={model}>
+                            {formatModelLabel(settings.aiProvider, model)}
+                          </option>
                         ))}
                       </select>
                     ) : (
@@ -490,6 +1057,19 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       <button
                         className={styles.refreshBtn}
                         onClick={() => fetchOllamaModels(settings.ollamaUrl)}
+                        disabled={loadingModels}
+                        title="Refresh models"
+                      >
+                        {loadingModels ? <Loader2 size={16} className={styles.spinning} /> : <RefreshCw size={16} />}
+                      </button>
+                    )}
+                    {settings.aiProvider === 'copilot' && copilotLoggedIn && (
+                      <button
+                        className={styles.refreshBtn}
+                        onClick={() => {
+                          setLoadingModels(true);
+                          refreshCopilotModels().finally(() => setLoadingModels(false));
+                        }}
                         disabled={loadingModels}
                         title="Refresh models"
                       >
@@ -541,6 +1121,352 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       placeholder="sk-ant-..."
                       className={styles.input}
                     />
+                  </div>
+                )}
+
+                {settings.aiProvider === 'copilot' && (
+                  <div className={styles.field}>
+                    <label>GitHub Copilot</label>
+                    <div className={styles.copilotHostRow}>
+                      <label className={styles.copilotHostOption}>
+                        <input
+                          type="radio"
+                          name="copilot-host"
+                          checked={copilotAuthMode === 'github'}
+                          onChange={() => {
+                            setSettings({ ...settings, copilotAuthMode: 'github', copilotAuthHost: 'github.com' });
+                            setCopilotDeviceCode(null);
+                          }}
+                        />
+                        GitHub.com
+                      </label>
+                      <label className={styles.copilotHostOption}>
+                        <input
+                          type="radio"
+                          name="copilot-host"
+                          checked={copilotAuthMode === 'enterprise'}
+                          onChange={() => {
+                            setSettings({
+                              ...settings,
+                              copilotAuthMode: 'enterprise',
+                              copilotAuthHost:
+                                settings.copilotAuthHost === 'github.com' ? '' : settings.copilotAuthHost,
+                              copilotEnterpriseType: settings.copilotEnterpriseType || 'ghes',
+                            });
+                            setCopilotDeviceCode(null);
+                          }}
+                        />
+                        Enterprise
+                      </label>
+                    </div>
+                    {copilotAuthMode === 'enterprise' && (
+                      <div className={styles.copilotEnterpriseRow}>
+                        <div className={styles.copilotEnterpriseInfo}>
+                          <span className={styles.copilotEnterpriseLabel}>
+                            {enterpriseHostInput
+                              ? copilotEnterpriseType === 'ghe'
+                                ? 'GHE.com (Enterprise Cloud)'
+                                : 'GitHub Enterprise Server'
+                              : 'Enterprise not configured'}
+                          </span>
+                          {enterpriseHostInput && (
+                            <span className={styles.fieldHint}>
+                              Using {resolvedEnterpriseHost}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          className={styles.copilotButton}
+                          type="button"
+                          onClick={() => openEnterpriseModal(false)}
+                        >
+                          Configure Enterprise
+                        </button>
+                      </div>
+                    )}
+                    {!copilotUseDeveloperOAuth && showCopilotAccountPicker && (
+                      <>
+                        {copilotAccountsLoading && (
+                          <p className={styles.fieldHint}>Loading cached Copilot accounts...</p>
+                        )}
+                        {!copilotAccountsLoading && (
+                          <div className={styles.copilotAccountBox}>
+                            <div className={styles.copilotAccountHeader}>
+                              <span>
+                                {copilotAuthMode === 'enterprise'
+                                  ? `Enterprise accounts on ${resolvedEnterpriseHost || 'Enterprise'}`
+                                  : 'Cached GitHub.com accounts'}
+                              </span>
+                              <div className={styles.copilotAccountActions}>
+                                <button
+                                  className={styles.copilotButton}
+                                  type="button"
+                                  onClick={handleCopilotDeviceFlow}
+                                  disabled={copilotPolling || !copilotCanStartDeviceFlow}
+                                  title={
+                                    copilotCanStartDeviceFlow
+                                      ? copilotAuthMode === 'enterprise'
+                                        ? 'Open Enterprise login'
+                                        : 'Start device login'
+                                      : 'Enter an Enterprise host first.'
+                                  }
+                                >
+                                  {copilotAuthMode === 'enterprise' ? 'Open login' : 'Add account'}
+                                </button>
+                                <button
+                                  className={styles.copilotButton}
+                                  type="button"
+                                  onClick={() => void reloadCopilotAccounts()}
+                                >
+                                  {copilotAuthMode === 'enterprise' && enterpriseLoginStarted
+                                    ? "I've signed in"
+                                    : 'Reload'}
+                                </button>
+                                <button
+                                  className={styles.copilotButton}
+                                  type="button"
+                                  onClick={() => setShowCopilotAccountPicker(false)}
+                                >
+                                  Close
+                                </button>
+                              </div>
+                            </div>
+                            {copilotDeviceCode && (
+                              <div className={styles.copilotDeviceBox}>
+                                <div className={styles.copilotDeviceRow}>
+                                  <span>Enter code</span>
+                                  <span className={styles.copilotDeviceCode}>{copilotDeviceCode.user_code}</span>
+                                  <button
+                                    className={styles.copilotButton}
+                                    type="button"
+                                    onClick={() => void copyCopilotCode(copilotDeviceCode.user_code)}
+                                  >
+                                    Copy
+                                  </button>
+                                </div>
+                                <div className={styles.copilotDeviceRow}>
+                                  <span>Verification</span>
+                                  <button
+                                    className={styles.copilotButton}
+                                    type="button"
+                                    onClick={() => void openCopilotVerification(copilotDeviceCode.verification_uri)}
+                                  >
+                                    Open page
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            {copilotAccounts.length === 0 ? (
+                              <p className={styles.copilotError}>
+                                No accounts detected yet. Use {copilotAuthMode === 'enterprise' ? '"Open login"' : '"Add account"'} to sign in.
+                              </p>
+                            ) : (
+                              <>
+                                {copilotAccounts.length > 0 && (
+                                  <>
+                                    <p className={styles.fieldHint}>Cached accounts</p>
+                                    {copilotAccounts.map((account, index) => (
+                                      <div
+                                        key={`${account.host}-${account.username}-${index}`}
+                                        className={styles.copilotAccountRow}
+                                      >
+                                        <div className={styles.copilotAccountInfo}>
+                                          <span className={styles.copilotAccountUser}>{account.username}</span>
+                                          <span className={styles.copilotAccountSource}>{account.source}</span>
+                                        </div>
+                                        <button
+                                          className={styles.copilotButton}
+                                          type="button"
+                                          onClick={() => handleCopilotAccountSelect(account)}
+                                          disabled={copilotPolling}
+                                        >
+                                          Select
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
+                        {copilotAccountsError && <p className={styles.copilotError}>{copilotAccountsError}</p>}
+                        {copilotAccountsNotice && <p className={styles.fieldHint}>{copilotAccountsNotice}</p>}
+                      </>
+                    )}
+                    <div className={styles.copilotStatusRow}>
+                      <span
+                        className={`${styles.copilotStatus} ${
+                          copilotLoggedIn ? styles.copilotConnected : styles.copilotDisconnected
+                        }`}
+                      >
+                        {copilotLoggedIn ? 'Connected' : copilotLoggedIn === null ? 'Checking...' : 'Not connected'}
+                      </span>
+                      {copilotLoggedIn ? (
+                        <div className={styles.copilotAuthActions}>
+                          <button
+                            className={styles.copilotButton}
+                            onClick={handleCopilotChangeAccount}
+                            type="button"
+                          >
+                            Change account
+                          </button>
+                          <button
+                            className={styles.copilotButton}
+                            onClick={handleCopilotLogout}
+                            type="button"
+                          >
+                            Sign out
+                          </button>
+                        </div>
+                      ) : (
+                        <div className={styles.copilotAuthActions}>
+                          <button
+                            className={styles.copilotButton}
+                            onClick={handleCopilotSignIn}
+                            type="button"
+                            disabled={copilotPolling}
+                          >
+                            {copilotPolling ? 'Connecting...' : 'Select account'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {copilotPolling && (
+                      <p className={styles.fieldHint}>Connecting to Copilot...</p>
+                    )}
+                    {!copilotLoggedIn && copilotAuthMode === 'github' && (
+                      <label className={styles.copilotCheckboxRow}>
+                        <input
+                          className={styles.copilotCheckbox}
+                          type="checkbox"
+                          checked={copilotUseDeveloperOAuth}
+                          onChange={(event) => {
+                            setCopilotUseDeveloperOAuth(event.target.checked);
+                            setShowCopilotAccountPicker(false);
+                            setCopilotAccountsError(null);
+                            setCopilotDeviceCode(null);
+                          }}
+                        />
+                        Use developer OAuth client ID + secret
+                      </label>
+                    )}
+                    {!copilotLoggedIn && (
+                      <p className={styles.fieldHint}>
+                        {copilotAuthMode === 'enterprise'
+                          ? 'Enterprise login opens your instance in the browser. After signing in, click Reload accounts.'
+                          : "Device login uses GitHub's device flow and caches accounts locally. OAuth app login requires a client ID + secret and a local callback."}
+                      </p>
+                    )}
+                    {copilotAccountsError && <p className={styles.copilotError}>{copilotAccountsError}</p>}
+                    {copilotAccountsNotice && <p className={styles.fieldHint}>{copilotAccountsNotice}</p>}
+                    {copilotError && <p className={styles.copilotError}>{copilotError}</p>}
+                    {copilotUseDeveloperOAuth && copilotAuthMode === 'github' && (
+                      <>
+                        <div className={styles.field}>
+                          <label>OAuth Client ID</label>
+                          <input
+                            type="text"
+                            value={settings.copilotClientId}
+                            onChange={(e) => setSettings({ ...settings, copilotClientId: e.target.value })}
+                            placeholder="GitHub OAuth App client ID"
+                            className={styles.input}
+                          />
+                          <p className={styles.fieldHint}>
+                            Set the OAuth App redirect URL to http://127.0.0.1:1717/callback.
+                          </p>
+                        </div>
+                        <div className={styles.field}>
+                          <label>OAuth Client Secret</label>
+                          <input
+                            type="password"
+                            value={settings.copilotClientSecret}
+                            onChange={(e) => setSettings({ ...settings, copilotClientSecret: e.target.value })}
+                            placeholder="GitHub OAuth App client secret"
+                            className={styles.input}
+                          />
+                          <p className={styles.fieldHint}>
+                            Stored locally to complete the OAuth token exchange.
+                          </p>
+                        </div>
+                      </>
+                    )}
+                    {showEnterpriseModal && (
+                      <div className={styles.enterpriseModalBackdrop}>
+                        <div className={styles.enterpriseModal}>
+                          <div className={styles.enterpriseModalHeader}>
+                            Sign in with GitHub Enterprise
+                          </div>
+                          <p className={styles.fieldHint}>
+                            Select your GitHub Enterprise type and enter instance details.
+                          </p>
+                          <div className={styles.enterpriseModalOptions}>
+                            <label className={styles.enterpriseModalOption}>
+                              <input
+                                type="radio"
+                                name="enterprise-type"
+                                checked={enterpriseTypeDraft === 'ghe'}
+                                onChange={() => setEnterpriseTypeDraft('ghe')}
+                              />
+                              GHE.com (Enterprise Cloud)
+                            </label>
+                            <label className={styles.enterpriseModalOption}>
+                              <input
+                                type="radio"
+                                name="enterprise-type"
+                                checked={enterpriseTypeDraft === 'ghes'}
+                                onChange={() => setEnterpriseTypeDraft('ghes')}
+                              />
+                              GitHub Enterprise Server
+                            </label>
+                          </div>
+                          <input
+                            type="text"
+                            value={enterpriseHostDraft}
+                            onChange={(event) => setEnterpriseHostDraft(event.target.value)}
+                            placeholder={
+                              enterpriseTypeDraft === 'ghe'
+                                ? 'octocat or https://octocat.ghe.com/'
+                                : 'scm.company.com'
+                            }
+                            className={styles.input}
+                          />
+                          {enterpriseTypeDraft === 'ghe' ? (
+                            <p className={styles.fieldHint}>
+                              Enter a GHE.com instance name or URL.
+                            </p>
+                          ) : (
+                            <p className={styles.fieldHint}>
+                              Will resolve to https://{draftResolvedEnterpriseHost || 'scm.company.com'}/
+                            </p>
+                          )}
+                          {enterpriseModalError && (
+                            <p className={styles.copilotError}>{enterpriseModalError}</p>
+                          )}
+                          <div className={styles.enterpriseModalActions}>
+                            <button
+                              className={styles.copilotButton}
+                              type="button"
+                              onClick={() => {
+                                setShowEnterpriseModal(false);
+                                setEnterpriseModalError(null);
+                                setPendingEnterpriseLogin(false);
+                              }}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              className={styles.copilotButton}
+                              type="button"
+                              onClick={handleEnterpriseModalContinue}
+                              disabled={!enterpriseHostDraft.trim()}
+                            >
+                              Continue
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

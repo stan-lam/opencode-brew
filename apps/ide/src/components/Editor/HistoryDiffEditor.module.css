@@ -104,6 +104,22 @@
   border-radius: 2px;
 }
 
+.aiDiffWarning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(255, 152, 0, 0.12);
+  color: var(--text-primary);
+  border-bottom: 1px solid rgba(255, 152, 0, 0.4);
+  font-size: var(--font-size-xs);
+}
+
+.aiDiffWarning strong {
+  color: #ffb74d;
+  font-weight: 600;
+}
+
 .diffContent {
   flex: 1;
   overflow: auto;

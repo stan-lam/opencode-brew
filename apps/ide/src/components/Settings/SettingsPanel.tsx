@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2, ShieldCheck } from 'lucide-react';
+import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2, ShieldCheck, HelpCircle } from 'lucide-react';
 import { useSettingsStore, Settings as SettingsType } from '../../store/settingsStore';
-import { useLayoutStore } from '../../store/layoutStore';
+import { shell } from '../../services/tauri';
 import styles from './SettingsPanel.module.css';
 
 type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'security' | 'plugins' | 'usage';
@@ -61,6 +61,9 @@ const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
       { value: 'system', label: 'System' },
     ]},
     { id: 'fontSize', label: 'Font Size', description: 'UI font size', type: 'number' },
+    { id: 'aiPanelMaxPercent', label: 'AI Panel Max %', description: 'Max AI panel width when editor is visible', type: 'number' },
+    { id: 'aiPanelMaxPercentSolo', label: 'AI Panel Max % (Solo)', description: 'Max AI panel width when editor is hidden', type: 'number' },
+    { id: 'editorPanelMinPercent', label: 'Editor Min %', description: 'Minimum editor width when AI panel is visible', type: 'number' },
   ],
   editor: [
     { id: 'tabSize', label: 'Tab Size', description: 'Number of spaces per tab', type: 'number' },
@@ -79,10 +82,23 @@ const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
   ai: [
     { id: 'aiEnabled', label: 'Enable AI', description: 'Enable AI features', type: 'toggle' },
     { id: 'inlineCompletions', label: 'Inline Completions', description: 'Show AI code completions', type: 'toggle' },
+    { id: 'aiAutoApplyFileOps', label: 'Auto-apply AI File Ops', description: 'Apply AI file edits automatically (no review)', type: 'toggle' },
   ],
   git: [
     { id: 'autoFetch', label: 'Auto Fetch', description: 'Automatically fetch changes', type: 'toggle' },
     { id: 'confirmSync', label: 'Confirm Sync', description: 'Confirm before sync', type: 'toggle' },
+    {
+      id: 'githubToken',
+      label: 'GitHub Token',
+      description: 'Personal access token for PR review',
+      type: 'password',
+    },
+    {
+      id: 'githubApiBase',
+      label: 'GitHub API Base',
+      description: 'Optional override for GitHub Enterprise (e.g. https://scm.example.com/api/v3)',
+      type: 'input',
+    },
   ],
   security: [
     { id: 'snykEnabled', label: 'Enable Snyk', description: 'Enable Snyk security scanning in Test panel', type: 'toggle' },
@@ -95,11 +111,15 @@ const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
   usage: [],
 };
 
+const GITHUB_TOKEN_URL = 'https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token';
+const GITLAB_TOKEN_URL = 'https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html';
+const GITHUB_TOKEN_TIP = 'GitHub: Settings → Developer settings → Personal access tokens → Generate new token (classic) with repo scope.';
+const GITLAB_TOKEN_TIP = 'GitLab: User Settings → Access Tokens → create token with read_api and read_repository.';
+
 export function SettingsPanel() {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general');
   const settings = useSettingsStore();
   const { updateSetting } = settings;
-  const { sidePanelPosition, setSidePanelPosition } = useLayoutStore();
   const [usageStats, setUsageStats] = useState<OverallStats | null>(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
 
@@ -284,10 +304,35 @@ export function SettingsPanel() {
           <div className={styles.settingsList}>
             {settingsConfig[activeCategory].map((setting) => {
               const value = settings[setting.id];
+              const isGithubToken = setting.id === 'githubToken';
               return (
                 <div key={setting.id} className={styles.settingItem}>
                   <div className={styles.settingInfo}>
-                    <label className={styles.settingLabel}>{setting.label}</label>
+                    <div className={styles.settingLabelRow}>
+                      <span className={styles.settingLabel}>{setting.label}</span>
+                      {isGithubToken && (
+                        <div className={styles.tokenHelp}>
+                          <button
+                            type="button"
+                            className={styles.helpButton}
+                            title={GITHUB_TOKEN_TIP}
+                            onClick={() => shell.openExternal(GITHUB_TOKEN_URL)}
+                          >
+                            <HelpCircle size={12} />
+                            <span>GitHub</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.helpButton}
+                            title={GITLAB_TOKEN_TIP}
+                            onClick={() => shell.openExternal(GITLAB_TOKEN_URL)}
+                          >
+                            <HelpCircle size={12} />
+                            <span>GitLab</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     <p className={styles.settingDescription}>{setting.description}</p>
                   </div>
                   <div className={styles.settingControl}>
@@ -337,23 +382,6 @@ export function SettingsPanel() {
                 </div>
               );
             })}
-            {activeCategory === 'appearance' && (
-              <div className={styles.settingItem}>
-                <div className={styles.settingInfo}>
-                  <label className={styles.settingLabel}>Side Panel Position</label>
-                  <p className={styles.settingDescription}>Position of the side panel (Explorer, AI, etc.)</p>
-                </div>
-                <div className={styles.settingControl}>
-                  <select
-                    value={sidePanelPosition}
-                    onChange={(e) => setSidePanelPosition(e.target.value as 'left' | 'right')}
-                  >
-                    <option value="left">Left</option>
-                    <option value="right">Right</option>
-                  </select>
-                </div>
-              </div>
-            )}
           </div>
         )}
       </div>

@@ -10,6 +10,13 @@
   justify-content: space-between;
   padding: 8px;
   border-bottom: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.branchSelectorWrapper {
+  flex: 1 1 160px;
+  min-width: 140px;
 }
 
 .branchSelector {
@@ -32,6 +39,9 @@
 .actions {
   display: flex;
   gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 
 .actionBtn {

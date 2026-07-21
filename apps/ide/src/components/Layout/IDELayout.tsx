@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { TitleBar } from './TitleBar';
 import { ActivityBar } from './ActivityBar';
@@ -11,6 +11,7 @@ import { NotificationContainer } from './Notification';
 import { FontSizeIndicator } from './FontSizeIndicator';
 import { RunConfigEditor } from './RunConfigEditor';
 import { UpdateChecker } from './UpdateChecker';
+import { AIPanel } from '../AI/AIPanel';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import styles from './IDELayout.module.css';
@@ -19,28 +20,33 @@ export function IDELayout() {
   const {
     showSidePanel,
     showBottomPanel,
-    sidePanelPosition,
+    showAIPanel,
+    showEditorPanel,
     activeBottomTab,
   } = useLayoutStore();
-  
-  const { fontSize, increaseFontSize, decreaseFontSize, resetFontSize } = useSettingsStore();
+  const clampPercent = (value: number, min: number, max: number, fallback: number) => {
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(Math.max(value, min), max);
+  };
+  const {
+    fontSize,
+    increaseFontSize,
+    decreaseFontSize,
+    resetFontSize,
+    aiPanelMaxPercent,
+    aiPanelMaxPercentSolo,
+    editorPanelMinPercent,
+  } = useSettingsStore();
+  const safeAiMaxWithEditor = clampPercent(aiPanelMaxPercent, 30, 90, 70);
+  const safeAiMaxSolo = clampPercent(aiPanelMaxPercentSolo, 40, 95, 85);
+  const safeEditorMin = clampPercent(editorPanelMinPercent, 10, 60, 20);
+  const leftPanelMaxSize = showEditorPanel ? 40 : showAIPanel ? 70 : 100;
+  const aiPanelMaxSize = showEditorPanel ? safeAiMaxWithEditor : safeAiMaxSolo;
+  const editorPanelMinSize = showAIPanel ? safeEditorMin : 30;
+  const horizontalLayoutKey = `${showSidePanel}-${showEditorPanel}-${showAIPanel}`;
   
   const [showRunConfigEditor, setShowRunConfigEditor] = useState(false);
-  const [panelKey, setPanelKey] = useState(0);
-  const prevPositionRef = useRef(sidePanelPosition);
-  
-  // Clear cached panel sizes and force remount when position changes
-  useEffect(() => {
-    if (prevPositionRef.current !== sidePanelPosition) {
-      // Clear any cached panel data for both positions
-      localStorage.removeItem('react-resizable-panels:main-horizontal-left');
-      localStorage.removeItem('react-resizable-panels:main-horizontal-right');
-      localStorage.removeItem('react-resizable-panels:main-horizontal');
-      prevPositionRef.current = sidePanelPosition;
-      // Force a complete remount of the panel group
-      setPanelKey(k => k + 1);
-    }
-  }, [sidePanelPosition]);
+  const [panelKey] = useState(0);
   
   useEffect(() => {
     const handleOpenEditor = () => setShowRunConfigEditor(true);
@@ -99,38 +105,44 @@ export function IDELayout() {
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [increaseFontSize, decreaseFontSize, resetFontSize]);
   
-  console.log('IDELayout render:', { showSidePanel, showBottomPanel, sidePanelPosition, activeBottomTab });
+  console.log('IDELayout render:', { showSidePanel, showBottomPanel, activeBottomTab });
 
   return (
     <div className={styles.container}>
       <TitleBar />
       <RunToolbar />
       <div className={styles.main}>
-        <ActivityBar />
         <div className={styles.content}>
           <PanelGroup direction="vertical" autoSaveId="main-vertical">
             <Panel defaultSize={75} minSize={30}>
-              <PanelGroup 
-                key={`horizontal-${sidePanelPosition}-${showSidePanel}-${panelKey}`}
-                direction="horizontal" 
-                autoSaveId={`main-horizontal-${sidePanelPosition}`}
+              <PanelGroup
+                key={`horizontal-left-${horizontalLayoutKey}-${panelKey}`}
+                direction="horizontal"
+                autoSaveId={`main-horizontal-left-${horizontalLayoutKey}`}
               >
-                {showSidePanel && sidePanelPosition === 'left' && (
-                  <>
-                    <Panel defaultSize={20} minSize={15} maxSize={70}>
-                      <SidePanel />
-                    </Panel>
-                    <PanelResizeHandle className={styles.resizeHandle} />
-                  </>
-                )}
-                <Panel minSize={30}>
-                  <EditorArea />
+                <Panel className={styles.leftPanel} defaultSize={22} minSize={16} maxSize={leftPanelMaxSize}>
+                  <ActivityBar variant="horizontal" />
+                  <div
+                    className={`${styles.sidePanelContainer} ${
+                      showSidePanel ? '' : styles.sidePanelCollapsed
+                    }`}
+                  >
+                    <SidePanel />
+                  </div>
                 </Panel>
-                {showSidePanel && sidePanelPosition === 'right' && (
+                {(showEditorPanel || showAIPanel) && (
+                  <PanelResizeHandle className={styles.resizeHandle} />
+                )}
+                {showEditorPanel && (
+                  <Panel minSize={editorPanelMinSize}>
+                    <EditorArea />
+                  </Panel>
+                )}
+                {showAIPanel && (
                   <>
-                    <PanelResizeHandle className={styles.resizeHandle} />
-                    <Panel defaultSize={20} minSize={15} maxSize={70}>
-                      <SidePanel />
+                    {showEditorPanel && <PanelResizeHandle className={styles.resizeHandle} />}
+                    <Panel className={styles.aiPanel} defaultSize={26} minSize={18} maxSize={aiPanelMaxSize}>
+                      <AIPanel />
                     </Panel>
                   </>
                 )}

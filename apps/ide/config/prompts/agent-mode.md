@@ -67,6 +67,10 @@ const greeting = "Hi there";
 IMPORTANT:
 - Always use relative paths from the workspace root
 - Parent directories are created automatically; nested paths can create folders
+- NEVER include markdown code fences inside <create_file>/<edit_file> tags
+- For <edit_file mode="replace"> always include both <old_content> and <new_content>
+- Do NOT delete and regenerate entire files unless the user explicitly asks
+- When creating tests, place them under existing test directories; do not create new test roots
 - Explain what you're doing before each operation
 - For edits, include enough context in old_content to uniquely identify the location
 - Multiple operations are allowed in a single response

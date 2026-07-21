@@ -5,10 +5,9 @@ export type SidePanelTab =
   | 'explorer'
   | 'search'
   | 'git'
-  | 'ai'
+  | 'codeReview'
   | 'test'
   | 'history'
-  | 'plugins'
   | 'settings';
 
 export type BottomPanelTab = 'terminal' | 'problems' | 'output' | 'cli';
@@ -16,12 +15,18 @@ export type BottomPanelTab = 'terminal' | 'problems' | 'output' | 'cli';
 interface LayoutState {
   showSidePanel: boolean;
   showBottomPanel: boolean;
+  showAIPanel: boolean;
+  showEditorPanel: boolean;
   sidePanelPosition: 'left' | 'right';
   activeSideTab: SidePanelTab;
   activeBottomTab: BottomPanelTab | null;
   syncExplorerWithEditor: boolean;
   toggleSidePanel: () => void;
   toggleBottomPanel: () => void;
+  toggleAIPanel: () => void;
+  toggleEditorPanel: () => void;
+  setShowEditorPanel: (show: boolean) => void;
+  setShowAIPanel: (show: boolean) => void;
   setShowBottomPanel: (show: boolean) => void;
   setActiveSideTab: (tab: SidePanelTab) => void;
   setActiveBottomTab: (tab: BottomPanelTab) => void;
@@ -34,6 +39,8 @@ export const useLayoutStore = create<LayoutState>()(
     (set) => ({
       showSidePanel: true,
       showBottomPanel: false,
+      showAIPanel: false,
+      showEditorPanel: true,
       sidePanelPosition: 'left',
       activeSideTab: 'explorer',
       activeBottomTab: 'terminal',
@@ -55,6 +62,18 @@ export const useLayoutStore = create<LayoutState>()(
           };
         }),
 
+      toggleAIPanel: () =>
+        set((state) => ({ showAIPanel: !state.showAIPanel })),
+
+      toggleEditorPanel: () =>
+        set((state) => ({ showEditorPanel: !state.showEditorPanel })),
+
+      setShowEditorPanel: (show) =>
+        set({ showEditorPanel: show }),
+
+      setShowAIPanel: (show) =>
+        set({ showAIPanel: show }),
+
       setShowBottomPanel: (show) => {
         console.log('setShowBottomPanel:', show);
         set((state) => ({
@@ -73,8 +92,8 @@ export const useLayoutStore = create<LayoutState>()(
         set({ activeBottomTab: tab, showBottomPanel: true });
       },
 
-      setSidePanelPosition: (position) =>
-        set({ sidePanelPosition: position }),
+      setSidePanelPosition: (_position) =>
+        set({ sidePanelPosition: 'left' }),
 
       toggleSyncExplorerWithEditor: () =>
         set((state) => ({ syncExplorerWithEditor: !state.syncExplorerWithEditor })),
@@ -85,6 +104,8 @@ export const useLayoutStore = create<LayoutState>()(
       partialize: (state) => ({
         showSidePanel: state.showSidePanel,
         showBottomPanel: state.showBottomPanel,
+        showAIPanel: state.showAIPanel,
+        showEditorPanel: state.showEditorPanel,
         sidePanelPosition: state.sidePanelPosition,
         activeBottomTab: state.activeBottomTab,
         syncExplorerWithEditor: state.syncExplorerWithEditor,

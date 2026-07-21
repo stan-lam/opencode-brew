@@ -14,6 +14,21 @@ pub struct AISettings {
     pub openai_key: String,
     #[serde(rename = "anthropicKey")]
     pub anthropic_key: String,
+    #[serde(rename = "copilotClientId")]
+    #[serde(default)]
+    pub copilot_client_id: String,
+    #[serde(rename = "copilotClientSecret")]
+    #[serde(default)]
+    pub copilot_client_secret: String,
+    #[serde(rename = "copilotAuthHost")]
+    #[serde(default)]
+    pub copilot_auth_host: String,
+    #[serde(rename = "copilotAuthMode")]
+    #[serde(default)]
+    pub copilot_auth_mode: String,
+    #[serde(rename = "copilotEnterpriseType")]
+    #[serde(default)]
+    pub copilot_enterprise_type: String,
     #[serde(rename = "customBaseUrl")]
     pub custom_base_url: String,
     #[serde(rename = "customApiKey")]
@@ -31,6 +46,11 @@ impl Default for AISettings {
             ollama_url: "http://localhost:11434".to_string(),
             openai_key: String::new(),
             anthropic_key: String::new(),
+            copilot_client_id: String::new(),
+            copilot_client_secret: String::new(),
+            copilot_auth_host: "github.com".to_string(),
+            copilot_auth_mode: "github".to_string(),
+            copilot_enterprise_type: "ghes".to_string(),
             custom_base_url: String::new(),
             custom_api_key: String::new(),
             temperature: 0.7,
