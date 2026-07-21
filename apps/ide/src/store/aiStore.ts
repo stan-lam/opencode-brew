@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MCPServerConfig, MCPTool, MCPToolResult } from '../services/tauri';
+import { fs, web, mcp, WebSearchResult, WebContent, StockQuote, MarketMovers, MCPServerConfig, MCPTool, MCPToolResult, CopilotModelMetadata } from '../services/tauri';
 import { loadPrompt, PROMPT_NAMES, getPromptsPath, ensurePromptsDir } from '../services/promptLoader';
 import { useWorkspaceStore } from './workspaceStore';
 
@@ -147,6 +147,7 @@ interface AIState {
   forceFileOpsNext: boolean;
   availableModels: Record<AIProvider, string[]>;
   copilotVisionModels: string[];
+  copilotModelsMetadata: CopilotModelMetadata[];
   currentWorkspacePath: string | null;
   promptQueue: QueuedPrompt[];
   agentMode: AgentMode;
@@ -1528,6 +1529,7 @@ export const useAIStore = create<AIState>()(
         ],
       },
       copilotVisionModels: [],
+      copilotModelsMetadata: [],
       sessionUsage: {
         totalPromptTokens: 0,
         totalCompletionTokens: 0,
@@ -3299,14 +3301,28 @@ export const useAIStore = create<AIState>()(
             const copilotEnterpriseType =
               config.copilotAuthMode === 'enterprise' ? config.copilotEnterpriseType : undefined;
             console.log('[aiStore] Refreshing Copilot models...', { copilotHost, copilotEnterpriseType });
-            // Fetch all models and vision-capable models in parallel
-            const [models, visionModels] = await Promise.all([
+            console.log('[aiStore] ai object keys:', Object.keys(ai));
+            console.log('[aiStore] listCopilotModelsWithMetadata exists:', typeof ai.listCopilotModelsWithMetadata);
+            // Fetch all models, vision-capable models, and full metadata in parallel
+            const [models, visionModels, modelsMetadata] = await Promise.all([
               ai.listCopilotModels(copilotHost, copilotEnterpriseType),
               ai.listCopilotVisionModels(copilotHost, copilotEnterpriseType).catch(
                 () => [] as string[]
               ),
+              (async () => {
+                console.log('[aiStore] About to call listCopilotModelsWithMetadata');
+                try {
+                  const data = await ai.listCopilotModelsWithMetadata(copilotHost, copilotEnterpriseType);
+                  console.log('[aiStore] listCopilotModelsWithMetadata returned:', data.length, 'models');
+                  return data;
+                } catch (e) {
+                  console.error('[aiStore] Failed to fetch Copilot models metadata:', e);
+                  return [] as CopilotModelMetadata[];
+                }
+              })(),
             ]);
             console.log('[aiStore] Copilot models from API:', models);
+            console.log('[aiStore] Copilot models metadata:', modelsMetadata.length, 'models');
             const uniqueModels = Array.from(new Set(models));
             if (uniqueModels.length === 0) {
               console.warn('[aiStore] No Copilot models returned from API');
@@ -3317,6 +3333,7 @@ export const useAIStore = create<AIState>()(
             // Persist to shared localStorage for launcher/IDE sync
             try {
               localStorage.setItem('opencodebrew-copilot-models', JSON.stringify(uniqueModels));
+              localStorage.setItem('opencodebrew-copilot-models-metadata', JSON.stringify(modelsMetadata));
               console.log('[aiStore] Persisted copilot models to shared localStorage:', uniqueModels.length);
             } catch (e) {
               console.error('[aiStore] Failed to persist copilot models:', e);
@@ -3328,6 +3345,7 @@ export const useAIStore = create<AIState>()(
                 copilot: uniqueModels,
               },
               copilotVisionModels: visionModels,
+              copilotModelsMetadata: modelsMetadata,
               config: {
                 ...state.config,
                 model: uniqueModels.includes(state.config.model)

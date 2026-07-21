@@ -353,6 +353,7 @@ pub fn run() {
             commands::ai::chat_copilot,
             commands::ai::list_ollama_models,
             commands::ai::list_copilot_models,
+            commands::ai::list_copilot_models_with_metadata,
             commands::ai::list_copilot_vision_models,
             commands::ai::check_ollama_status,
             commands::ai::copilot_device_login_start,

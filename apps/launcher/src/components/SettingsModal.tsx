@@ -55,6 +55,20 @@ interface CopilotCachedAccount {
   last_used?: string;
 }
 
+interface CopilotModelMetadata {
+  id: string;
+  name: string;
+  supports_vision: boolean;
+  supports_tools: boolean;
+  supported_endpoints: string[];
+  context_window: number | null;
+  max_output_tokens: number | null;
+  input_price: number | null;
+  output_price: number | null;
+  cache_price: number | null;
+  reasoning_efforts: string[];
+}
+
 interface Settings {
   theme: 'dark' | 'light' | 'system';
   aiProvider: AIProvider;
@@ -82,6 +96,14 @@ interface SettingsModalProps {
 
 const STORAGE_KEY = 'opencodebrew-settings';
 const COPILOT_MODELS_KEY = 'opencodebrew-copilot-models';
+const COPILOT_METADATA_KEY = 'opencodebrew-copilot-models-metadata';
+
+// Format context window tokens to human readable string
+const formatContextWindow = (tokens: number | null | undefined): string => {
+  if (!tokens) return '';
+  if (tokens >= 1000000) return `${Math.round(tokens / 1000000)}M`;
+  return `${Math.round(tokens / 1000)}K`;
+};
 
 const BUILT_IN_MCP_SERVERS: MCPServer[] = [
   {
@@ -150,8 +172,23 @@ const COPILOT_MODEL_LABELS: Record<string, string> = {
   'gpt-5.3-codex': 'GPT-5.3-Codex - Medium - 400K',
 };
 
-const formatModelLabel = (provider: AIProvider, model: string) => {
+const formatModelLabel = (
+  provider: AIProvider,
+  model: string,
+  metadata?: CopilotModelMetadata[]
+): string => {
   if (provider === 'copilot') {
+    // Try to get dynamic metadata first
+    const modelMeta = metadata?.find(m => m.id === model);
+    if (modelMeta) {
+      const contextStr = formatContextWindow(modelMeta.context_window);
+      const reasoningStr = modelMeta.reasoning_efforts.length > 0 ? ' - Medium' : '';
+      // Include version suffix for dated models to avoid duplicates
+      const versionMatch = model.match(/-(\d{4}-\d{2}-\d{2})$/);
+      const versionSuffix = versionMatch ? ` (${versionMatch[1]})` : '';
+      return `${modelMeta.name}${reasoningStr}${contextStr ? ` - ${contextStr}` : ''}${versionSuffix}`;
+    }
+    // Fallback to hardcoded labels
     return COPILOT_MODEL_LABELS[model] ?? model;
   }
   return model;
@@ -188,6 +225,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [copilotPolling, setCopilotPolling] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
   const [copilotModels, setCopilotModels] = useState<string[]>([]);
+  const [copilotModelsMetadata, setCopilotModelsMetadata] = useState<CopilotModelMetadata[]>([]);
   const [copilotAccounts, setCopilotAccounts] = useState<CopilotCachedAccount[]>([]);
   const [copilotAccountsLoading, setCopilotAccountsLoading] = useState(false);
   const [copilotAccountsError, setCopilotAccountsError] = useState<string | null>(null);
@@ -319,14 +357,20 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, []);
 
-  const applyCopilotModels = useCallback((models: string[], persist = true) => {
+  const applyCopilotModels = useCallback((models: string[], metadata?: CopilotModelMetadata[], persist = true) => {
     setCopilotModels(models);
+    if (metadata) {
+      setCopilotModelsMetadata(metadata);
+    }
     if (models.length > 0 && settings.aiProvider === 'copilot' && !models.includes(settings.model)) {
       setSettings((prev) => ({ ...prev, model: models[0] }));
     }
     // Persist to localStorage for both launcher and IDE to use
     if (persist && models.length > 0) {
       localStorage.setItem(COPILOT_MODELS_KEY, JSON.stringify(models));
+      if (metadata) {
+        localStorage.setItem(COPILOT_METADATA_KEY, JSON.stringify(metadata));
+      }
       console.log('[Launcher] Persisted copilot models to localStorage:', models.length);
     }
   }, [settings.aiProvider, settings.model]);
@@ -335,11 +379,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     // First try localStorage (faster)
     try {
       const stored = localStorage.getItem(COPILOT_MODELS_KEY);
+      const storedMetadata = localStorage.getItem(COPILOT_METADATA_KEY);
       if (stored) {
         const models = JSON.parse(stored) as string[];
+        const metadata = storedMetadata ? JSON.parse(storedMetadata) as CopilotModelMetadata[] : undefined;
         if (models.length > 0) {
           console.log('[Launcher] Loaded copilot models from localStorage:', models.length);
-          applyCopilotModels(models, false); // Don't re-persist
+          applyCopilotModels(models, metadata, false); // Don't re-persist
         }
       }
     } catch (e) {
@@ -352,7 +398,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       const host = copilotAuthMode === 'enterprise' ? copilotAuthHost || undefined : undefined;
       const cached = await invoke<string[]>('copilot_cached_models_list', { host });
       if (cached.length > 0) {
-        applyCopilotModels(cached);
+        applyCopilotModels(cached, undefined);
       }
       return cached;
     } catch (error) {
@@ -366,8 +412,17 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       const { invoke } = await import('@tauri-apps/api/core');
       const host = copilotAuthMode === 'enterprise' ? copilotAuthHost || undefined : undefined;
       const enterpriseType = copilotAuthMode === 'enterprise' ? copilotEnterpriseType : undefined;
-      const models = await invoke<string[]>('list_copilot_models', { host, enterpriseType });
-      applyCopilotModels(models);
+      
+      // Fetch models and metadata in parallel
+      const [models, metadata] = await Promise.all([
+        invoke<string[]>('list_copilot_models', { host, enterpriseType }),
+        invoke<CopilotModelMetadata[]>('list_copilot_models_with_metadata', { host, enterpriseType }).catch((e) => {
+          console.error('Failed to fetch Copilot models metadata:', e);
+          return [] as CopilotModelMetadata[];
+        }),
+      ]);
+      
+      applyCopilotModels(models, metadata);
     } catch (error) {
       const message = error instanceof Error
         ? error.message
@@ -977,7 +1032,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       >
                         {currentModels.map((model) => (
                           <option key={model} value={model}>
-                            {formatModelLabel(settings.aiProvider, model)}
+                            {formatModelLabel(settings.aiProvider, model, copilotModelsMetadata)}
                           </option>
                         ))}
                       </select>
@@ -1018,6 +1073,70 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   {settings.aiProvider === 'ollama' && ollamaModels.length === 0 && !loadingModels && (
                     <p className={styles.fieldHint}>No models found. Make sure Ollama is running.</p>
                   )}
+                  {/* Model info panel for Copilot models */}
+                  {settings.aiProvider === 'copilot' && settings.model !== 'auto' && (() => {
+                    const modelMeta = copilotModelsMetadata?.find(m => m.id === settings.model);
+                    
+                    if (!modelMeta) {
+                      return (
+                        <div className={styles.modelInfoPanel}>
+                          <div className={styles.modelInfoHeader}>{settings.model}</div>
+                          <div className={styles.modelInfoRow} style={{ color: 'var(--text-muted)' }}>
+                            <span>Pricing info not available. Click refresh to load model details.</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    
+                    const capabilities: string[] = [];
+                    if (modelMeta.supports_vision) capabilities.push('Vision');
+                    if (modelMeta.supports_tools) capabilities.push('Tools');
+                    if (modelMeta.reasoning_efforts.length > 0) {
+                      capabilities.push(`Thinking (${modelMeta.reasoning_efforts.join('/')})`);
+                    }
+                    
+                    return (
+                      <div className={styles.modelInfoPanel}>
+                        <div className={styles.modelInfoHeader}>{modelMeta.name}</div>
+                        {modelMeta.context_window && (
+                          <div className={styles.modelInfoRow}>
+                            <span>Context Window:</span>
+                            <span>{formatContextWindow(modelMeta.context_window)}</span>
+                          </div>
+                        )}
+                        {(modelMeta.input_price !== null || modelMeta.output_price !== null) && (
+                          <>
+                            <div className={styles.modelInfoSection}>Cost per 1M Tokens</div>
+                            {modelMeta.input_price !== null && (
+                              <div className={styles.modelInfoRow}>
+                                <span>Input:</span>
+                                <span>{modelMeta.input_price} Credits</span>
+                              </div>
+                            )}
+                            {modelMeta.output_price !== null && (
+                              <div className={styles.modelInfoRow}>
+                                <span>Output:</span>
+                                <span>{modelMeta.output_price} Credits</span>
+                              </div>
+                            )}
+                            {modelMeta.cache_price !== null && (
+                              <div className={styles.modelInfoRow}>
+                                <span>Cached:</span>
+                                <span>{modelMeta.cache_price} Credits</span>
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {capabilities.length > 0 && (
+                          <div className={styles.modelInfoCapabilities}>
+                            {capabilities.map(cap => (
+                              <span key={cap} className={styles.capabilityBadge}>{cap}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </section>
 

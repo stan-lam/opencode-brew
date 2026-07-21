@@ -62,6 +62,7 @@ mermaid.initialize({
   },
 });
 
+// Fallback labels when metadata is not available
 const COPILOT_MODEL_LABELS: Record<string, string> = {
   auto: 'Auto (Variable)',
   // Hyphen format (claude-opus-4-5) - actual API model IDs
@@ -78,11 +79,79 @@ const COPILOT_MODEL_LABELS: Record<string, string> = {
   'gpt-5.3-codex': 'GPT-5.3-Codex - Medium - 400K',
 };
 
-const formatModelLabel = (provider: string, model: string) => {
+import type { CopilotModelMetadata } from '../../services/tauri';
+
+// Format context window as human-readable string (e.g., 200000 -> "200K")
+const formatContextWindow = (tokens: number | null | undefined): string => {
+  if (!tokens) return '';
+  if (tokens >= 1000000) return `${Math.round(tokens / 1000000)}M`;
+  return `${Math.round(tokens / 1000)}K`;
+};
+
+// Format model label with dynamic metadata
+const formatModelLabel = (
+  provider: string,
+  model: string,
+  metadata?: CopilotModelMetadata[]
+): string => {
   if (provider === 'copilot') {
+    // Try to get dynamic metadata first
+    const modelMeta = metadata?.find(m => m.id === model);
+    if (modelMeta) {
+      const contextStr = formatContextWindow(modelMeta.context_window);
+      const reasoningStr = modelMeta.reasoning_efforts.length > 0 ? ' - Medium' : '';
+      // Include version suffix for dated models to avoid duplicates
+      const versionMatch = model.match(/-(\d{4}-\d{2}-\d{2})$/);
+      const versionSuffix = versionMatch ? ` (${versionMatch[1]})` : '';
+      return `${modelMeta.name}${reasoningStr}${contextStr ? ` - ${contextStr}` : ''}${versionSuffix}`;
+    }
+    // Fallback to hardcoded labels
     return COPILOT_MODEL_LABELS[model] ?? model;
   }
   return model;
+};
+
+// Get pricing tooltip for a model
+const getModelPricingTooltip = (
+  model: string,
+  metadata?: CopilotModelMetadata[]
+): string | undefined => {
+  const modelMeta = metadata?.find(m => m.id === model);
+  if (!modelMeta) return undefined;
+  
+  const lines: string[] = [];
+  lines.push(modelMeta.name);
+  
+  if (modelMeta.context_window) {
+    lines.push(`Context Window: ${formatContextWindow(modelMeta.context_window)}`);
+  }
+  
+  if (modelMeta.input_price !== null || modelMeta.output_price !== null) {
+    lines.push('');
+    lines.push('Cost per 1M Tokens:');
+    if (modelMeta.input_price !== null) {
+      lines.push(`  Input: ${modelMeta.input_price} Credits`);
+    }
+    if (modelMeta.output_price !== null) {
+      lines.push(`  Output: ${modelMeta.output_price} Credits`);
+    }
+    if (modelMeta.cache_price !== null) {
+      lines.push(`  Cached: ${modelMeta.cache_price} Credits`);
+    }
+  }
+  
+  const capabilities: string[] = [];
+  if (modelMeta.supports_vision) capabilities.push('Vision');
+  if (modelMeta.supports_tools) capabilities.push('Tools');
+  if (modelMeta.reasoning_efforts.length > 0) {
+    capabilities.push(`Thinking (${modelMeta.reasoning_efforts.join('/')})`);
+  }
+  if (capabilities.length > 0) {
+    lines.push('');
+    lines.push(`Capabilities: ${capabilities.join(', ')}`);
+  }
+  
+  return lines.join('\n');
 };
 
 // Component to render code blocks with copy button, expand/collapse, and diff support
@@ -3808,6 +3877,7 @@ export function AIPanel() {
     finalizeStreaming,
     refreshAvailableModels,
     availableModels,
+    copilotModelsMetadata,
     clearAgentTasks,
     updateSessionUsage,
     resetSessionUsage,
@@ -5990,11 +6060,12 @@ export function AIPanel() {
                   useAIStore.getState().setConfig({ model: selectedModel });
                 }}
                 className={styles.modelDropdown}
+                title={config.provider === 'copilot' ? getModelPricingTooltip(config.model, copilotModelsMetadata) : undefined}
               >
                 <optgroup label={config.provider}>
                   {(availableModels[config.provider] || []).map((model) => (
                     <option key={model} value={model}>
-                      {formatModelLabel(config.provider, model)}
+                      {formatModelLabel(config.provider, model, copilotModelsMetadata)}
                     </option>
                   ))}
                 </optgroup>
@@ -6168,7 +6239,7 @@ type CopilotUsageInfo = {
 };
 
 function AISettings({ onClose }: { onClose: () => void }) {
-  const { config, setConfig, availableModels, refreshAvailableModels } = useAIStore();
+  const { config, setConfig, availableModels, copilotModelsMetadata, refreshAvailableModels } = useAIStore();
   const [copilotLoggedIn, setCopilotLoggedIn] = useState<boolean | null>(null);
   const [copilotPolling, setCopilotPolling] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
@@ -7133,10 +7204,14 @@ function AISettings({ onClose }: { onClose: () => void }) {
             <select
               value={config.model}
               onChange={(e) => setConfig({ model: e.target.value })}
+              title={config.provider === 'copilot' ? getModelPricingTooltip(config.model, copilotModelsMetadata) : undefined}
             >
               {availableModels[config.provider]?.map((model) => (
-                <option key={model} value={model}>
-                  {formatModelLabel(config.provider, model)}
+                <option 
+                  key={model} 
+                  value={model}
+                >
+                  {formatModelLabel(config.provider, model, copilotModelsMetadata)}
                 </option>
               ))}
             </select>
@@ -7150,6 +7225,71 @@ function AISettings({ onClose }: { onClose: () => void }) {
               </button>
             )}
           </div>
+          {/* Model info panel for Copilot models */}
+          {config.provider === 'copilot' && config.model !== 'auto' && (() => {
+            const modelMeta = copilotModelsMetadata?.find(m => m.id === config.model);
+            
+            if (!modelMeta) {
+              // Show basic info when metadata isn't available
+              return (
+                <div className={styles.modelInfoPanel}>
+                  <div className={styles.modelInfoHeader}>{config.model}</div>
+                  <div className={styles.modelInfoRow} style={{ color: 'var(--text-muted)' }}>
+                    <span>Pricing info not available. Click refresh to load model details.</span>
+                  </div>
+                </div>
+              );
+            }
+            
+            const capabilities: string[] = [];
+            if (modelMeta.supports_vision) capabilities.push('Vision');
+            if (modelMeta.supports_tools) capabilities.push('Tools');
+            if (modelMeta.reasoning_efforts.length > 0) {
+              capabilities.push(`Thinking (${modelMeta.reasoning_efforts.join('/')})`);
+            }
+            
+            return (
+              <div className={styles.modelInfoPanel}>
+                <div className={styles.modelInfoHeader}>{modelMeta.name}</div>
+                {modelMeta.context_window && (
+                  <div className={styles.modelInfoRow}>
+                    <span>Context Window:</span>
+                    <span>{formatContextWindow(modelMeta.context_window)}</span>
+                  </div>
+                )}
+                {(modelMeta.input_price !== null || modelMeta.output_price !== null) && (
+                  <>
+                    <div className={styles.modelInfoSection}>Cost per 1M Tokens</div>
+                    {modelMeta.input_price !== null && (
+                      <div className={styles.modelInfoRow}>
+                        <span>Input:</span>
+                        <span>{modelMeta.input_price} Credits</span>
+                      </div>
+                    )}
+                    {modelMeta.output_price !== null && (
+                      <div className={styles.modelInfoRow}>
+                        <span>Output:</span>
+                        <span>{modelMeta.output_price} Credits</span>
+                      </div>
+                    )}
+                    {modelMeta.cache_price !== null && (
+                      <div className={styles.modelInfoRow}>
+                        <span>Cached:</span>
+                        <span>{modelMeta.cache_price} Credits</span>
+                      </div>
+                    )}
+                  </>
+                )}
+                {capabilities.length > 0 && (
+                  <div className={styles.modelInfoCapabilities}>
+                    {capabilities.map(cap => (
+                      <span key={cap} className={styles.capabilityBadge}>{cap}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {config.provider === 'ollama' && (() => {
             const modelLower = config.model.toLowerCase();
             const isVisionModel = modelLower.includes('llava') || 

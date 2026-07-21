@@ -367,6 +367,59 @@
   width: 100%;
 }
 
+/* Model info panel for displaying pricing and capabilities */
+.modelInfoPanel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  font-size: var(--font-size-xs);
+}
+
+.modelInfoHeader {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  font-size: var(--font-size-sm);
+}
+
+.modelInfoSection {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 8px;
+  margin-bottom: 4px;
+}
+
+.modelInfoRow {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.modelInfoRow span:last-child {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.modelInfoCapabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.capabilityBadge {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
 .settingsDivider {
   display: flex;
   align-items: center;

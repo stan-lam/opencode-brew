@@ -225,6 +225,25 @@ struct CopilotCachedModelEntry {
     supported_endpoints: Vec<String>,
 }
 
+/// Rich model metadata for display in UI (context window, pricing, capabilities)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CopilotModelMetadata {
+    pub id: String,
+    pub name: String,
+    pub supports_vision: bool,
+    pub supports_tools: bool,
+    pub supported_endpoints: Vec<String>,
+    // Capabilities
+    pub context_window: Option<u32>,      // maxContextWindowTokens
+    pub max_output_tokens: Option<u32>,
+    // Pricing (per 1M tokens, in credits)
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+    pub cache_price: Option<f64>,
+    // Reasoning efforts supported
+    pub reasoning_efforts: Vec<String>,   // ["low", "medium", "high"]
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct CopilotCachedModels {
     host: String,
@@ -2057,6 +2076,135 @@ fn extract_models_from_data(data: &serde_json::Value) -> Vec<(String, bool, Vec<
     models
 }
 
+/// Extract full model metadata from API response (for UI display)
+fn extract_models_metadata(data: &serde_json::Value) -> Vec<CopilotModelMetadata> {
+    let mut models: Vec<CopilotModelMetadata> = Vec::new();
+
+    let items_opt = data.get("data").and_then(|v| v.as_array())
+        .or_else(|| data.get("models").and_then(|v| v.as_array()));
+
+    if let Some(items) = items_opt {
+        // Log raw response for first model to debug metadata fields
+        if let Some(first) = items.first() {
+            println!("[copilot] Raw model response sample: {}", 
+                     serde_json::to_string_pretty(first).unwrap_or_default());
+        }
+        
+        for item in items {
+            // Prefer 'id' field, fall back to 'name' if needed
+            let id = item.get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("name").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+            
+            // Get display name
+            let name = item.get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| id.clone().unwrap_or_default());
+            
+            if let Some(id) = id {
+                // Skip embedding models and internal models
+                let is_embedding = id.contains("embedding");
+                let is_trajectory = id.contains("trajectory");
+                if is_embedding || is_trajectory {
+                    continue;
+                }
+
+                // Get supported endpoints
+                let supported_endpoints: Vec<String> = item.get("supported_endpoints")
+                    .and_then(|v| v.as_array())
+                    .map(|endpoints| {
+                        endpoints.iter()
+                            .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let capabilities = item.get("capabilities");
+                let limits = capabilities.and_then(|c| c.get("limits"));
+                let supports = capabilities.and_then(|c| c.get("supports"));
+
+                // Vision capability - check both limits.vision and supports.vision
+                let supports_vision = limits
+                    .and_then(|l| l.get("vision"))
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false)
+                    || supports
+                        .and_then(|s| s.get("vision"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                // Tools support - check supports.tools or supports.toolUse
+                let supports_tools = supports
+                    .and_then(|s| s.get("tools").or_else(|| s.get("toolUse")))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true); // Default to true for most models
+
+                // Context window from limits.max_context_window_tokens (snake_case in API)
+                let context_window = limits
+                    .and_then(|l| l.get("max_context_window_tokens").or_else(|| l.get("maxContextWindowTokens")))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+
+                // Max output tokens from limits.max_output_tokens (snake_case in API)
+                let max_output_tokens = limits
+                    .and_then(|l| l.get("max_output_tokens").or_else(|| l.get("maxOutputTokens")))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+
+                // Reasoning efforts from supports.reasoning_effort (snake_case in API)
+                let reasoning_efforts: Vec<String> = supports
+                    .and_then(|s| s.get("reasoning_effort").or_else(|| s.get("reasoningEfforts")))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Pricing from billing.tokenPrices.default
+                let billing = item.get("billing");
+                let token_prices = billing
+                    .and_then(|b| b.get("tokenPrices"))
+                    .and_then(|tp| tp.get("default"));
+
+                let input_price = token_prices
+                    .and_then(|tp| tp.get("inputPrice"))
+                    .and_then(|v| v.as_f64());
+
+                let output_price = token_prices
+                    .and_then(|tp| tp.get("outputPrice"))
+                    .and_then(|v| v.as_f64());
+
+                let cache_price = token_prices
+                    .and_then(|tp| tp.get("cachePrice"))
+                    .and_then(|v| v.as_f64());
+
+                println!("[ai.rs] Model metadata: id={}, name={}, context={}K, vision={}, reasoning={:?}, input_price={:?}", 
+                         id, name, context_window.unwrap_or(0) / 1000, supports_vision, reasoning_efforts, input_price);
+
+                models.push(CopilotModelMetadata {
+                    id,
+                    name,
+                    supports_vision,
+                    supports_tools,
+                    supported_endpoints,
+                    context_window,
+                    max_output_tokens,
+                    input_price,
+                    output_price,
+                    cache_price,
+                    reasoning_efforts,
+                });
+            }
+        }
+    }
+
+    models
+}
+
 #[command]
 pub async fn list_copilot_models(
     host: Option<String>,
@@ -2156,25 +2304,7 @@ pub async fn list_copilot_models(
     let model_ids: Vec<_> = model_entries.iter().map(|(id, _, _)| id.as_str()).collect();
     println!("[copilot] Models API returned {} models: {:?}", model_entries.len(), model_ids);
     
-    // Add Claude models - they work via Copilot but may not be returned by /models API
-    // Claude models use the Anthropic Messages API endpoint (/v1/messages)
-    let known_claude_models = vec![
-        ("claude-opus-4.5".to_string(), true, vec!["/v1/messages".to_string()]),
-        ("claude-sonnet-4.6".to_string(), true, vec!["/v1/messages".to_string()]),
-        ("claude-sonnet-4".to_string(), true, vec!["/v1/messages".to_string()]),
-        ("claude-haiku-4.5".to_string(), true, vec!["/v1/messages".to_string()]),
-        ("claude-opus-4.6".to_string(), true, vec!["/v1/messages".to_string()]),
-        ("claude-opus-4".to_string(), true, vec!["/v1/messages".to_string()]),
-    ];
-    
-    for claude_model in known_claude_models {
-        if !model_entries.iter().any(|(id, _, _)| id == &claude_model.0) {
-            println!("[copilot] Adding Claude model: {}", claude_model.0);
-            model_entries.push(claude_model);
-        }
-    }
-    
-    // Also add "auto" model for automatic model selection
+    // Add "auto" model for automatic model selection
     if !model_entries.iter().any(|(id, _, _)| id == "auto") {
         model_entries.insert(0, ("auto".to_string(), false, vec!["/chat/completions".to_string()]));
     }
@@ -2185,6 +2315,115 @@ pub async fn list_copilot_models(
     }
 
     Ok(models_from_entries(&model_entries))
+}
+
+/// List Copilot models with full metadata (context window, pricing, capabilities)
+#[command]
+pub async fn list_copilot_models_with_metadata(
+    host: Option<String>,
+    enterprise_type: Option<String>,
+) -> Result<Vec<CopilotModelMetadata>, String> {
+    println!("[copilot] list_copilot_models_with_metadata called");
+    let github_token = load_copilot_token()?;
+    let client = Client::new();
+    let normalized_host = normalize_copilot_auth_host(host);
+    let exchange_url = copilot_exchange_url(&normalized_host, enterprise_type.as_deref());
+    let token_info = resolve_copilot_token(&client, &github_token, &exchange_url).await?;
+    let copilot_token = &token_info.token;
+    
+    // Select models endpoint based on plan type
+    let models_urls = match token_info.plan_type {
+        CopilotPlanType::Individual => CopilotModelsUrls {
+            primary: COPILOT_MODELS_INDIVIDUAL_URL.to_string(),
+            fallback: Some(COPILOT_MODELS_PROXY_URL.to_string()),
+            legacy: None,
+        },
+        CopilotPlanType::Business => CopilotModelsUrls {
+            primary: COPILOT_MODELS_BUSINESS_URL.to_string(),
+            fallback: Some(COPILOT_MODELS_URL.to_string()),
+            legacy: None,
+        },
+        CopilotPlanType::Enterprise => copilot_models_urls(&normalized_host),
+    };
+    println!("[copilot] Fetching models with metadata from: {}", models_urls.primary);
+
+    let (mut response, mut is_json) =
+        fetch_copilot_models_response(&client, &copilot_token, &models_urls.primary).await?;
+
+    if (!response.status().is_success() || !is_json) && models_urls.fallback.is_some() {
+        if let Some(fallback_url) = models_urls.fallback.as_deref() {
+            let (fallback_response, fallback_is_json) =
+                fetch_copilot_models_response(&client, &copilot_token, fallback_url).await?;
+            response = fallback_response;
+            is_json = fallback_is_json;
+        }
+    }
+
+    if (!response.status().is_success() || !is_json) && models_urls.legacy.is_some() {
+        if let Some(legacy_url) = models_urls.legacy.as_deref() {
+            let (legacy_response, legacy_is_json) =
+                fetch_copilot_models_response(&client, &copilot_token, legacy_url).await?;
+            response = legacy_response;
+            is_json = legacy_is_json;
+        }
+    }
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = truncate_error_body(response.text().await.unwrap_or_default());
+        return Err(format!(
+            "Copilot models request failed (status {}): {}",
+            status,
+            error_text
+        ));
+    }
+
+    if !is_json {
+        let status = response.status();
+        let error_text = truncate_error_body(response.text().await.unwrap_or_default());
+        return Err(format!(
+            "Copilot models response was not JSON (status {}): {}",
+            status,
+            error_text
+        ));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Copilot models: {}", e))?;
+
+    let mut models = extract_models_metadata(&data);
+    
+    // Log what models the API returned with their metadata
+    for model in &models {
+        println!("[copilot] Model: {} ({}), context={}K, input_price={:?}, vision={}", 
+                 model.id, model.name, 
+                 model.context_window.unwrap_or(0) / 1000,
+                 model.input_price,
+                 model.supports_vision);
+    }
+    println!("[copilot] Models API returned {} models with metadata", models.len());
+    
+    // Add "auto" model at the beginning (special UI-only model)
+    if !models.iter().any(|m| m.id == "auto") {
+        models.insert(0, CopilotModelMetadata {
+            id: "auto".to_string(),
+            name: "Auto".to_string(),
+            supports_vision: true,
+            supports_tools: true,
+            supported_endpoints: vec!["/chat/completions".to_string()],
+            context_window: None,
+            max_output_tokens: None,
+            input_price: None,
+            output_price: None,
+            cache_price: None,
+            reasoning_efforts: vec![],
+        });
+    }
+
+    println!("[copilot] Returning {} models with metadata", models.len());
+    Ok(models)
 }
 
 #[command]

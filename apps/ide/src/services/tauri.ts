@@ -150,6 +150,20 @@ export interface OllamaModel {
   modified_at?: string;
 }
 
+export interface CopilotModelMetadata {
+  id: string;
+  name: string;
+  supports_vision: boolean;
+  supports_tools: boolean;
+  supported_endpoints: string[];
+  context_window: number | null;
+  max_output_tokens: number | null;
+  input_price: number | null;   // per 1M tokens (credits)
+  output_price: number | null;
+  cache_price: number | null;
+  reasoning_efforts: string[];  // ["low", "medium", "high"]
+}
+
 export interface CopilotDeviceCode {
   device_code: string;
   user_code: string;
@@ -565,6 +579,14 @@ export const ai = {
   listCopilotModels: async (host?: string, enterpriseType?: string): Promise<string[]> => {
     const invoke = await getInvoke();
     return invoke('list_copilot_models', { host, enterpriseType });
+  },
+
+  listCopilotModelsWithMetadata: async (host?: string, enterpriseType?: string): Promise<CopilotModelMetadata[]> => {
+    console.log('[tauri] Invoking list_copilot_models_with_metadata', { host, enterpriseType });
+    const invoke = await getInvoke();
+    const result = await invoke<CopilotModelMetadata[]>('list_copilot_models_with_metadata', { host, enterpriseType });
+    console.log('[tauri] list_copilot_models_with_metadata returned:', result);
+    return result;
   },
 
   listCopilotVisionModels: async (host?: string, enterpriseType?: string): Promise<string[]> => {
