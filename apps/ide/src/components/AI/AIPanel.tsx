@@ -1965,15 +1965,37 @@ function MessageBubble({ message, onOperationsChange }: {
         const tasks = detectActionableTasks(message.content);
         setActionableTasks(tasks);
 
-        const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+        // Only count code blocks that would actually be hidden (large implementation blocks, not review context)
+        const codeBlockRegex = /(```(?!mermaid)(\w*)[^\n]*\n[\s\S]*?```)/g;
         const detectedCodeBlocks: string[] = [];
+        let lastIndex = 0;
         let match;
+        
         while ((match = codeBlockRegex.exec(message.content)) !== null) {
-          const lang = match[1] || 'code';
-          const codeContent = match[2].trim();
-          if (lang.toLowerCase() === 'mermaid') continue;
-          const preview = codeContent.split('\n').slice(0, 3).join('; ').substring(0, 80);
-          detectedCodeBlocks.push(`Implement ${lang || 'code'}: ${preview}${codeContent.length > 80 ? '...' : ''}`);
+          const codeBlock = match[1];
+          const lang = match[2] || 'code';
+          const beforeBlock = message.content.substring(lastIndex, match.index);
+          const contextBefore = beforeBlock.slice(-500).toLowerCase();
+          
+          // Check if this code block is in a review/fix context (same logic as getCleanedContent)
+          const isReviewContext = 
+            /\b(critical|high|medium|low|info|test)\b.*?(\n|—|:)/i.test(contextBefore) ||
+            /\b(fix|change|update|replace|modify|add|remove|should be|should use|instead of|suggested|recommendation|example|correct|incorrect|current|before|after)\b/i.test(contextBefore.slice(-200)) ||
+            /\b(review|finding|issue|problem|bug|error|suggestion|improvement)\b/i.test(contextBefore.slice(-300)) ||
+            /`[^`]+\.(ts|tsx|js|jsx|py|rs|go|java|cpp|c|rb|php|vue|svelte)`/.test(contextBefore.slice(-150)) ||
+            /\b(compare|diff|original|modified|old|new|wrong|right|better|worse)\b/i.test(contextBefore.slice(-150));
+          
+          const codeLines = codeBlock.split('\n').length;
+          const isSmallBlock = codeLines <= 20;
+          
+          // Only add to detected blocks if it would be hidden
+          if (!isReviewContext && !isSmallBlock) {
+            const codeContent = codeBlock.replace(/```\w*\n/, '').replace(/\n?```$/, '').trim();
+            const preview = codeContent.split('\n').slice(0, 3).join('; ').substring(0, 80);
+            detectedCodeBlocks.push(`Implement ${lang}: ${preview}${codeContent.length > 80 ? '...' : ''}`);
+          }
+          
+          lastIndex = match.index + match[0].length;
         }
         setCodeBlockTasks(detectedCodeBlocks);
         setHasImplementationOffer(false);
@@ -2014,12 +2036,55 @@ function MessageBubble({ message, onOperationsChange }: {
     // Remove any remaining "Thinking:" at start of lines
     cleaned = cleaned.replace(/^\s*Thinking:\s*/gim, '');
     
-    // In plan mode, remove code blocks (detection happens in useEffect, not here)
+    // In plan mode, selectively hide code blocks
+    // KEEP code blocks that are part of code reviews (after severity markers, within "fix" context, etc.)
+    // HIDE large implementation code blocks that aren't review-related
     if (agentMode === 'plan') {
-      // Remove all code blocks except mermaid — replace with a subtle indicator
-      cleaned = cleaned.replace(/```(?!mermaid)(\w*)[^\n]*\n[\s\S]*?```/g, () => {
-        return `\n\n> 📋 *Code hidden in Plan Mode — switch to Agent Mode to see implementation*\n\n`;
-      });
+      // Split content by code blocks and process contextually
+      const codeBlockRegex = /(```(?!mermaid)(\w*)[^\n]*\n[\s\S]*?```)/g;
+      let lastIndex = 0;
+      let result = '';
+      let match;
+      
+      while ((match = codeBlockRegex.exec(cleaned)) !== null) {
+        const beforeBlock = cleaned.substring(lastIndex, match.index);
+        const codeBlock = match[1];
+        
+        // Check if this code block is in a review/fix context
+        // Look at the 500 characters before the code block for context
+        const contextBefore = beforeBlock.slice(-500).toLowerCase();
+        
+        const isReviewContext = 
+          // Severity indicators
+          /\b(critical|high|medium|low|info|test)\b.*?(\n|—|:)/i.test(contextBefore) ||
+          // Fix/change/update language
+          /\b(fix|change|update|replace|modify|add|remove|should be|should use|instead of|suggested|recommendation|example|correct|incorrect|current|before|after)\b/i.test(contextBefore.slice(-200)) ||
+          // Review headers
+          /\b(review|finding|issue|problem|bug|error|suggestion|improvement)\b/i.test(contextBefore.slice(-300)) ||
+          // File references (usually precede code examples)
+          /`[^`]+\.(ts|tsx|js|jsx|py|rs|go|java|cpp|c|rb|php|vue|svelte)`/.test(contextBefore.slice(-150)) ||
+          // Code comparison markers
+          /\b(compare|diff|original|modified|old|new|wrong|right|better|worse)\b/i.test(contextBefore.slice(-150));
+        
+        // Also check if it's a small code block (likely an example, not implementation)
+        const codeLines = codeBlock.split('\n').length;
+        const isSmallBlock = codeLines <= 20;
+        
+        result += beforeBlock;
+        
+        if (isReviewContext || isSmallBlock) {
+          // Keep the code block for review purposes
+          result += codeBlock;
+        } else {
+          // Hide large implementation blocks
+          result += `\n\n> 📋 *Code hidden in Plan Mode — switch to Agent Mode to see implementation*\n\n`;
+        }
+        
+        lastIndex = match.index + match[0].length;
+      }
+      
+      result += cleaned.substring(lastIndex);
+      cleaned = result;
     }
     
     const langFromPath = (p: string): string => {
@@ -2444,7 +2509,8 @@ function MarkdownRenderer({ content }: { content: string }) {
           })();
           
           // If it's a table, render as table instead of code block
-          if (isTableContent && (lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'code')) {
+          // Note: 'code' is excluded - if user explicitly uses ```code, respect that
+          if (isTableContent && (lang === '' || lang === 'text' || lang === 'plaintext')) {
             const tableRows: string[][] = [];
             let hasHeader = false;
             
@@ -2515,7 +2581,8 @@ function MarkdownRenderer({ content }: { content: string }) {
             );
           })();
           
-          if (isChecklistContent && (lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'code')) {
+          // Note: 'code' is excluded - if user explicitly uses ```code, respect that
+          if (isChecklistContent && (lang === '' || lang === 'text' || lang === 'plaintext')) {
             const listItems: React.ReactNode[] = [];
             codeLines.forEach((codeLine, idx) => {
               if (codeLine.trim().length === 0) return;
@@ -2569,33 +2636,94 @@ function MarkdownRenderer({ content }: { content: string }) {
           }
           
           // Check if content is markdown (has headers, bold, lists, tables, etc.) - render as markdown instead of code
+          // CONSERVATIVE APPROACH: Require multiple indicators and exclude known code languages
           const isMarkdownContent = (() => {
             if (codeLines.length === 0) return false;
             
+            // List of explicit code languages that should NEVER be treated as markdown
+            const explicitCodeLangs = [
+              'javascript', 'typescript', 'python', 'rust', 'go', 'java', 'cpp', 'c', 
+              'ruby', 'php', 'swift', 'kotlin', 'scala', 'bash', 'sh', 'zsh', 'shell',
+              'sql', 'css', 'scss', 'less', 'html', 'xml', 'json', 'yaml', 'yml',
+              'toml', 'ini', 'conf', 'lua', 'perl', 'r', 'julia', 'elixir', 'erlang',
+              'haskell', 'ocaml', 'fsharp', 'csharp', 'cs', 'vb', 'powershell', 'ps1',
+              'dockerfile', 'makefile', 'cmake', 'gradle', 'groovy', 'clojure',
+              'js', 'ts', 'tsx', 'jsx', 'py', 'rb', 'rs', 'vue', 'svelte'
+            ];
+            
+            const langLower = lang.toLowerCase();
+            
+            // If language is explicitly a code language, NEVER treat as markdown
+            if (explicitCodeLangs.includes(langLower)) {
+              return false;
+            }
+            
+            // Check for markdown indicators
             const hasHeaders = codeLines.some(l => /^#{1,6}\s+\S/.test(l.trim()));
-            const hasBold = codeLines.some(l => /\*\*[^*]+\*\*/.test(l) || /\*\*\w/.test(l));
+            const hasBold = codeLines.some(l => /\*\*[^*]+\*\*/.test(l));
             const hasLists = codeLines.some(l => /^[\s]*[-*+]\s\S/.test(l) || /^[\s]*\d+\.\s\S/.test(l));
             const hasBlockquotes = codeLines.some(l => /^>\s/.test(l.trim()));
             const hasTables = codeLines.some(l => (l.match(/\|/g) || []).length >= 2 && l.trim().startsWith('|'));
             
-            // For text/plaintext blocks, prefer markdown rendering if markdown patterns found
-            const isTextLang = lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md' || lang === 'code';
-            if (isTextLang && (hasHeaders || hasBold || hasTables)) {
+            // Count how many different markdown indicators are present
+            const markdownIndicatorCount = [hasHeaders, hasBold, hasLists, hasBlockquotes, hasTables].filter(Boolean).length;
+            
+            // Check for code patterns that should PREVENT markdown rendering
+            const hasCodePatterns = codeLines.some(l => {
+              const trimmed = l.trim();
+              return (
+                // JavaScript/TypeScript patterns
+                /^(const|let|var|function|class|import|export|if|else|for|while|return|async|await|interface|type|enum)\s/.test(trimmed) ||
+                // Python patterns
+                /^(def|class|import|from|if|elif|else|for|while|return|try|except|with|async|await)\s/.test(trimmed) ||
+                // Rust/Go/C patterns
+                /^(fn|pub|impl|struct|enum|use|mod|let|mut|match|unsafe|extern|crate)\s/.test(trimmed) ||
+                /^(func|package|import|type|struct|interface|var|const|defer|go|select)\s/.test(trimmed) ||
+                // Common code endings
+                /[{};]\s*$/.test(trimmed) ||
+                /=>\s*[{(]/.test(l) ||
+                /\(\s*\)\s*=>/.test(l) ||
+                // Comment patterns that look like code (not markdown headers)
+                /^\/\/\s/.test(trimmed) ||  // JS/C++ comments
+                /^#!\s*\//.test(trimmed) ||  // Shebang
+                /^#\s*include\s/.test(trimmed) ||  // C includes
+                /^#\s*define\s/.test(trimmed) ||   // C defines
+                /^#\s*pragma\s/.test(trimmed)      // C pragmas
+              );
+            });
+            
+            // If code patterns found, don't treat as markdown
+            if (hasCodePatterns) {
+              return false;
+            }
+            
+            // Check for Python/Shell comment-heavy files that might false-positive on headers
+            const hashCommentCount = codeLines.filter(l => /^\s*#[^#!\s]/.test(l) || /^\s*#\s+[a-z]/.test(l.toLowerCase())).length;
+            const totalNonEmpty = codeLines.filter(l => l.trim().length > 0).length;
+            
+            // If more than 40% of lines are hash-style comments, likely code not markdown
+            if (totalNonEmpty > 0 && hashCommentCount / totalNonEmpty > 0.4) {
+              return false;
+            }
+            
+            // For text/plaintext blocks, require at least 2 different markdown indicators
+            const isTextLang = lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md';
+            if (isTextLang && markdownIndicatorCount >= 2) {
               return true;
             }
             
-            // For other languages, be stricter - check for code patterns
-            const codeLineCount = codeLines.filter(l => 
-              /^(const|let|var|function|class|import|export|if|else|for|while|return|async|await)\s/.test(l.trim()) ||
-              /[{};]\s*$/.test(l.trim()) ||
-              /=>\s*[{(]/.test(l) ||
-              /\(\s*\)\s*=>/.test(l)
-            ).length;
+            // For 'code' language hint, NEVER treat as markdown (explicit code request)
+            if (langLower === 'code') {
+              return false;
+            }
             
-            // If more than 30% of lines look like code, don't treat as markdown
-            if (codeLineCount > codeLines.length * 0.3) return false;
+            // For explicit markdown/md, always treat as markdown
+            if (langLower === 'markdown' || langLower === 'md') {
+              return true;
+            }
             
-            return hasHeaders || hasBold || hasTables || hasLists || hasBlockquotes;
+            // For empty/text lang with only 1 indicator, don't treat as markdown
+            return false;
           })();
           
           if (isMarkdownContent && (lang === '' || lang === 'text' || lang === 'plaintext' || lang === 'markdown' || lang === 'md')) {
@@ -3240,6 +3368,29 @@ function MarkdownRenderer({ content }: { content: string }) {
     return elements;
   };
 
+  // Helper to render inline code within nested contexts (for bold/italic containing code)
+  const renderInlineInner = (text: string): React.ReactNode => {
+    const codeRegex = /`([^`]+)`/g;
+    const parts: React.ReactNode[] = [];
+    let lastEnd = 0;
+    let match: RegExpExecArray | null;
+    let innerKey = 0;
+    
+    while ((match = codeRegex.exec(text)) !== null) {
+      if (match.index > lastEnd) {
+        parts.push(text.slice(lastEnd, match.index));
+      }
+      parts.push(<code key={`inner-${innerKey++}`} className={styles.inlineCode}>{match[1]}</code>);
+      lastEnd = match.index + match[0].length;
+    }
+    
+    if (lastEnd < text.length) {
+      parts.push(text.slice(lastEnd));
+    }
+    
+    return parts.length > 0 ? <>{parts}</> : text;
+  };
+
   const renderInline = (rawText: string): React.ReactNode => {
     // Safety check for null/undefined/empty
     if (!rawText || typeof rawText !== 'string') {
@@ -3279,54 +3430,48 @@ function MarkdownRenderer({ content }: { content: string }) {
 
     const noOverlap = (start: number, end: number) =>
       !matches.some(m => start < m.end && end > m.start);
+    
+    // Helper to check if a position is inside any existing match
+    const isInsideMatch = (pos: number) =>
+      matches.some(m => pos >= m.start && pos < m.end);
 
-    // Inline code `text` — processed first so backticks shield bold/italic inside
-    const codeRegex = /`([^`]+)`/g;
-    let m: RegExpExecArray | null;
-    while ((m = codeRegex.exec(text)) !== null) {
-      matches.push({
-        start: m.index,
-        end: m.index + m[0].length,
-        element: <code key={key++} className={styles.inlineCode}>{m[1]}</code>,
-      });
-    }
-
-    // Severity badges like **[CRITICAL]**, HIGH, or LOW / CODE QUALITY
+    // Severity badges like **[CRITICAL]**, HIGH, or LOW / CODE QUALITY (process first, at start of line)
     const severityRegex = /^\s*(\*\*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(\*\*)?(?=\s|$)/i;
     const severityMatch = text.match(severityRegex);
     if (severityMatch) {
       const severity = severityMatch[2].toUpperCase();
       const suffix = severityMatch[3] ? ` / ${severityMatch[3].toUpperCase()}` : '';
       const end = severityMatch[0].length;
-      if (noOverlap(0, end)) {
-        matches.push({
-          start: 0,
-          end,
-          element: (
-            <span
-              key={key++}
-              className={`${styles.severityBadge} ${getSeverityClassName(severity)}`}
-            >
-              {`${severity}${suffix}`}
-            </span>
-          ),
-        });
-      }
+      matches.push({
+        start: 0,
+        end,
+        element: (
+          <span
+            key={key++}
+            className={`${styles.severityBadge} ${getSeverityClassName(severity)}`}
+          >
+            {`${severity}${suffix}`}
+          </span>
+        ),
+      });
     }
 
-    // Bold **text** — use .+? (lazy) so * inside content doesn't break the match
+    // Bold **text** — process BEFORE inline code, recursively handle nested patterns
     const boldRegex = /\*\*(.+?)\*\*/g;
+    let m: RegExpExecArray | null;
     while ((m = boldRegex.exec(text)) !== null) {
       if (noOverlap(m.index, m.index + m[0].length)) {
+        // Recursively render inner content to support nested patterns like **Delete `code`**
+        const innerContent = m[1];
         matches.push({
           start: m.index,
           end: m.index + m[0].length,
-          element: <strong key={key++}>{m[1]}</strong>,
+          element: <strong key={key++}>{renderInlineInner(innerContent)}</strong>,
         });
       }
     }
 
-    // Italic *text* — exclude ** by checking neighbors manually (avoids lookbehind compatibility issues)
+    // Italic *text* — process BEFORE inline code, exclude ** by checking neighbors
     const italicRegex = /\*([^*]+)\*/g;
     while ((m = italicRegex.exec(text)) !== null) {
       const start = m.index;
@@ -3338,10 +3483,25 @@ function MarkdownRenderer({ content }: { content: string }) {
         continue; // Part of bold **text** pattern
       }
       if (noOverlap(start, end)) {
+        // Recursively render inner content
+        const innerContent = m[1];
         matches.push({
           start,
           end,
-          element: <em key={key++}>{m[1]}</em>,
+          element: <em key={key++}>{renderInlineInner(innerContent)}</em>,
+        });
+      }
+    }
+
+    // Inline code `text` — process AFTER bold/italic so container elements handle their own nested code
+    const codeRegex = /`([^`]+)`/g;
+    while ((m = codeRegex.exec(text)) !== null) {
+      // Skip if this inline code is inside a bold/italic match (already handled by renderInlineInner)
+      if (!isInsideMatch(m.index) && noOverlap(m.index, m.index + m[0].length)) {
+        matches.push({
+          start: m.index,
+          end: m.index + m[0].length,
+          element: <code key={key++} className={styles.inlineCode}>{m[1]}</code>,
         });
       }
     }
@@ -3367,14 +3527,15 @@ function MarkdownRenderer({ content }: { content: string }) {
       }
     }
 
-    // Links [text](url)
+    // Links [text](url) — recursively process link text for inline code
     const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
     while ((m = linkRegex.exec(text)) !== null) {
       if (noOverlap(m.index, m.index + m[0].length)) {
+        const linkText = m[1];
         matches.push({
           start: m.index,
           end: m.index + m[0].length,
-          element: <a key={key++} href={m[2]} target="_blank" rel="noopener noreferrer">{m[1]}</a>,
+          element: <a key={key++} href={m[2]} target="_blank" rel="noopener noreferrer">{renderInlineInner(linkText)}</a>,
         });
       }
     }
@@ -3883,6 +4044,8 @@ export function AIPanel() {
     resetSessionUsage,
     summarizeConversation,
     isSummarizing,
+    circularResponseState,
+    resetCircularState,
   } = useAIStore();
 
   const { currentWorkspace } = useWorkspaceStore();
@@ -5752,6 +5915,43 @@ export function AIPanel() {
                 tasks={agentTasks}
                 onClear={clearAgentTasks}
               />
+            )}
+            {circularResponseState.circularCount >= 2 && (
+              <div className={styles.circularWarning}>
+                <AlertTriangle size={16} />
+                <div className={styles.circularWarningContent}>
+                  <strong>Loop Detected</strong>
+                  <p>The AI appears to be repeating similar responses. Consider:</p>
+                  <div className={styles.circularWarningActions}>
+                    <button 
+                      onClick={() => {
+                        resetCircularState();
+                        setInput('Let\'s try a completely different approach to this problem.');
+                        setTimeout(() => resizeTextarea(), 0);
+                      }}
+                    >
+                      Try Different Approach
+                    </button>
+                    <button 
+                      onClick={() => {
+                        resetCircularState();
+                        setInput('Please explain what\'s blocking you from completing this task.');
+                        setTimeout(() => resizeTextarea(), 0);
+                      }}
+                    >
+                      Ask What's Blocking
+                    </button>
+                    <button 
+                      onClick={() => {
+                        resetCircularState();
+                        stopStreaming('user-loop-break');
+                      }}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
             {activeConversation.messages.map((message) => (
               <MemoizedMessageBubble 
