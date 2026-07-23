@@ -1977,6 +1977,111 @@
   color: var(--accent-orange);
 }
 
+/* Plain text / streaming blocks (Cursor-like) */
+.plainTextBlock {
+  margin: 12px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.plainTextHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.plainTextHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plainTextTitle {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.plainTextMeta {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.plainTextActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.plainTextActionBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.plainTextActionBtn:hover {
+  background: rgba(255, 255, 255, 0.10);
+  color: var(--text-primary);
+}
+
+.plainTextPre {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre;
+  overflow: auto;
+  max-height: 260px;
+}
+
+.plainTextPreExpanded {
+  max-height: 520px;
+}
+
+.diffLine {
+  display: inline;
+}
+
+.diffHeader {
+  color: var(--text-secondary);
+}
+
+.diffMeta {
+  color: var(--text-muted);
+}
+
+.diffHunk {
+  color: #90caf9;
+}
+
+.diffAdd {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.10);
+}
+
+.diffDel {
+  color: #fca5a5;
+  background: rgba(244, 67, 54, 0.10);
+}
+
 .markdown a {
   color: var(--accent-blue);
   text-decoration: none;
@@ -4273,6 +4378,204 @@
   to   { transform: rotate(360deg); }
 }
 
+/* ── Agent Runs Panel (parallel runs) ────────────────────────────────────── */
+.agentRunsPanel {
+  margin: 8px 12px 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.agentRunsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.agentRunsHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agentRunsHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agentRunsTitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #aaa);
+}
+
+.agentRunsQueue,
+.agentRunsLock {
+  font-size: 10px;
+  color: var(--text-muted, #888);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.agentRunsClearBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  opacity: 0.8;
+}
+
+.agentRunsClearBtn:hover {
+  opacity: 1;
+  color: #f44336;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.agentRunsList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px 8px;
+}
+
+.agentRunItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 6px;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+}
+
+.agentRunItem:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.agentRunMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.agentRunLabel {
+  font-size: 12px;
+  color: var(--text-primary, #ccc);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.agentRunStatus {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-muted, #888);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.agentRunStatus_running {
+  color: #4fc3f7;
+  border-color: rgba(79, 195, 247, 0.35);
+  background: rgba(79, 195, 247, 0.08);
+}
+
+.agentRunStatus_queued {
+  color: #ffa500;
+  border-color: rgba(255, 165, 0, 0.35);
+  background: rgba(255, 165, 0, 0.08);
+}
+
+.agentRunStatus_completed {
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.agentRunStatus_error {
+  color: #f44336;
+  border-color: rgba(244, 67, 54, 0.35);
+  background: rgba(244, 67, 54, 0.08);
+}
+
+.agentRunStatus_cancelled {
+  color: var(--text-muted, #777);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.agentRunError {
+  font-size: 11px;
+  color: #f44336;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
+.agentRunStopBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted, #888);
+  cursor: pointer;
+}
+
+.agentRunStopBtn:hover {
+  color: #f44336;
+  border-color: rgba(244, 67, 54, 0.35);
+  background: rgba(244, 67, 54, 0.08);
+}
+
+/* ── Subagent launcher controls ──────────────────────────────────────────── */
+.subagentSelector {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.subagentDropdown {
+  background-color: transparent;
+  color: var(--text-primary);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+  max-width: 140px;
+}
+
+.subagentDropdown:hover {
+  background-color: var(--bg-hover);
+}
+
 /* ── MCP Servers Section ───────────────────────────────────────────── */
 .mcpServersSection {
   display: flex;
@@ -4725,4 +5028,290 @@
 
 .customPricingFields input {
   font-family: 'Fira Code', 'Consolas', monospace;
+}
+
+/* ─── Diff Viewer ─────────────────────────────────────────────────────────── */
+
+.diffViewer {
+  background: var(--bg-tertiary, #1e1e1e);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.diffViewerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg-secondary, #252526);
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  gap: 12px;
+}
+
+.diffViewerHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.diffViewerTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.diffViewerMeta {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+
+.diffViewerStats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diffStatsAdd {
+  color: #4ade80;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.diffStatsDel {
+  color: #f87171;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.diffViewerActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.diffViewerBtn {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.diffViewerBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.diffViewerContext {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.diffViewerFiles {
+  max-height: 450px;
+  overflow-y: auto;
+}
+
+.diffViewerEmpty {
+  margin: 0;
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── Diff File Card ──────────────────────────────────────────────────────── */
+
+.diffFileCard {
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+}
+
+.diffFileCard:last-child {
+  border-bottom: none;
+}
+
+.diffFileHeader {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  transition: background 0.15s ease;
+}
+
+.diffFileHeader:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.diffFileChevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.diffFileIcon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.diffFilePath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.diffFileBadgeNew,
+.diffFileBadgeDeleted,
+.diffFileBadgeTruncated {
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.diffFileBadgeNew {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+
+.diffFileBadgeDeleted {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.3);
+}
+
+.diffFileBadgeTruncated {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+.diffFileStats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.diffFileContent {
+  border-top: 1px solid var(--border-color, #3c3c3c);
+  background: var(--bg-primary, #1a1a1a);
+  max-height: 400px;
+  overflow: auto;
+}
+
+/* ─── Diff Lines ──────────────────────────────────────────────────────────── */
+
+.diffFileLines {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.diffFileLine {
+  display: flex;
+  min-height: 20px;
+}
+
+.diffLineNumber {
+  flex-shrink: 0;
+  width: 40px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-muted, #666);
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid var(--border-color, #3c3c3c);
+  user-select: none;
+}
+
+.diffLineContent {
+  flex: 1;
+  padding: 0 12px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.diffLineAdd {
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.diffLineAdd .diffLineNumber {
+  background: rgba(34, 197, 94, 0.18);
+  color: #4ade80;
+}
+
+.diffLineAdd .diffLineContent {
+  color: #86efac;
+}
+
+.diffLineDel {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.diffLineDel .diffLineNumber {
+  background: rgba(239, 68, 68, 0.18);
+  color: #f87171;
+}
+
+.diffLineDel .diffLineContent {
+  color: #fca5a5;
+}
+
+.diffLineHunk {
+  background: rgba(96, 165, 250, 0.08);
+}
+
+.diffLineHunk .diffLineNumber {
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.diffLineHunk .diffLineContent {
+  color: #93c5fd;
+  font-weight: 500;
+}
+
+.diffLineHeader {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.diffLineHeader .diffLineContent {
+  color: var(--text-muted, #888);
+}
+
+.diffLineContext .diffLineContent {
+  color: var(--text-secondary);
 }

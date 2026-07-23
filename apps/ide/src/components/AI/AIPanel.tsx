@@ -33,9 +33,11 @@ import {
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage, git } from '../../services/tauri';
 import type { CopilotCachedAccount, CopilotDeviceCode } from '../../services/tauri';
-import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace } from '../../store/aiStore';
+import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace, SubagentProfile } from '../../store/aiStore';
+import type { AIProvider } from '../../store/aiStore';
 import { ContextBreakdownModal } from './ContextBreakdownModal';
 import { useWorkspaceStore } from '../../store/workspaceStore';
+import { useGitStore } from '../../store/gitStore';
 import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -509,7 +511,7 @@ interface PendingFileOperation {
 
 const CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
 const WINDOWS_ABS_REGEX = /^[a-zA-Z]:[\\/]/;
-const SEVERITY_PATTERN = /\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?/i;
+const SEVERITY_PATTERN = /(?:SEVERITY\s*[:\-–—]\s*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(?:\s+(?:ISSUES|SEVERITY)\s*:\s*\*\*)?/i;
 
 const getSeverityClassName = (severity: string): string => {
   switch (severity) {
@@ -734,7 +736,7 @@ const discardGitChanges = async (
     const candidates = buildDiscardCandidates(workspaceRoot, filePath, paths);
     for (const candidate of candidates) {
       try {
-        await git.discardChanges(workspaceRoot, candidate);
+        await useGitStore.getState().discardChanges(candidate);
         return true;
       } catch (error) {
         console.warn('Discard candidate failed:', candidate, error);
@@ -1845,9 +1847,340 @@ function ImplementationOfferPrompt({
   );
 }
 
-function MessageBubble({ message, onOperationsChange }: { 
+// ─── Diff Parser & Viewer Components ─────────────────────────────────────────
+
+interface ParsedFileDiff {
+  filePath: string;
+  oldPath: string;
+  newPath: string;
+  rawContent: string;
+  additions: number;
+  deletions: number;
+  isTruncated: boolean;
+  isNewFile: boolean;
+  isDeletedFile: boolean;
+}
+
+interface ParsedDiffResult {
+  files: ParsedFileDiff[];
+  totalAdditions: number;
+  totalDeletions: number;
+  contextInfo: string | null;
+}
+
+function parseDiffIntoFiles(text: string): ParsedDiffResult {
+  const files: ParsedFileDiff[] = [];
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+  let contextInfo: string | null = null;
+
+  // Extract context info (e.g., "=== Pull Request ===" section or "=== Commit ===" section)
+  const contextMatch = text.match(/^=== (Pull Request|Commit|Commit Range|Changes) ===\n([\s\S]*?)(?=\n===|\n--- BEGIN DIFF|$)/m);
+  if (contextMatch) {
+    contextInfo = contextMatch[2].trim();
+  }
+
+  // Split by file boundaries: either "--- BEGIN DIFF" markers or "diff --git" lines
+  const fileChunks: { path: string | null; content: string }[] = [];
+  
+  // First, try to split by BEGIN DIFF markers (our custom format)
+  const beginDiffRegex = /--- BEGIN DIFF(?: \(([^)]+)\))? ---/g;
+  const endDiffRegex = /--- END DIFF(?: \([^)]+\))? ---/g;
+  
+  let hasBeginDiffMarkers = beginDiffRegex.test(text);
+  beginDiffRegex.lastIndex = 0;
+  
+  if (hasBeginDiffMarkers) {
+    let match;
+    let lastEnd = 0;
+    const markers: { start: number; end: number; path: string | null }[] = [];
+    
+    while ((match = beginDiffRegex.exec(text)) !== null) {
+      const startIdx = match.index;
+      const path = match[1] || null;
+      const contentStart = startIdx + match[0].length;
+      
+      // Find corresponding END DIFF
+      endDiffRegex.lastIndex = contentStart;
+      const endMatch = endDiffRegex.exec(text);
+      const contentEnd = endMatch ? endMatch.index : text.length;
+      
+      markers.push({ start: contentStart, end: contentEnd, path });
+      lastEnd = endMatch ? endMatch.index + endMatch[0].length : text.length;
+    }
+    
+    markers.forEach(({ start, end, path }) => {
+      const content = text.slice(start, end).trim();
+      if (content) {
+        fileChunks.push({ path, content });
+      }
+    });
+  } else {
+    // Fallback: split by "diff --git" lines
+    const diffGitRegex = /^diff --git a\/(.+?) b\/(.+)$/gm;
+    let match;
+    const boundaries: { index: number; path: string }[] = [];
+    
+    while ((match = diffGitRegex.exec(text)) !== null) {
+      boundaries.push({ index: match.index, path: match[2] });
+    }
+    
+    if (boundaries.length === 0 && text.trim()) {
+      // No structured diff, treat whole text as single chunk
+      fileChunks.push({ path: null, content: text });
+    } else {
+      boundaries.forEach((boundary, i) => {
+        const start = boundary.index;
+        const end = i + 1 < boundaries.length ? boundaries[i + 1].index : text.length;
+        const content = text.slice(start, end).trim();
+        if (content) {
+          fileChunks.push({ path: boundary.path, content });
+        }
+      });
+    }
+  }
+
+  // Parse each chunk into a ParsedFileDiff
+  fileChunks.forEach(({ path, content }) => {
+    // Try to extract path from content if not provided
+    let filePath = path || 'unknown';
+    let oldPath = filePath;
+    let newPath = filePath;
+    
+    const gitMatch = content.match(/^diff --git a\/(.+?) b\/(.+)$/m);
+    if (gitMatch) {
+      oldPath = gitMatch[1];
+      newPath = gitMatch[2];
+      filePath = newPath;
+    }
+    
+    // Check for new/deleted file markers
+    const isNewFile = /^new file mode/m.test(content);
+    const isDeletedFile = /^deleted file mode/m.test(content);
+    
+    // Count additions and deletions (only real +/- lines, not headers)
+    let additions = 0;
+    let deletions = 0;
+    const lines = content.split('\n');
+    lines.forEach((line) => {
+      if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+      if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+    });
+    
+    // Check for truncation
+    const isTruncated = content.includes('...[truncated]');
+    
+    files.push({
+      filePath,
+      oldPath,
+      newPath,
+      rawContent: content,
+      additions,
+      deletions,
+      isTruncated,
+      isNewFile,
+      isDeletedFile,
+    });
+    
+    totalAdditions += additions;
+    totalDeletions += deletions;
+  });
+
+  return { files, totalAdditions, totalDeletions, contextInfo };
+}
+
+function getFileIcon(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  const iconMap: Record<string, string> = {
+    ts: '📘', tsx: '📘', js: '📒', jsx: '📒',
+    py: '🐍', rs: '🦀', go: '🔷', java: '☕',
+    json: '📋', yaml: '📋', yml: '📋', toml: '📋',
+    md: '📝', txt: '📄', css: '🎨', scss: '🎨',
+    html: '🌐', vue: '💚', svelte: '🧡',
+  };
+  return iconMap[ext] || '📄';
+}
+
+function DiffFileSection({ 
+  file, 
+  defaultExpanded,
+  onToggle,
+}: { 
+  file: ParsedFileDiff;
+  defaultExpanded: boolean;
+  onToggle?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+
+  const toggleExpanded = () => {
+    setExpanded((v) => !v);
+    onToggle?.();
+  };
+
+  const renderDiffLines = (content: string) => {
+    const lines = content.split('\n');
+    return (
+      <div className={styles.diffFileLines}>
+        {lines.map((line, idx) => {
+          const isHunk = line.startsWith('@@');
+          const isHeader =
+            line.startsWith('diff --git ') ||
+            line.startsWith('--- ') ||
+            line.startsWith('+++ ') ||
+            line.startsWith('index ') ||
+            line.startsWith('new file mode ') ||
+            line.startsWith('deleted file mode ');
+          const isAdd = line.startsWith('+') && !line.startsWith('+++');
+          const isDel = line.startsWith('-') && !line.startsWith('---');
+
+          const lineClass = isHunk
+            ? styles.diffLineHunk
+            : isHeader
+            ? styles.diffLineHeader
+            : isAdd
+            ? styles.diffLineAdd
+            : isDel
+            ? styles.diffLineDel
+            : styles.diffLineContext;
+
+          return (
+            <div key={idx} className={`${styles.diffFileLine} ${lineClass}`}>
+              <span className={styles.diffLineNumber}>{idx + 1}</span>
+              <span className={styles.diffLineContent}>{line || ' '}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  return (
+    <div className={styles.diffFileCard}>
+      <button className={styles.diffFileHeader} onClick={toggleExpanded} type="button">
+        <span className={styles.diffFileChevron}>{expanded ? '▼' : '▶'}</span>
+        <span className={styles.diffFileIcon}>{getFileIcon(file.filePath)}</span>
+        <span className={styles.diffFilePath}>{file.filePath}</span>
+        {file.isNewFile && <span className={styles.diffFileBadgeNew}>new</span>}
+        {file.isDeletedFile && <span className={styles.diffFileBadgeDeleted}>deleted</span>}
+        {file.isTruncated && <span className={styles.diffFileBadgeTruncated}>truncated</span>}
+        <span className={styles.diffFileStats}>
+          {file.additions > 0 && <span className={styles.diffStatsAdd}>+{file.additions}</span>}
+          {file.deletions > 0 && <span className={styles.diffStatsDel}>-{file.deletions}</span>}
+        </span>
+      </button>
+      {expanded && (
+        <div className={styles.diffFileContent}>
+          {renderDiffLines(file.rawContent)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiffViewer({ text, title }: { text: string; title?: string }) {
+  const parsed = useMemo(() => parseDiffIntoFiles(text), [text]);
+  const [allExpanded, setAllExpanded] = useState(false);
+  const [expandKey, setExpandKey] = useState(0);
+
+  const handleExpandAll = () => {
+    setAllExpanded(true);
+    setExpandKey((k) => k + 1);
+  };
+
+  const handleCollapseAll = () => {
+    setAllExpanded(false);
+    setExpandKey((k) => k + 1);
+  };
+
+  const copyAll = () => {
+    navigator.clipboard.writeText(text);
+  };
+
+  if (parsed.files.length === 0) {
+    return (
+      <div className={styles.diffViewer}>
+        <div className={styles.diffViewerHeader}>
+          <span className={styles.diffViewerTitle}>{title || 'Review Input'}</span>
+          <span className={styles.diffViewerMeta}>No files</span>
+        </div>
+        <pre className={styles.diffViewerEmpty}>{text}</pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.diffViewer}>
+      <div className={styles.diffViewerHeader}>
+        <div className={styles.diffViewerHeaderLeft}>
+          <span className={styles.diffViewerTitle}>{title || 'Review Input'}</span>
+          <span className={styles.diffViewerMeta}>
+            {parsed.files.length} {parsed.files.length === 1 ? 'file' : 'files'}
+          </span>
+          <span className={styles.diffViewerStats}>
+            {parsed.totalAdditions > 0 && (
+              <span className={styles.diffStatsAdd}>+{parsed.totalAdditions}</span>
+            )}
+            {parsed.totalDeletions > 0 && (
+              <span className={styles.diffStatsDel}>-{parsed.totalDeletions}</span>
+            )}
+          </span>
+        </div>
+        <div className={styles.diffViewerActions}>
+          <button 
+            className={styles.diffViewerBtn} 
+            onClick={handleExpandAll}
+            type="button"
+            title="Expand all files"
+          >
+            Expand All
+          </button>
+          <button 
+            className={styles.diffViewerBtn} 
+            onClick={handleCollapseAll}
+            type="button"
+            title="Collapse all files"
+          >
+            Collapse All
+          </button>
+          <button 
+            className={styles.diffViewerBtn} 
+            onClick={copyAll}
+            type="button"
+            title="Copy all"
+          >
+            Copy
+          </button>
+        </div>
+      </div>
+      {parsed.contextInfo && (
+        <div className={styles.diffViewerContext}>
+          {parsed.contextInfo.split('\n').map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      )}
+      <div className={styles.diffViewerFiles}>
+        {parsed.files.map((file, idx) => (
+          <DiffFileSection
+            key={`${file.filePath}-${idx}-${expandKey}`}
+            file={file}
+            defaultExpanded={allExpanded}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type PlainTextKind = 'text' | 'diff';
+
+function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTextTitle, plainTextDefaultExpanded, plainTextKind }: { 
   message: AIMessage;
   onOperationsChange?: (ops: FileOperation[]) => void;
+  renderAsPlainText?: boolean;
+  plainTextTitle?: string;
+  plainTextDefaultExpanded?: boolean;
+  plainTextKind?: PlainTextKind;
 }) {
   const isUser = message.role === 'user';
   const [pendingOps, setPendingOps] = useState<FileOperation[]>([]);
@@ -2251,6 +2584,11 @@ function MessageBubble({ message, onOperationsChange }: {
     return removeChecklistSections(cleaned, planComponents.checklists);
   }, [message.content, planComponents.checklists, removeChecklistSections]);
 
+  const [plainExpanded, setPlainExpanded] = useState(Boolean(plainTextDefaultExpanded));
+  useEffect(() => {
+    if (plainTextDefaultExpanded) setPlainExpanded(true);
+  }, [plainTextDefaultExpanded]);
+
   return (
     <div className={`${styles.message} ${isUser ? styles.userMessage : styles.assistantMessage}`}>
       <div className={styles.messageHeader}>
@@ -2283,10 +2621,47 @@ function MessageBubble({ message, onOperationsChange }: {
         </div>
       )}
       <div className={styles.messageContent}>
-        {isUser ? (
-          <MarkdownRenderer content={message.content} />
+        {renderAsPlainText ? (
+          plainTextKind === 'diff' ? (
+            <DiffViewer 
+              text={isUser ? message.content : assistantContent} 
+              title={plainTextTitle || 'Review Input'}
+            />
+          ) : (
+            <div className={styles.plainTextBlock}>
+              <div className={styles.plainTextHeader}>
+                <div className={styles.plainTextHeaderLeft}>
+                  <span className={styles.plainTextTitle}>{plainTextTitle || (isUser ? 'Input' : 'Streaming')}</span>
+                  <span className={styles.plainTextMeta}>{(isUser ? message.content.length : assistantContent.length).toLocaleString()} chars</span>
+                </div>
+                <div className={styles.plainTextActions}>
+                  <button
+                    className={styles.plainTextActionBtn}
+                    onClick={() => navigator.clipboard.writeText(isUser ? message.content : assistantContent)}
+                    type="button"
+                    title="Copy"
+                  >
+                    Copy
+                  </button>
+                  <button
+                    className={styles.plainTextActionBtn}
+                    onClick={() => setPlainExpanded((v) => !v)}
+                    type="button"
+                    title={plainExpanded ? 'Collapse' : 'Expand'}
+                  >
+                    {plainExpanded ? 'Collapse' : 'Expand'}
+                  </button>
+                </div>
+              </div>
+              <pre className={`${styles.plainTextPre} ${plainExpanded ? styles.plainTextPreExpanded : ''}`}>
+                {isUser ? message.content : assistantContent}
+              </pre>
+            </div>
+          )
+        ) : isUser ? (
+          <MarkdownRenderer content={message.content} disableLooseCodeDetection={false} />
         ) : (
-          <MarkdownRenderer content={assistantContent} />
+          <MarkdownRenderer content={assistantContent} disableLooseCodeDetection={agentMode === 'plan'} />
         )}
       </div>
       {!isUser && pendingOps.length > 0 && (
@@ -2373,6 +2748,10 @@ const MemoizedMessageBubble = memo(
     if (prev.message.role !== next.message.role) return false;
     if (prev.message.content !== next.message.content) return false;
     if ((prev.message.attachments?.length || 0) !== (next.message.attachments?.length || 0)) return false;
+    if (prev.renderAsPlainText !== next.renderAsPlainText) return false;
+    if (prev.plainTextTitle !== next.plainTextTitle) return false;
+    if (prev.plainTextDefaultExpanded !== next.plainTextDefaultExpanded) return false;
+    if (prev.plainTextKind !== next.plainTextKind) return false;
     const prevAttachmentIds = prev.message.attachments?.map(a => a.id).join(',') || '';
     const nextAttachmentIds = next.message.attachments?.map(a => a.id).join(',') || '';
     if (prevAttachmentIds !== nextAttachmentIds) return false;
@@ -2458,7 +2837,7 @@ function AgentTaskProgress({ tasks, onClear }: { tasks: AgentTask[]; onClear: ()
   );
 }
 
-function MarkdownRenderer({ content }: { content: string }) {
+function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: string; disableLooseCodeDetection?: boolean }) {
   const renderMarkdown = (text: string) => {
     const lines = text.split('\n');
     const elements: React.ReactNode[] = [];
@@ -3265,7 +3644,75 @@ function MarkdownRenderer({ content }: { content: string }) {
         }
       }
 
-      // Detect loose code (code without fences) - check if line looks like code
+      // Detect loose code (code without fences) - check if line looks like code.
+      // Disable this in Plan Mode to avoid misclassifying checklists/review prose as code blocks.
+      const guessLooseCodeLanguage = (snippet: string): string => {
+        const s = snippet.slice(0, 2000);
+        if (/\bpackage\s+[a-zA-Z_][\w.]*\s*;/.test(s) || /\bpublic\s+class\s+\w+/.test(s) || /\bimport\s+[\w.]+\s*;/.test(s)) return 'java';
+        if (/^\s*(def|class)\s+\w+/m.test(s) || (/^\s*import\s+\w+/m.test(s) && !/;/.test(s))) return 'python';
+        if (/\bfn\s+\w+/.test(s) || /\bpub\s+fn\s+/.test(s) || /\bstruct\s+\w+/.test(s) || /\bimpl\s+\w+/.test(s)) return 'rust';
+        if (/\bfunc\s+\w+/.test(s) || /\bpackage\s+\w+/.test(s) && !/;/.test(s)) return 'go';
+        if (/\binterface\s+\w+/.test(s) || /:\s*(string|number|boolean|any|unknown)\b/.test(s) || /\btype\s+\w+\s*=/.test(s)) return 'typescript';
+        if (/\b(const|let|var|function|export|import)\b/.test(s) || /=>/.test(s)) return 'javascript';
+        return 'code';
+      };
+
+      const highlightLooseCodeLine = (lineText: string, lang: string) => {
+        let tokenKey = 0;
+        const patterns: { regex: RegExp; className: string }[] = [];
+        const langLower = (lang || '').toLowerCase();
+
+        if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'code'].includes(langLower)) {
+          patterns.push({ regex: /(\/\/.*$)/, className: styles.syntaxComment });
+          patterns.push({ regex: /(\/\*[\s\S]*?\*\/)/, className: styles.syntaxComment });
+        }
+        if (['python', 'py', 'ruby', 'bash', 'sh', 'shell', 'yaml', 'yml'].includes(langLower)) {
+          patterns.push({ regex: /(#.*$)/, className: styles.syntaxComment });
+        }
+
+        patterns.push({ regex: /("(?:[^"\\]|\\.)*")/, className: styles.syntaxString });
+        patterns.push({ regex: /('(?:[^'\\]|\\.)*')/, className: styles.syntaxString });
+        patterns.push({ regex: /(`(?:[^`\\]|\\.)*`)/, className: styles.syntaxString });
+
+        const keywords = /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|export|from|async|await|try|catch|throw|new|this|super|extends|implements|public|private|protected|static|readonly|package|def|fn|pub|mod|use|struct|enum|impl|trait|match|loop|break|continue|true|false|null|undefined|None|True|False|self|nil)\b/g;
+        patterns.push({ regex: keywords, className: styles.syntaxKeyword });
+        patterns.push({ regex: /\b(\d+\.?\d*)\b/, className: styles.syntaxNumber });
+        patterns.push({ regex: /\b([a-zA-Z_]\w*)\s*(?=\()/, className: styles.syntaxFunction });
+
+        const replacements: { start: number; end: number; element: React.ReactNode }[] = [];
+
+        patterns.forEach(({ regex, className }) => {
+          const globalRegex = new RegExp(regex.source, 'g');
+          let match;
+          while ((match = globalRegex.exec(lineText)) !== null) {
+            const overlaps = replacements.some(r =>
+              (match!.index >= r.start && match!.index < r.end) ||
+              (match!.index + match![0].length > r.start && match!.index + match![0].length <= r.end)
+            );
+            if (!overlaps) {
+              replacements.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                element: <span key={`tok-${tokenKey++}`} className={className}>{match[0]}</span>,
+              });
+            }
+          }
+        });
+
+        replacements.sort((a, b) => a.start - b.start);
+        if (replacements.length === 0) return lineText;
+
+        const parts: React.ReactNode[] = [];
+        let lastEnd = 0;
+        replacements.forEach((r, idx) => {
+          if (r.start > lastEnd) parts.push(<span key={`t-${idx}`}>{lineText.slice(lastEnd, r.start)}</span>);
+          parts.push(r.element);
+          lastEnd = r.end;
+        });
+        if (lastEnd < lineText.length) parts.push(<span key="t-end">{lineText.slice(lastEnd)}</span>);
+        return <>{parts}</>;
+      };
+
       const looksLikeCodeLine = (l: string): boolean => {
         const trimmed = l.trim();
         // Skip very short lines or lines that look like prose
@@ -3280,8 +3727,9 @@ function MarkdownRenderer({ content }: { content: string }) {
           /^[\s]*\d+\.\s+\S/.test(trimmed);
         if (hasMarkdown) return false;
 
-        const hasCodePunctuation = /[{};=<>()[\]]/.test(trimmed);
-        if (wordCount >= 5 && !hasCodePunctuation) return false;
+        // Parentheses are extremely common in prose; don't treat them as "code punctuation" by themselves.
+        const hasStrongCodePunctuation = /[{};=<>[\]]/.test(trimmed);
+        if (wordCount >= 5 && !hasStrongCodePunctuation) return false;
 
         return (
           // Keywords at start of line
@@ -3328,7 +3776,7 @@ function MarkdownRenderer({ content }: { content: string }) {
         );
       };
 
-      if (looksLikeCodeLine(line)) {
+      if (!disableLooseCodeDetection && looksLikeCodeLine(line)) {
         const codeLines: string[] = [];
         while (i < lines.length && (looksLikeCodeLine(lines[i]) || lines[i].trim() === '' || /^\s+/.test(lines[i]))) {
           if (lines[i].trim() === '' && codeLines.length > 0 && i + 1 < lines.length && !looksLikeCodeLine(lines[i + 1]) && !/^\s+/.test(lines[i + 1])) {
@@ -3340,10 +3788,17 @@ function MarkdownRenderer({ content }: { content: string }) {
         
         if (codeLines.length > 0) {
           const codeContent = codeLines.join('\n');
+          const inferredLang = guessLooseCodeLanguage(codeContent);
+          const highlighted = codeContent.split('\n').map((l, idx) => (
+            <span key={idx}>
+              {highlightLooseCodeLine(l, inferredLang)}
+              {idx < codeLines.length - 1 ? '\n' : ''}
+            </span>
+          ));
           elements.push(
             <div key={key++} className={styles.codeBlock}>
               <div className={styles.codeBlockHeader}>
-                <span className={styles.codeBlockLang}>code</span>
+                <span className={styles.codeBlockLang}>{inferredLang}</span>
                 <button 
                   className={styles.copyButton}
                   onClick={() => navigator.clipboard.writeText(codeContent)}
@@ -3352,7 +3807,7 @@ function MarkdownRenderer({ content }: { content: string }) {
                 </button>
               </div>
               <div className={styles.codeBlockContent}>
-                <pre><code>{codeContent}</code></pre>
+                <pre><code>{highlighted}</code></pre>
               </div>
             </div>
           );
@@ -3435,8 +3890,15 @@ function MarkdownRenderer({ content }: { content: string }) {
     const isInsideMatch = (pos: number) =>
       matches.some(m => pos >= m.start && pos < m.end);
 
-    // Severity badges like **[CRITICAL]**, HIGH, or LOW / CODE QUALITY (process first, at start of line)
-    const severityRegex = /^\s*(\*\*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(\*\*)?(?=\s|$)/i;
+    // Severity badges like:
+    // - **[CRITICAL]** foo
+    // - HIGH: foo
+    // - SEVERITY: MEDIUM — foo
+    // - Severity - Low / Code Quality: foo
+    // - CRITICAL ISSUES:** foo (AI often outputs this pattern)
+    // - HIGH SEVERITY:** foo
+    // (process first, at start of line)
+    const severityRegex = /^\s*(\*\*)?(?:SEVERITY\s*[:\-–—]\s*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(\*\*)?(?:\s+(?:ISSUES|SEVERITY)\s*:\s*\*\*)?(?=\s|$)/i;
     const severityMatch = text.match(severityRegex);
     if (severityMatch) {
       const severity = severityMatch[2].toUpperCase();
@@ -3785,6 +4247,7 @@ function FileOperationsBar({
   onSoftUndoAll,
   onReview,
   onViewAll,
+  onDismiss,
   onViewFile,
   onAcceptFile,
   onUndoFile
@@ -4046,6 +4509,14 @@ export function AIPanel() {
     isSummarizing,
     circularResponseState,
     resetCircularState,
+    agentRunsById,
+    agentRunOrder,
+    agentRunQueue,
+    startAgentRun,
+    cancelAgentRun,
+    clearAgentRuns,
+    workspaceWriteLocked,
+    workspaceWriteLockQueue,
   } = useAIStore();
 
   const { currentWorkspace } = useWorkspaceStore();
@@ -4067,6 +4538,18 @@ export function AIPanel() {
   const [pendingResponse, setPendingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  const subagentProfiles = config.subagentProfiles || [];
+  const [selectedSubagentProfileId, setSelectedSubagentProfileId] = useState<string>(
+    config.defaultSubagentProfileId || subagentProfiles[0]?.id || ''
+  );
+
+  useEffect(() => {
+    const next = config.defaultSubagentProfileId || subagentProfiles[0]?.id || '';
+    if (!selectedSubagentProfileId || !subagentProfiles.some(p => p.id === selectedSubagentProfileId)) {
+      setSelectedSubagentProfileId(next);
+    }
+  }, [config.defaultSubagentProfileId, subagentProfiles, selectedSubagentProfileId]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { deleteConversation, importConversationsFromPath } = useAIStore();
@@ -4926,258 +5409,262 @@ export function AIPanel() {
       return;
     }
 
-    let successCount = 0;
-    let skippedCount = 0;
-    let overwriteRequiredCount = 0;
-    let invalidCount = 0;
-    const updatedOps = [...allPendingOps];
+    await useAIStore.getState().withWorkspaceWriteLock('fileOps.applyAll', async () => {
+      let successCount = 0;
+      let skippedCount = 0;
+      let overwriteRequiredCount = 0;
+      let invalidCount = 0;
+      const updatedOps = [...allPendingOps];
 
-    // Apply all unapplied operations
-    for (let i = 0; i < updatedOps.length; i++) {
-      const item = updatedOps[i];
-      if (item.applied) {
-        skippedCount++;
-        continue;
-      }
-
-      try {
-        if (item.operation.invalidReason) {
-          updatedOps[i] = {
-            ...updatedOps[i],
-            operation: { ...item.operation, invalidReason: item.operation.invalidReason },
-            applied: false,
-            wasSkipped: true,
-            errorMessage: item.operation.invalidReason,
-          };
+      // Apply all unapplied operations
+      for (let i = 0; i < updatedOps.length; i++) {
+        const item = updatedOps[i];
+        if (item.applied) {
           skippedCount++;
-          invalidCount++;
           continue;
         }
-        // Normalize paths: remove leading slashes from operation path, normalize double slashes
-        const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
-          item.operation.path,
-          currentWorkspace.rootPath
-        );
-        if (error) {
-          updatedOps[i] = {
-            ...updatedOps[i],
-            operation: { ...item.operation, invalidReason: error },
-            applied: false,
-            wasSkipped: true,
-            errorMessage: error,
-          };
-          skippedCount++;
-          invalidCount++;
-          continue;
-        }
-        console.log(`[FileOps] Workspace root: ${currentWorkspace.rootPath}`);
-        console.log(`[FileOps] Operation path (raw): ${item.operation.path}`);
-        console.log(`[FileOps] Operation path (normalized): ${normalizedOpPath}`);
-        console.log(`[FileOps] Full path: ${fullPath}`);
-        
-        if (item.operation.type === 'create') {
-          // Check if file already exists
-          const fileExists = await fs.pathExists(fullPath);
-          if (fileExists) {
-            const existingContent = await fs.readFile(fullPath);
-            const normalizedExisting = normalizeContentForCompare(existingContent);
-            const normalizedIncoming = normalizeContentForCompare(item.operation.content || '');
-            if (normalizedExisting === normalizedIncoming && normalizedIncoming.length > 0) {
-              console.log(`[FileOps] File already exists, content matches: ${item.operation.path}`);
-              // Mark as applied even though we skipped it
-              updatedOps[i] = { ...updatedOps[i], applied: true, wasSkipped: true, previousExists: true, previousContent: existingContent };
-              skippedCount++;
-              continue;
-            }
 
+        try {
+          if (item.operation.invalidReason) {
             updatedOps[i] = {
               ...updatedOps[i],
+              operation: { ...item.operation, invalidReason: item.operation.invalidReason },
               applied: false,
               wasSkipped: true,
-              previousExists: true,
-              previousContent: existingContent,
-              requiresOverwrite: true,
-            };
-            skippedCount++;
-            overwriteRequiredCount++;
-            continue;
-          }
-          
-          // Ensure parent directory exists
-          await ensureParentDir(fullPath, normalizedOpPath);
-          console.log(`[FileOps] Writing file: ${fullPath} (${(item.operation.content || '').length} bytes)`);
-          await fs.writeFile(fullPath, item.operation.content || '');
-          // Verify write succeeded by checking file exists now
-          const verifyExists = await fs.pathExists(fullPath);
-          console.log(`[FileOps] Write complete: ${fullPath}, verified exists: ${verifyExists}`);
-          // Read back the file to double-verify it was written
-          try {
-            const readBack = await fs.readFile(fullPath);
-            const bytesWritten = (item.operation.content || '').length;
-            const bytesRead = readBack.length;
-            console.log(`[FileOps] Verification: wrote ${bytesWritten} bytes, read back ${bytesRead} bytes`);
-            if (bytesRead !== bytesWritten) {
-              console.warn(`[FileOps] WARNING: Byte mismatch! File may not have been written correctly.`);
-            }
-          } catch (readErr) {
-            console.error(`[FileOps] FAILED to read back file - it may not have been created:`, readErr);
-          }
-          // Save to local history
-          await history.save(item.operation.path, item.operation.content || '').catch(console.error);
-          await openFile(fullPath);
-          updatedOps[i] = {
-            ...updatedOps[i],
-            applied: true,
-            previousExists: false,
-            previousContent: '',
-            wasSkipped: false,
-          };
-        } else if (item.operation.type === 'edit') {
-          const previousContent = await fs.readFile(fullPath);
-          const { updatedContent, changed, reason } = applyEditOperation(previousContent, item.operation);
-
-          if (!changed) {
-            if (reason === 'already-applied') {
-              updatedOps[i] = {
-                ...updatedOps[i],
-                applied: true,
-                previousExists: true,
-                previousContent,
-                wasSkipped: true,
-              };
-              skippedCount++;
-              continue;
-            }
-            updatedOps[i] = {
-              ...updatedOps[i],
-              operation: { ...item.operation, invalidReason: 'Edit failed: <old_content> did not match the file.' },
-              applied: false,
-              previousExists: true,
-              previousContent,
-              wasSkipped: true,
-              errorMessage: 'Edit failed: <old_content> did not match the file.',
+              errorMessage: item.operation.invalidReason,
             };
             skippedCount++;
             invalidCount++;
             continue;
           }
-
-          await fs.writeFile(fullPath, updatedContent);
-          // Save to local history
-          await history.save(item.operation.path, updatedContent).catch(console.error);
-          await openFile(fullPath);
-          updatedOps[i] = {
-            ...updatedOps[i],
-            applied: true,
-            previousExists: true,
-            previousContent,
-            wasSkipped: false,
-          };
-        } else if (item.operation.type === 'delete') {
-          // Require manual confirmation for delete operations
-          const confirmed = await dialog.confirm(
-            `Are you sure you want to delete "${item.operation.path}"?\n\nThis action cannot be undone through the IDE (though the file content is saved for undo).`,
-            'Confirm File Deletion'
+          // Normalize paths: remove leading slashes from operation path, normalize double slashes
+          const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
+            item.operation.path,
+            currentWorkspace.rootPath
           );
-          
-          if (!confirmed) {
-            console.log(`[FileOps] Delete cancelled by user: ${item.operation.path}`);
+          if (error) {
             updatedOps[i] = {
               ...updatedOps[i],
+              operation: { ...item.operation, invalidReason: error },
               applied: false,
               wasSkipped: true,
+              errorMessage: error,
             };
             skippedCount++;
+            invalidCount++;
             continue;
           }
+          console.log(`[FileOps] Workspace root: ${currentWorkspace.rootPath}`);
+          console.log(`[FileOps] Operation path (raw): ${item.operation.path}`);
+          console.log(`[FileOps] Operation path (normalized): ${normalizedOpPath}`);
+          console.log(`[FileOps] Full path: ${fullPath}`);
           
-          const previousContent = await fs.readFile(fullPath);
-          await fs.deletePath(fullPath);
-          updatedOps[i] = {
-            ...updatedOps[i],
-            applied: true,
-            previousExists: true,
-            previousContent,
-            wasSkipped: false,
-          };
-        }
+          if (item.operation.type === 'create') {
+            // Check if file already exists
+            const fileExists = await fs.pathExists(fullPath);
+            if (fileExists) {
+              const existingContent = await fs.readFile(fullPath);
+              const normalizedExisting = normalizeContentForCompare(existingContent);
+              const normalizedIncoming = normalizeContentForCompare(item.operation.content || '');
+              if (normalizedExisting === normalizedIncoming && normalizedIncoming.length > 0) {
+                console.log(`[FileOps] File already exists, content matches: ${item.operation.path}`);
+                // Mark as applied even though we skipped it
+                updatedOps[i] = { ...updatedOps[i], applied: true, wasSkipped: true, previousExists: true, previousContent: existingContent };
+                skippedCount++;
+                continue;
+              }
 
-        successCount++;
-      } catch (error) {
-        console.error('Failed to execute file operation:', error);
+              updatedOps[i] = {
+                ...updatedOps[i],
+                applied: false,
+                wasSkipped: true,
+                previousExists: true,
+                previousContent: existingContent,
+                requiresOverwrite: true,
+              };
+              skippedCount++;
+              overwriteRequiredCount++;
+              continue;
+            }
+            
+            // Ensure parent directory exists
+            await ensureParentDir(fullPath, normalizedOpPath);
+            console.log(`[FileOps] Writing file: ${fullPath} (${(item.operation.content || '').length} bytes)`);
+            await fs.writeFile(fullPath, item.operation.content || '');
+            // Verify write succeeded by checking file exists now
+            const verifyExists = await fs.pathExists(fullPath);
+            console.log(`[FileOps] Write complete: ${fullPath}, verified exists: ${verifyExists}`);
+            // Read back the file to double-verify it was written
+            try {
+              const readBack = await fs.readFile(fullPath);
+              const bytesWritten = (item.operation.content || '').length;
+              const bytesRead = readBack.length;
+              console.log(`[FileOps] Verification: wrote ${bytesWritten} bytes, read back ${bytesRead} bytes`);
+              if (bytesRead !== bytesWritten) {
+                console.warn(`[FileOps] WARNING: Byte mismatch! File may not have been written correctly.`);
+              }
+            } catch (readErr) {
+              console.error(`[FileOps] FAILED to read back file - it may not have been created:`, readErr);
+            }
+            // Save to local history
+            await history.save(item.operation.path, item.operation.content || '').catch(console.error);
+            await openFile(fullPath);
+            updatedOps[i] = {
+              ...updatedOps[i],
+              applied: true,
+              previousExists: false,
+              previousContent: '',
+              wasSkipped: false,
+            };
+          } else if (item.operation.type === 'edit') {
+            const previousContent = await fs.readFile(fullPath);
+            const { updatedContent, changed, reason } = applyEditOperation(previousContent, item.operation);
+
+            if (!changed) {
+              if (reason === 'already-applied') {
+                updatedOps[i] = {
+                  ...updatedOps[i],
+                  applied: true,
+                  previousExists: true,
+                  previousContent,
+                  wasSkipped: true,
+                };
+                skippedCount++;
+                continue;
+              }
+              updatedOps[i] = {
+                ...updatedOps[i],
+                operation: { ...item.operation, invalidReason: 'Edit failed: <old_content> did not match the file.' },
+                applied: false,
+                previousExists: true,
+                previousContent,
+                wasSkipped: true,
+                errorMessage: 'Edit failed: <old_content> did not match the file.',
+              };
+              skippedCount++;
+              invalidCount++;
+              continue;
+            }
+
+            await fs.writeFile(fullPath, updatedContent);
+            // Save to local history
+            await history.save(item.operation.path, updatedContent).catch(console.error);
+            await openFile(fullPath);
+            updatedOps[i] = {
+              ...updatedOps[i],
+              applied: true,
+              previousExists: true,
+              previousContent,
+              wasSkipped: false,
+            };
+          } else if (item.operation.type === 'delete') {
+            // Require manual confirmation for delete operations
+            const confirmed = await dialog.confirm(
+              `Are you sure you want to delete "${item.operation.path}"?\n\nThis action cannot be undone through the IDE (though the file content is saved for undo).`,
+              'Confirm File Deletion'
+            );
+            
+            if (!confirmed) {
+              console.log(`[FileOps] Delete cancelled by user: ${item.operation.path}`);
+              updatedOps[i] = {
+                ...updatedOps[i],
+                applied: false,
+                wasSkipped: true,
+              };
+              skippedCount++;
+              continue;
+            }
+            
+            const previousContent = await fs.readFile(fullPath);
+            await fs.deletePath(fullPath);
+            updatedOps[i] = {
+              ...updatedOps[i],
+              applied: true,
+              previousExists: true,
+              previousContent,
+              wasSkipped: false,
+            };
+          }
+
+          successCount++;
+        } catch (error) {
+          console.error('Failed to execute file operation:', error);
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: `Failed to ${item.operation.type} ${item.operation.path}: ${error}`, type: 'error' }
+          }));
+        }
+      }
+
+      // Update state once after all operations
+      setAllPendingOps(updatedOps);
+
+      // Mark all operations as permanently kept in conversation history
+      const { markFileOperationsAsKept } = useAIStore.getState();
+      const operationIds = updatedOps.map(item => 
+        `${item.messageId}:${item.operation.type}:${item.operation.path}`
+      );
+      markFileOperationsAsKept(operationIds);
+
+      if (overwriteRequiredCount > 0) {
         window.dispatchEvent(new CustomEvent('show-notification', {
-          detail: { message: `Failed to ${item.operation.type} ${item.operation.path}: ${error}`, type: 'error' }
+          detail: {
+            message: `${overwriteRequiredCount} file(s) require overwrite. Review the AI diff to apply.`,
+            type: 'info'
+          }
         }));
       }
-    }
 
-    // Update state once after all operations
-    setAllPendingOps(updatedOps);
+      if (invalidCount > 0) {
+        window.dispatchEvent(new CustomEvent('show-notification', {
+          detail: {
+            message: `${invalidCount} file operation(s) were blocked due to invalid paths or unmatched edits.`,
+            type: 'error'
+          }
+        }));
+      }
 
-    // Mark all operations as permanently kept in conversation history
-    const { markFileOperationsAsKept } = useAIStore.getState();
-    const operationIds = updatedOps.map(item => 
-      `${item.messageId}:${item.operation.type}:${item.operation.path}`
-    );
-    markFileOperationsAsKept(operationIds);
-
-    if (overwriteRequiredCount > 0) {
-      window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: {
-          message: `${overwriteRequiredCount} file(s) require overwrite. Review the AI diff to apply.`,
-          type: 'info'
-        }
-      }));
-    }
-
-    if (invalidCount > 0) {
-      window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: {
-          message: `${invalidCount} file operation(s) were blocked due to invalid paths or unmatched edits.`,
-          type: 'error'
-        }
-      }));
-    }
-
-    if (successCount > 0) {
-      console.log(`[FileOps] SUCCESS: Applied ${successCount} file(s) to: ${currentWorkspace.rootPath}`);
-      window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: { message: `Applied ${successCount} file(s) to ${currentWorkspace.rootPath}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`, type: 'success' }
-      }));
-    } else if (skippedCount > 0) {
-      window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: { message: 'All operations already applied', type: 'info' }
-      }));
-    }
+      if (successCount > 0) {
+        console.log(`[FileOps] SUCCESS: Applied ${successCount} file(s) to: ${currentWorkspace.rootPath}`);
+        window.dispatchEvent(new CustomEvent('show-notification', {
+          detail: { message: `Applied ${successCount} file(s) to ${currentWorkspace.rootPath}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`, type: 'success' }
+        }));
+      } else if (skippedCount > 0) {
+        window.dispatchEvent(new CustomEvent('show-notification', {
+          detail: { message: 'All operations already applied', type: 'info' }
+        }));
+      }
+    });
   };
 
   // Auto-apply file operations when streaming ends
   const revertOperation = async (item: PendingFileOperation) => {
-    const { currentWorkspace } = useWorkspaceStore.getState();
-    const { openFile } = useEditorStore.getState();
-    if (!currentWorkspace) return false;
+    return await useAIStore.getState().withWorkspaceWriteLock('fileOps.revert', async () => {
+      const { currentWorkspace } = useWorkspaceStore.getState();
+      const { openFile } = useEditorStore.getState();
+      if (!currentWorkspace) return false;
 
-    if (item.wasSkipped) return false;
+      if (item.wasSkipped) return false;
 
-    const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
-      item.operation.path,
-      currentWorkspace.rootPath
-    );
-    if (error) return false;
+      const { normalizedOpPath, fullPath, error } = normalizeOperationPath(
+        item.operation.path,
+        currentWorkspace.rootPath
+      );
+      if (error) return false;
 
-    if (item.operation.type === 'create') {
-      if (item.previousExists) return false;
-      await fs.deletePath(fullPath);
+      if (item.operation.type === 'create') {
+        if (item.previousExists) return false;
+        await fs.deletePath(fullPath);
+        return true;
+      }
+
+      if (item.previousContent === undefined) return false;
+
+      await ensureParentDir(fullPath, normalizedOpPath);
+      await fs.writeFile(fullPath, item.previousContent);
+      await history.save(item.operation.path, item.previousContent).catch(console.error);
+      await openFile(fullPath);
       return true;
-    }
-
-    if (item.previousContent === undefined) return false;
-
-    await ensureParentDir(fullPath, normalizedOpPath);
-    await fs.writeFile(fullPath, item.previousContent);
-    await history.save(item.operation.path, item.previousContent).catch(console.error);
-    await openFile(fullPath);
-    return true;
+    });
   };
 
   const handleUndoAllOperations = () => {
@@ -5298,7 +5785,8 @@ export function AIPanel() {
     const item = allPendingOps[index];
     if (!item || item.applied) return;
 
-    try {
+    await useAIStore.getState().withWorkspaceWriteLock('fileOps.applyOne', async () => {
+      try {
       if (item.operation.invalidReason) {
         setAllPendingOps(prev => prev.map((op, idx) =>
           idx === index
@@ -5439,12 +5927,13 @@ export function AIPanel() {
       window.dispatchEvent(new CustomEvent('show-notification', {
         detail: { message: `Applied: ${item.operation.path}`, type: 'success' }
       }));
-    } catch (error) {
-      console.error('Failed to execute file operation:', error);
-      window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: { message: `Failed to ${item.operation.type} ${item.operation.path}: ${error}`, type: 'error' }
-      }));
-    }
+      } catch (error) {
+        console.error('Failed to execute file operation:', error);
+        window.dispatchEvent(new CustomEvent('show-notification', {
+          detail: { message: `Failed to ${item.operation.type} ${item.operation.path}: ${error}`, type: 'error' }
+        }));
+      }
+    });
   };
 
   const handleUndoFileOperation = (index: number) => {
@@ -5574,6 +6063,31 @@ export function AIPanel() {
     } else {
       await sendMessage(message, messageAttachments);
     }
+  };
+
+  const handleRunAsSubagent = async () => {
+    // Allow submission if there's text OR attachments
+    if (!input.trim() && attachments.length === 0) return;
+
+    const message = input;
+    const messageAttachments = attachments;
+    setPendingResponse(true);
+    setInput('');
+    setAttachments([]);
+    resetScrollLock();
+    setTimeout(() => resizeTextarea(), 0);
+
+    const profile = subagentProfiles.find((p) => p.id === selectedSubagentProfileId);
+    const overrides = profile?.provider || profile?.model
+      ? { provider: profile.provider, model: profile.model }
+      : undefined;
+
+    await startAgentRun(message, {
+      label: profile?.name || 'Subagent',
+      profileId: profile?.id,
+      attachments: messageAttachments,
+      overrides,
+    });
   };
 
   const handleNewChat = () => {
@@ -5880,7 +6394,7 @@ export function AIPanel() {
                 </div>
                 {summaryExpanded && (
                   <div className={styles.summaryContent}>
-                    <MarkdownRenderer content={activeConversation.summary} />
+                                <MarkdownRenderer content={activeConversation.summary} disableLooseCodeDetection={true} />
                   </div>
                 )}
               </div>
@@ -5953,10 +6467,22 @@ export function AIPanel() {
                 </div>
               </div>
             )}
-            {activeConversation.messages.map((message) => (
+            {activeConversation.messages.map((message, idx) => {
+              const isLast = idx === activeConversation.messages.length - 1;
+              const isStreamingAssistant = Boolean(isStreaming && isLast && message.role === 'assistant');
+              const isCodeReviewPrompt =
+                message.role === 'user' &&
+                /review the changes below/i.test(message.content) &&
+                (message.content.includes('--- BEGIN DIFF') || message.content.includes('diff --git'));
+
+              return (
               <MemoizedMessageBubble 
                 key={message.id} 
                 message={message} 
+                renderAsPlainText={isCodeReviewPrompt || isStreamingAssistant}
+                plainTextTitle={isCodeReviewPrompt ? 'Review Input' : (isStreamingAssistant ? 'Streaming' : undefined)}
+                plainTextDefaultExpanded={isStreamingAssistant}
+                  plainTextKind={isCodeReviewPrompt ? 'diff' : 'text'}
                 onOperationsChange={async (ops) => {
                   const { isFileOperationKept } = useAIStore.getState();
                   
@@ -6033,7 +6559,7 @@ export function AIPanel() {
                   });
                 }}
               />
-            ))}
+            )})}
             {isStreaming && thinkingStatus && (
               <div className={styles.thinkingContainer}>
                 <div className={styles.thinkingIcon}>
@@ -6132,6 +6658,64 @@ export function AIPanel() {
           </>
         )}
       </div>
+
+      {agentRunOrder.length > 0 && (
+        <div className={styles.agentRunsPanel} aria-label="Agent runs">
+          <div className={styles.agentRunsHeader}>
+            <div className={styles.agentRunsHeaderLeft}>
+              <span className={styles.agentRunsTitle}>Runs</span>
+              {agentRunQueue.length > 0 && (
+                <span className={styles.agentRunsQueue}>{agentRunQueue.length} queued</span>
+              )}
+              {workspaceWriteLocked && (
+                <span className={styles.agentRunsLock}>
+                  Workspace locked{workspaceWriteLockQueue.length > 0 ? ` (+${workspaceWriteLockQueue.length} waiting)` : ''}
+                </span>
+              )}
+            </div>
+            <div className={styles.agentRunsHeaderRight}>
+              <button
+                type="button"
+                className={styles.agentRunsClearBtn}
+                onClick={clearAgentRuns}
+                title="Clear runs list"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+          <div className={styles.agentRunsList}>
+            {agentRunOrder.slice(0, 4).map((runId) => {
+              const run = agentRunsById[runId];
+              if (!run) return null;
+              const canStop = run.status === 'running' || run.status === 'queued';
+              return (
+                <div key={run.id} className={styles.agentRunItem}>
+                  <div className={styles.agentRunMeta}>
+                    <span className={styles.agentRunLabel}>{run.label}</span>
+                    <span className={`${styles.agentRunStatus} ${styles[`agentRunStatus_${run.status.replace('-', '_')}`]}`}>
+                      {run.status}
+                    </span>
+                    {run.status === 'error' && run.error && (
+                      <span className={styles.agentRunError}>{run.error}</span>
+                    )}
+                  </div>
+                  {canStop && (
+                    <button
+                      type="button"
+                      className={styles.agentRunStopBtn}
+                      onClick={() => cancelAgentRun(run.id)}
+                      title="Stop run"
+                    >
+                      <Square size={14} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {promptQueue.length > 0 && (
         <div className={styles.queueIndicator}>
@@ -6271,6 +6855,22 @@ export function AIPanel() {
                 </optgroup>
               </select>
             </div>
+            {subagentProfiles.length > 0 && (
+              <div className={styles.subagentSelector}>
+                <select
+                  value={selectedSubagentProfileId}
+                  onChange={(e) => setSelectedSubagentProfileId(e.target.value)}
+                  className={styles.subagentDropdown}
+                  title="Subagent profile"
+                >
+                  {subagentProfiles.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className={styles.controlsRight}>
               <button
                 type="button"
@@ -6305,6 +6905,17 @@ export function AIPanel() {
               >
                 <Settings size={16} />
               </button>
+              {subagentProfiles.length > 0 && (
+                <button
+                  type="button"
+                  className={styles.controlBtn}
+                  onClick={handleRunAsSubagent}
+                  disabled={!input.trim() && attachments.length === 0}
+                  title="Run as subagent (parallel)"
+                >
+                  <Zap size={16} />
+                </button>
+              )}
               {isStreaming && (
                 <button
                   type="button"
@@ -6817,8 +7428,8 @@ function AISettings({ onClose }: { onClose: () => void }) {
     }
 
     try {
-      const deviceFlowClientId =
-        copilotAuthMode === 'enterprise' ? copilotEnterpriseClientId || undefined : undefined;
+      // Enterprise auth is handled above; after that branch, we are always on GitHub.com device flow.
+      const deviceFlowClientId = undefined;
       const deviceCode = await ai.copilotDeviceLoginStart(
         copilotAuthHost || undefined,
         deviceFlowClientId
@@ -6908,7 +7519,7 @@ function AISettings({ onClose }: { onClose: () => void }) {
       setCopilotUseDeveloperOAuth(false);
       setShowCopilotAccountPicker(true);
       setCopilotDeviceCode(null);
-      await reloadCopilotAccounts({ includeLocal: false });
+      await reloadCopilotAccounts();
     } catch (error) {
       const errorMessage = error instanceof Error
         ? error.message
@@ -7707,10 +8318,158 @@ function AISettings({ onClose }: { onClose: () => void }) {
         )}
 
         <div className={styles.settingsDivider}>
+          <span>Subagents</span>
+        </div>
+
+        <SubagentProfilesSection />
+
+        <div className={styles.settingsDivider}>
           <span>MCP Servers</span>
         </div>
 
         <MCPServersSection />
+      </div>
+    </div>
+  );
+}
+
+function SubagentProfilesSection() {
+  const { config, setConfig, availableModels, copilotModelsMetadata } = useAIStore();
+  const profiles = (config.subagentProfiles || []) as SubagentProfile[];
+  const defaultId = config.defaultSubagentProfileId || profiles[0]?.id || '';
+
+  const updateProfiles = (next: SubagentProfile[]) => {
+    setConfig({
+      subagentProfiles: next,
+      defaultSubagentProfileId: next.some((p) => p.id === defaultId)
+        ? defaultId
+        : next[0]?.id,
+    });
+  };
+
+  const addProfile = () => {
+    const id = crypto.randomUUID();
+    const next: SubagentProfile = {
+      id,
+      name: 'New Subagent',
+      provider: undefined,
+      model: undefined,
+      systemPromptAddendum: '',
+    };
+    const updated = [...profiles, next];
+    setConfig({
+      subagentProfiles: updated,
+      defaultSubagentProfileId: config.defaultSubagentProfileId || id,
+    });
+  };
+
+  const removeProfile = (id: string) => {
+    const updated = profiles.filter((p) => p.id !== id);
+    const nextDefault = config.defaultSubagentProfileId === id ? (updated[0]?.id || undefined) : config.defaultSubagentProfileId;
+    setConfig({ subagentProfiles: updated, defaultSubagentProfileId: nextDefault });
+  };
+
+  return (
+    <div className={styles.settingGroup}>
+      <div className={styles.settingHint} style={{ marginBottom: 8 }}>
+        Subagent profiles let you launch parallel runs with different instructions (and optional model/provider overrides).
+      </div>
+
+      {profiles.length === 0 ? (
+        <div className={styles.settingHint} style={{ marginBottom: 8 }}>
+          No profiles yet.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {profiles.map((p) => {
+            const providerValue = p.provider || '';
+            const providerModels = providerValue ? (availableModels as any)[providerValue] || [] : [];
+            return (
+              <div key={p.id} style={{ border: '1px solid var(--border-color)', borderRadius: 6, padding: 10 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                  <input
+                    type="radio"
+                    name="default-subagent"
+                    checked={(config.defaultSubagentProfileId || defaultId) === p.id}
+                    onChange={() => setConfig({ defaultSubagentProfileId: p.id })}
+                    title="Default subagent profile"
+                  />
+                  <input
+                    type="text"
+                    value={p.name}
+                    onChange={(e) => updateProfiles(profiles.map((x) => (x.id === p.id ? { ...x, name: e.target.value } : x)))}
+                    style={{ flex: 1 }}
+                  />
+                  <button type="button" className={styles.copilotButton} onClick={() => removeProfile(p.id)}>
+                    Remove
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <div className={styles.settingGroup} style={{ flex: '1 1 180px', marginBottom: 0 }}>
+                    <label>Provider override</label>
+                    <select
+                      value={providerValue}
+                      onChange={(e) => {
+                        const value = (e.target.value || undefined) as AIProvider | undefined;
+                        updateProfiles(profiles.map((x) => (x.id === p.id ? { ...x, provider: value, model: undefined } : x)));
+                      }}
+                    >
+                      <option value="">(inherit)</option>
+                      <option value="ollama">ollama</option>
+                      <option value="claude">claude</option>
+                      <option value="openai">openai</option>
+                      <option value="copilot">copilot</option>
+                      <option value="custom">custom</option>
+                    </select>
+                  </div>
+
+                  <div className={styles.settingGroup} style={{ flex: '1 1 220px', marginBottom: 0 }}>
+                    <label>Model override</label>
+                    {providerValue ? (
+                      <select
+                        value={p.model || ''}
+                        onChange={(e) => updateProfiles(profiles.map((x) => (x.id === p.id ? { ...x, model: e.target.value || undefined } : x)))}
+                        title={providerValue === 'copilot' ? getModelPricingTooltip(p.model || '', copilotModelsMetadata) : undefined}
+                      >
+                        <option value="">(inherit)</option>
+                        {providerModels.map((m: string) => (
+                          <option key={m} value={m}>
+                            {formatModelLabel(providerValue, m, copilotModelsMetadata)}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={p.model || ''}
+                        onChange={(e) => updateProfiles(profiles.map((x) => (x.id === p.id ? { ...x, model: e.target.value || undefined } : x)))}
+                        placeholder="(inherit)"
+                      />
+                    )}
+                  </div>
+                </div>
+
+                <div className={styles.settingGroup} style={{ marginTop: 8 }}>
+                  <label>Prompt addendum</label>
+                  <textarea
+                    value={p.systemPromptAddendum || ''}
+                    onChange={(e) => updateProfiles(profiles.map((x) => (x.id === p.id ? { ...x, systemPromptAddendum: e.target.value } : x)))}
+                    rows={3}
+                    style={{ width: '100%', resize: 'vertical' }}
+                    placeholder="Extra instructions for this subagent..."
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+        <button type="button" className={styles.copilotButton} onClick={addProfile}>
+          Add profile
+        </button>
       </div>
     </div>
   );

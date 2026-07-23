@@ -1633,6 +1633,7 @@ async function summarizeWithAI(
         temperature: 0.5,
         maxTokens: settings.maxTokens,
         conversationId,
+        streamId: conversationId,
       });
     } else if (settings.aiProvider === 'openai') {
       await invoke('chat_openai', {
@@ -1643,6 +1644,7 @@ async function summarizeWithAI(
         temperature: 0.5,
         maxTokens: settings.maxTokens,
         conversationId,
+        streamId: conversationId,
       });
     } else if (settings.aiProvider === 'anthropic') {
       await invoke('chat_openai', {
@@ -1653,6 +1655,7 @@ async function summarizeWithAI(
         temperature: 0.5,
         maxTokens: settings.maxTokens,
         conversationId,
+        streamId: conversationId,
       });
     } else if (settings.aiProvider === 'copilot') {
       await invoke('chat_copilot', {
@@ -1661,6 +1664,7 @@ async function summarizeWithAI(
         temperature: 0.5,
         maxTokens: settings.maxTokens,
         conversationId,
+        streamId: conversationId,
       });
     } else if (settings.aiProvider === 'custom') {
       await invoke('chat_openai', {
@@ -1671,6 +1675,7 @@ async function summarizeWithAI(
         temperature: 0.5,
         maxTokens: settings.maxTokens,
         conversationId,
+        streamId: conversationId,
       });
     }
   } finally {
@@ -2115,6 +2120,7 @@ export function ChatPanel() {
                   temperature: 0.3,
                   maxTokens: 1000,
                   conversationId: summaryConversationId,
+                  streamId: summaryConversationId,
                 });
               } else if (settings.aiProvider === 'copilot') {
                 await invoke('chat_copilot', {
@@ -2123,6 +2129,7 @@ export function ChatPanel() {
                   temperature: 0.3,
                   maxTokens: 1000,
                   conversationId: summaryConversationId,
+                  streamId: summaryConversationId,
                 });
               } else {
                 // Default to openai-compatible
@@ -2145,6 +2152,7 @@ export function ChatPanel() {
                   temperature: 0.3,
                   maxTokens: 1000,
                   conversationId: summaryConversationId,
+                  streamId: summaryConversationId,
                 });
               }
               
@@ -2202,6 +2210,7 @@ export function ChatPanel() {
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,
             conversationId,
+            streamId: conversationId,
           });
         } else if (settings.aiProvider === 'openai') {
           await invoke('chat_openai', {
@@ -2212,6 +2221,7 @@ export function ChatPanel() {
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,
             conversationId,
+            streamId: conversationId,
           });
         } else if (settings.aiProvider === 'anthropic') {
           await invoke('chat_openai', {
@@ -2222,6 +2232,7 @@ export function ChatPanel() {
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,
             conversationId,
+            streamId: conversationId,
           });
         } else if (settings.aiProvider === 'copilot') {
           await invoke('chat_copilot', {
@@ -2230,6 +2241,7 @@ export function ChatPanel() {
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,
             conversationId,
+            streamId: conversationId,
           });
         } else if (settings.aiProvider === 'custom') {
           await invoke('chat_openai', {
@@ -2240,6 +2252,7 @@ export function ChatPanel() {
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,
             conversationId,
+            streamId: conversationId,
           });
         }
 

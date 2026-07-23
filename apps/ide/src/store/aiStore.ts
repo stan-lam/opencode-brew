@@ -28,6 +28,33 @@ export interface AgentTask {
   status: AgentTaskStatus;
 }
 
+export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
+
+export interface AgentRun {
+  id: string;
+  label: string;
+  status: AgentRunStatus;
+  conversationId: string;
+  streamId: string;
+  content: string;
+  attachments?: MessageAttachment[];
+  overrides?: AIMessageOverrides;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  // Message IDs within the conversation (for targeted streaming updates)
+  userMessageId?: string;
+  assistantMessageId?: string;
+  // Optional linkage to a configured subagent profile (added later)
+  profileId?: string;
+}
+
+export interface WorkspaceWriteLockRequest {
+  id: string;
+  label: string;
+  createdAt: string;
+}
+
 // Tool execution tracking for AI feedback
 export interface ToolExecutionResult {
   id: string;
@@ -98,6 +125,9 @@ export interface AIMessage {
   timestamp: string;
   attachments?: MessageAttachment[];
   usage?: MessageUsage;
+  runId?: string;
+  runLabel?: string;
+  profileId?: string;
 }
 
 export interface MessageAttachment {
@@ -128,6 +158,14 @@ export interface CustomPricing {
   outputPerMillion: number;
 }
 
+export interface SubagentProfile {
+  id: string;
+  name: string;
+  provider?: AIProvider;
+  model?: string;
+  systemPromptAddendum?: string;
+}
+
 export interface AIProviderConfig {
   provider: AIProvider;
   model: string;
@@ -145,6 +183,8 @@ export interface AIProviderConfig {
   thinkAloud: boolean;
   claudeExtendedThinking: boolean;
   mcpServers: MCPServerConfig[];
+  subagentProfiles?: SubagentProfile[];
+  defaultSubagentProfileId?: string;
   customPricing?: CustomPricing;
 }
 
@@ -193,6 +233,12 @@ interface AIState {
   contextBreakdown: ContextBreakdown | null;
   toolExecutionHistory: ToolExecutionHistory;
   circularResponseState: CircularResponseState;
+  agentRunsById: Record<string, AgentRun>;
+  agentRunOrder: string[];
+  agentRunQueue: string[];
+  maxParallelAgentRuns: number;
+  workspaceWriteLocked: boolean;
+  workspaceWriteLockQueue: WorkspaceWriteLockRequest[];
   
   setConfig: (config: Partial<AIProviderConfig>) => void;
   recordToolResult: (result: Omit<ToolExecutionResult, 'id' | 'timestamp'>) => void;
@@ -239,6 +285,23 @@ interface AIState {
   startMCPServer: (serverId: string) => Promise<void>;
   stopMCPServer: (serverId: string) => Promise<void>;
   callMCPTool: (serverId: string, toolName: string, args: Record<string, unknown>) => Promise<MCPToolResult>;
+
+  // Concurrent subagent runs (local, locked)
+  startAgentRun: (
+    content: string,
+    options?: {
+      label?: string;
+      profileId?: string;
+      attachments?: MessageAttachment[];
+      overrides?: AIMessageOverrides;
+    }
+  ) => Promise<string>;
+  startQueuedAgentRun: (runId: string) => Promise<void>;
+  cancelAgentRun: (runId: string) => Promise<void>;
+  clearAgentRuns: () => void;
+
+  // Serialize workspace mutations (create/edit/delete) across concurrent actions.
+  withWorkspaceWriteLock: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 const AI_HISTORY_FILE = 'ai-history.json';
@@ -254,6 +317,13 @@ const SUMMARY_TIMEOUT_MS = 60000;
 const AUTO_CONTINUE_PROMPT = 'Continue from your previous response and complete the task. Execute the actions you mentioned and do not repeat earlier content.';
 const AUTO_CONTINUE_PLACEHOLDER = 'Assistant: Thinking...';
 const STREAM_IDLE_TIMEOUT_MESSAGE = 'AI is still thinking and took longer than expected. Please try again.';
+const DEFAULT_MAX_PARALLEL_AGENT_RUNS = 3;
+
+// Unlisten handlers for concurrent (subagent) runs must not be persisted in Zustand state.
+const agentRunUnlisteners: Map<string, () => void> = new Map();
+
+// Serialize mutating workspace operations (create/edit/delete) across runs/UI actions.
+let workspaceWriteLockTail: Promise<void> = Promise.resolve();
 // Escalating retry prompts for file operations
 const FILE_OPS_RETRY_PROMPTS = [
   // Level 1: Gentle reminder
@@ -656,7 +726,21 @@ async function loadHistoryFromFile(workspacePath: string): Promise<AIConversatio
     }
     const content = await fs.readFile(historyPath);
     const data = JSON.parse(content);
-    return data.conversations || [];
+    const sanitizeContent = (text: string): string => {
+      // Normalize newlines and strip control chars that can break rendering.
+      const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      return normalized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+    };
+    const sanitizeMessage = (message: AIMessage): AIMessage => ({
+      ...message,
+      content: sanitizeContent(message.content),
+    });
+    const conversations: AIConversation[] = data.conversations || [];
+    return conversations.map((conversation) => ({
+      ...conversation,
+      messages: (conversation.messages || []).map(sanitizeMessage),
+      summary: conversation.summary ? sanitizeContent(conversation.summary) : conversation.summary,
+    }));
   } catch (error) {
     console.log('Could not load AI history:', error);
     return [];
@@ -672,10 +756,16 @@ async function saveHistoryToFile(workspacePath: string, conversations: AIConvers
     const MAX_MESSAGES_PER_CONVERSATION = 200;
     const MAX_MESSAGE_LENGTH = 20000;
 
+    const sanitizeContent = (text: string): string => {
+      const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      return normalized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+    };
+
     const sanitizeMessage = (message: AIMessage): AIMessage => {
-      const trimmedContent = message.content.length > MAX_MESSAGE_LENGTH
-        ? `${message.content.slice(0, MAX_MESSAGE_LENGTH)}\n... [truncated]`
-        : message.content;
+      const base = sanitizeContent(message.content);
+      const trimmedContent = base.length > MAX_MESSAGE_LENGTH
+        ? `${base.slice(0, MAX_MESSAGE_LENGTH)}\n... [truncated]`
+        : base;
       const attachments = message.attachments?.map((attachment) => ({
         ...attachment,
         data: undefined,
@@ -689,6 +779,7 @@ async function saveHistoryToFile(workspacePath: string, conversations: AIConvers
 
     const sanitizedConversations = conversations.map((conversation) => ({
       ...conversation,
+      summary: conversation.summary ? sanitizeContent(conversation.summary) : conversation.summary,
       messages: conversation.messages
         .slice(-MAX_MESSAGES_PER_CONVERSATION)
         .map(sanitizeMessage),
@@ -1717,6 +1808,19 @@ Always be concise but thorough. Format code examples with proper syntax highligh
       enabled: false,
     },
   ],
+  subagentProfiles: [
+    {
+      id: 'research',
+      name: 'Research',
+      systemPromptAddendum: 'Gather relevant context and facts. Be concise. Prefer bullet points and cite file paths or sources when applicable.',
+    },
+    {
+      id: 'code-review',
+      name: 'Code Review',
+      systemPromptAddendum: 'Review code changes for correctness, edge cases, and maintainability. Provide actionable feedback.',
+    },
+  ],
+  defaultSubagentProfileId: 'research',
 };
 
 export const useAIStore = create<AIState>()(
@@ -1776,6 +1880,12 @@ export const useAIStore = create<AIState>()(
         circularCount: 0,
         lastWarningTime: 0,
       },
+      agentRunsById: {},
+      agentRunOrder: [],
+      agentRunQueue: [],
+      maxParallelAgentRuns: DEFAULT_MAX_PARALLEL_AGENT_RUNS,
+      workspaceWriteLocked: false,
+      workspaceWriteLockQueue: [],
 
       setConfig: (newConfig) => {
         set((state) => ({
@@ -2298,7 +2408,9 @@ export const useAIStore = create<AIState>()(
         let completionTimeoutTriggered = false;
         let streamUpdateTimer: ReturnType<typeof setTimeout> | null = null;
         let streamUpdateScheduled = false;
-        const STREAM_UPDATE_INTERVAL_MS = 20;
+        // Rendering markdown during streaming is expensive (especially for long code-review outputs).
+        // Throttle UI updates to keep scrolling responsive.
+        const STREAM_UPDATE_INTERVAL_MS = 80;
 
         const clearStreamTimeout = () => {
           if (streamTimeoutId) {
@@ -3531,7 +3643,7 @@ export const useAIStore = create<AIState>()(
         set({ isStreaming: false, thinkingStatus: null, autoContinuePending: false });
         // Call the backend to stop streaming
         import('../services/tauri').then(({ ai }) => {
-          ai.stopStream().catch((err) => console.error('Failed to stop stream:', err));
+          ai.stopStream(conv?.id).catch((err) => console.error('Failed to stop stream:', err));
         });
 
         if (reason === 'idle-timeout' && responseContent.trim().length === 0 && conv) {
@@ -3645,6 +3757,405 @@ export const useAIStore = create<AIState>()(
           setTimeout(() => {
             get().sendMessage(nextPrompt.content, nextPrompt.attachments, nextPrompt.overrides);
           }, 100);
+        }
+      },
+
+      startAgentRun: async (content: string, options) => {
+        const runId = crypto.randomUUID();
+        const label = options?.label?.trim() || 'Subagent';
+        const createdAt = new Date().toISOString();
+
+        let conversation = get().activeConversation;
+        if (!conversation) {
+          get().createConversation();
+          conversation = get().activeConversation;
+        }
+        if (!conversation) return runId;
+
+        // Each run needs its own stream id so it can stream concurrently.
+        const streamId = crypto.randomUUID();
+
+        const run: AgentRun = {
+          id: runId,
+          label,
+          status: 'queued',
+          conversationId: conversation.id,
+          streamId,
+          content,
+          attachments: options?.attachments,
+          overrides: options?.overrides,
+          createdAt,
+          updatedAt: createdAt,
+          profileId: options?.profileId,
+        };
+
+        set((state) => ({
+          agentRunsById: { ...state.agentRunsById, [runId]: run },
+          agentRunOrder: [runId, ...state.agentRunOrder],
+        }));
+
+        // Simple scheduler: cap total concurrent runs (main stream counts as 1).
+        const runningSubagents = Object.values(get().agentRunsById).filter((r) => r.status === 'running').length;
+        const runningMain = get().isStreaming ? 1 : 0;
+        const runningTotal = runningSubagents + runningMain;
+
+        if (runningTotal >= get().maxParallelAgentRuns) {
+          set((state) => ({
+            agentRunQueue: [...state.agentRunQueue, runId],
+            agentRunsById: {
+              ...state.agentRunsById,
+              [runId]: { ...state.agentRunsById[runId], status: 'queued', updatedAt: new Date().toISOString() },
+            },
+          }));
+          return runId;
+        }
+
+        await get().startQueuedAgentRun(runId);
+        return runId;
+      },
+
+      startQueuedAgentRun: async (runId: string) => {
+        const run = get().agentRunsById[runId];
+        if (!run) return;
+        if (run.status === 'running') return;
+        if (run.status === 'completed' || run.status === 'cancelled') return;
+
+        // Ensure conversation exists in state
+        const conv =
+          get().activeConversation?.id === run.conversationId
+            ? get().activeConversation
+            : get().conversations.find((c) => c.id === run.conversationId) || null;
+        if (!conv) {
+          set((state) => ({
+            agentRunsById: {
+              ...state.agentRunsById,
+              [runId]: { ...state.agentRunsById[runId], status: 'error', error: 'Conversation not found', updatedAt: new Date().toISOString() },
+            },
+          }));
+          return;
+        }
+
+        // Append run messages (user + assistant placeholder)
+        const userMessageId = crypto.randomUUID();
+        const assistantMessageId = crypto.randomUUID();
+        const now = new Date().toISOString();
+
+        const userMessage: AIMessage = {
+          id: userMessageId,
+          role: 'user',
+          content: run.content,
+          timestamp: now,
+          attachments: run.attachments || [],
+          runId,
+          runLabel: run.label,
+          profileId: run.profileId,
+        };
+
+        const assistantMessage: AIMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '',
+          timestamp: now,
+          runId,
+          runLabel: run.label,
+          profileId: run.profileId,
+        };
+
+        set((state) => {
+          const target = state.conversations.find((c) => c.id === run.conversationId) || state.activeConversation;
+          if (!target || target.id !== run.conversationId) return state;
+
+          const updatedConversation: AIConversation = {
+            ...target,
+            messages: [...target.messages, userMessage, assistantMessage],
+            updatedAt: now,
+          };
+
+          return {
+            activeConversation: state.activeConversation?.id === updatedConversation.id ? updatedConversation : state.activeConversation,
+            conversations: state.conversations.map((c) => (c.id === updatedConversation.id ? updatedConversation : c)),
+            agentRunsById: {
+              ...state.agentRunsById,
+              [runId]: {
+                ...state.agentRunsById[runId],
+                status: 'running',
+                userMessageId,
+                assistantMessageId,
+                updatedAt: now,
+              },
+            },
+          };
+        });
+
+        // Stream into the placeholder assistant message
+        let responseContent = '';
+        try {
+          const { ai } = await import('../services/tauri');
+
+          // Replace any previous listener for this run (defensive)
+          const prevUnlisten = agentRunUnlisteners.get(runId);
+          if (prevUnlisten) {
+            try { prevUnlisten(); } catch { /* noop */ }
+            agentRunUnlisteners.delete(runId);
+          }
+
+          const SUBAGENT_STREAM_UPDATE_INTERVAL_MS = 80;
+          let subagentStreamUpdateScheduled = false;
+          let subagentStreamUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+
+          const flushSubagentStreamUpdate = () => {
+            subagentStreamUpdateScheduled = false;
+            const displayContent = cleanFileReadOperationTags(cleanWebOperationTags(responseContent));
+            set((state) => {
+              const target = state.conversations.find((c) => c.id === run.conversationId) || null;
+              if (!target) return state;
+              const updatedMessages = target.messages.map((m) =>
+                m.id === assistantMessageId ? { ...m, content: displayContent } : m
+              );
+              const updatedConversation: AIConversation = {
+                ...target,
+                messages: updatedMessages,
+                updatedAt: new Date().toISOString(),
+              };
+              return {
+                activeConversation: state.activeConversation?.id === updatedConversation.id ? updatedConversation : state.activeConversation,
+                conversations: state.conversations.map((c) => (c.id === updatedConversation.id ? updatedConversation : c)),
+              };
+            });
+          };
+
+          const scheduleSubagentStreamUpdate = () => {
+            if (subagentStreamUpdateScheduled) return;
+            subagentStreamUpdateScheduled = true;
+            subagentStreamUpdateTimer = setTimeout(() => {
+              flushSubagentStreamUpdate();
+            }, SUBAGENT_STREAM_UPDATE_INTERVAL_MS);
+          };
+
+          const unlisten = await ai.onStreamChunk(run.streamId, (chunk) => {
+            if (chunk.content) {
+              responseContent += chunk.content;
+              scheduleSubagentStreamUpdate();
+            }
+
+            if (chunk.done) {
+              if (subagentStreamUpdateTimer) {
+                clearTimeout(subagentStreamUpdateTimer);
+                subagentStreamUpdateTimer = null;
+                subagentStreamUpdateScheduled = false;
+              }
+              flushSubagentStreamUpdate();
+              const doneAt = new Date().toISOString();
+              const currentUnlisten = agentRunUnlisteners.get(runId);
+              if (currentUnlisten) {
+                try { currentUnlisten(); } catch { /* noop */ }
+                agentRunUnlisteners.delete(runId);
+              }
+
+              set((state) => ({
+                agentRunsById: {
+                  ...state.agentRunsById,
+                  [runId]: { ...state.agentRunsById[runId], status: 'completed', updatedAt: doneAt },
+                },
+              }));
+
+              // Start next queued run if any (best-effort, respects parallel cap)
+              const runningSubagents = Object.values(get().agentRunsById).filter((r) => r.status === 'running').length;
+              const runningMain = get().isStreaming ? 1 : 0;
+              if (runningSubagents + runningMain < get().maxParallelAgentRuns) {
+                const { agentRunQueue } = get();
+                if (agentRunQueue.length > 0) {
+                  const [nextRunId, ...rest] = agentRunQueue;
+                  set({ agentRunQueue: rest });
+                  // Fire-and-forget; queued runs remain queued if start fails
+                  void get().startQueuedAgentRun(nextRunId);
+                }
+              }
+            }
+          });
+
+          agentRunUnlisteners.set(runId, unlisten);
+
+          // Build minimal message set for this run (isolated from main chat to reduce coupling).
+          await initializePrompts();
+          const baseConfig = get().config;
+          const config = run.overrides ? { ...baseConfig, ...run.overrides } : baseConfig;
+
+          const responseFormatPrompt = getPrompt(PROMPT_NAMES.RESPONSE_FORMAT);
+          const modePrompt = get().agentMode === 'agent'
+            ? getPrompt(PROMPT_NAMES.AGENT_MODE)
+            : get().agentMode === 'edit'
+            ? getPrompt(PROMPT_NAMES.EDIT_MODE)
+            : get().agentMode === 'plan'
+            ? getPrompt(PROMPT_NAMES.PLAN_MODE)
+            : get().agentMode === 'test'
+            ? getPrompt(PROMPT_NAMES.TEST_MODE)
+            : CHAT_FILE_OPS_PROMPT;
+
+          const webAccessPromptTemplate = getPrompt(PROMPT_NAMES.WEB_ACCESS);
+          const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+          const webAccessPrompt = getCurrentDatePrompt() + webAccessPromptTemplate.replace('{{TODAY}}', today);
+
+          const subagentHeader = `\n\n## Subagent\nYou are running as "${run.label}". Focus on your assigned task and provide a crisp result.\n`;
+          const profile = run.profileId
+            ? (config.subagentProfiles || []).find((p) => p.id === run.profileId)
+            : undefined;
+          const profileAddendum = profile?.systemPromptAddendum?.trim()
+            ? `\n\n## Subagent Profile Instructions\n${profile.systemPromptAddendum.trim()}\n`
+            : '';
+          const systemPrompt = (config.systemPrompt || '') + responseFormatPrompt + modePrompt + webAccessPrompt + subagentHeader + profileAddendum;
+
+          const messages = [
+            { role: 'system', content: systemPrompt, attachments: undefined },
+            { role: 'user', content: run.content, attachments: run.attachments || [] },
+          ];
+
+          if (config.provider === 'ollama') {
+            await ai.chatOllama(
+              config.baseUrl || 'http://localhost:11434',
+              config.model,
+              messages,
+              config.temperature,
+              config.maxTokens,
+              run.conversationId,
+              run.streamId
+            );
+          } else if (config.provider === 'copilot') {
+            await ai.chatCopilot(
+              config.model,
+              messages,
+              config.temperature,
+              config.maxTokens,
+              run.conversationId,
+              get().agentMode,
+              run.streamId
+            );
+          } else if (config.provider === 'openai' || config.provider === 'claude' || config.provider === 'custom') {
+            const baseUrl = config.provider === 'openai'
+              ? 'https://api.openai.com/v1'
+              : config.provider === 'claude'
+              ? 'https://api.anthropic.com/v1'
+              : config.baseUrl || '';
+            await ai.chatOpenAI(
+              baseUrl,
+              config.apiKey || '',
+              config.model,
+              messages,
+              config.temperature,
+              config.maxTokens,
+              run.conversationId,
+              run.streamId
+            );
+          }
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          const doneAt = new Date().toISOString();
+
+          const currentUnlisten = agentRunUnlisteners.get(runId);
+          if (currentUnlisten) {
+            try { currentUnlisten(); } catch { /* noop */ }
+            agentRunUnlisteners.delete(runId);
+          }
+
+          set((state) => ({
+            agentRunsById: {
+              ...state.agentRunsById,
+              [runId]: { ...state.agentRunsById[runId], status: 'error', error: errMsg, updatedAt: doneAt },
+            },
+          }));
+
+          // Start next queued run if any (respects parallel cap)
+          const runningSubagents = Object.values(get().agentRunsById).filter((r) => r.status === 'running').length;
+          const runningMain = get().isStreaming ? 1 : 0;
+          if (runningSubagents + runningMain < get().maxParallelAgentRuns) {
+            const { agentRunQueue } = get();
+            if (agentRunQueue.length > 0) {
+              const [nextRunId, ...rest] = agentRunQueue;
+              set({ agentRunQueue: rest });
+              void get().startQueuedAgentRun(nextRunId);
+            }
+          }
+        }
+      },
+
+      cancelAgentRun: async (runId: string) => {
+        const run = get().agentRunsById[runId];
+        if (!run) return;
+        // If queued, remove from queue immediately.
+        set((state) => ({
+          agentRunQueue: state.agentRunQueue.filter((id) => id !== runId),
+        }));
+        try {
+          const { ai } = await import('../services/tauri');
+          await ai.stopStream(run.streamId);
+        } catch (e) {
+          console.warn('[aiStore] cancelAgentRun: stopStream failed', e);
+        } finally {
+          const currentUnlisten = agentRunUnlisteners.get(runId);
+          if (currentUnlisten) {
+            try { currentUnlisten(); } catch { /* noop */ }
+            agentRunUnlisteners.delete(runId);
+          }
+          set((state) => ({
+            agentRunsById: {
+              ...state.agentRunsById,
+              [runId]: { ...state.agentRunsById[runId], status: 'cancelled', updatedAt: new Date().toISOString() },
+            },
+          }));
+
+          const runningSubagents = Object.values(get().agentRunsById).filter((r) => r.status === 'running').length;
+          const runningMain = get().isStreaming ? 1 : 0;
+          if (runningSubagents + runningMain < get().maxParallelAgentRuns) {
+            const { agentRunQueue } = get();
+            if (agentRunQueue.length > 0) {
+              const [nextRunId, ...rest] = agentRunQueue;
+              set({ agentRunQueue: rest });
+              void get().startQueuedAgentRun(nextRunId);
+            }
+          }
+        }
+      },
+
+      clearAgentRuns: () => {
+        // Best-effort cleanup of listeners; do not attempt backend cancellation for historical runs.
+        for (const [runId, unlisten] of agentRunUnlisteners.entries()) {
+          try { unlisten(); } catch { /* noop */ }
+          agentRunUnlisteners.delete(runId);
+        }
+        set({ agentRunsById: {}, agentRunOrder: [], agentRunQueue: [] });
+      },
+
+      withWorkspaceWriteLock: async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
+        const request: WorkspaceWriteLockRequest = {
+          id: crypto.randomUUID(),
+          label,
+          createdAt: new Date().toISOString(),
+        };
+
+        set((state) => ({
+          workspaceWriteLockQueue: [...state.workspaceWriteLockQueue, request],
+        }));
+
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = () => resolve();
+        });
+
+        const prev = workspaceWriteLockTail;
+        workspaceWriteLockTail = workspaceWriteLockTail.then(() => gate);
+
+        await prev;
+
+        set((state) => ({
+          workspaceWriteLocked: true,
+          workspaceWriteLockQueue: state.workspaceWriteLockQueue.filter((r) => r.id !== request.id),
+        }));
+
+        try {
+          return await fn();
+        } finally {
+          set({ workspaceWriteLocked: false });
+          release();
         }
       },
 
