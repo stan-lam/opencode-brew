@@ -2748,10 +2748,11 @@ pub async fn chat_ollama(
     temperature: Option<f32>,
     max_tokens: Option<i32>,
     conversation_id: String,
+    stream_id: String,
 ) -> Result<String, String> {
     use std::time::Duration;
     
-    println!("[ai.rs] chat_ollama called with conversation_id: {}", conversation_id);
+    println!("[ai.rs] chat_ollama called with conversation_id={}, stream_id={}", conversation_id, stream_id);
     let raw_url = base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
     // Replace localhost with 127.0.0.1 to avoid DNS resolution issues
     let url = raw_url.replace("localhost", "127.0.0.1");
@@ -2766,13 +2767,13 @@ pub async fn chat_ollama(
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
-    // Create cancellation channel for this conversation
+    // Create cancellation channel for this stream
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
     
     // Store the cancellation sender
     {
         let mut streams = ACTIVE_STREAMS.write().await;
-        streams.insert(conversation_id.clone(), cancel_tx);
+        streams.insert(stream_id.clone(), cancel_tx);
     }
     
     // Convert messages to Ollama format, extracting images from attachments
@@ -2853,10 +2854,10 @@ pub async fn chat_ollama(
             cancel_result = cancel_rx.recv(), if cancel_active => {
                 match cancel_result {
                     Ok(_) => {
-                        println!("Stream cancelled for conversation: {}", conversation_id);
+                        println!("[ai.rs] Stream cancelled for stream_id={}, conversation_id={}", stream_id, conversation_id);
                         // Clean up
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err("Stream cancelled by user".to_string());
                     }
                     Err(_) => {
@@ -2880,7 +2881,7 @@ pub async fn chat_ollama(
                             if let Ok(response) = serde_json::from_str::<OllamaChatResponse>(line) {
                                 if let Some(message) = response.message {
                                     // Handle both content and thinking (for models like gemma4)
-                                    let event_name = format!("ai-stream-{}", conversation_id);
+                                    let event_name = format!("ai-stream-{}", stream_id);
                                     
                                     // If there's thinking content, emit it with a thinking indicator
                                     if let Some(thinking) = &message.thinking {
@@ -2920,7 +2921,7 @@ pub async fn chat_ollama(
                                     emit_token_usage(&app, &model_clone, "ollama", &prompt_content, &full_content);
                                     // Clean up on completion
                                     let mut streams = ACTIVE_STREAMS.write().await;
-                                    streams.remove(&conversation_id);
+                                    streams.remove(&stream_id);
                                     return Ok(full_content);
                                 }
                             }
@@ -2928,18 +2929,18 @@ pub async fn chat_ollama(
                     }
                     Some(Err(e)) => {
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
                         // Stream ended
-                        let event_name = format!("ai-stream-{}", conversation_id);
+                        let event_name = format!("ai-stream-{}", stream_id);
                         let _ = app.emit(&event_name, StreamChunk {
                             content: String::new(),
                             done: true,
                         });
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         break;
                     }
                 }
@@ -2963,6 +2964,7 @@ pub async fn chat_openai(
     temperature: Option<f32>,
     max_tokens: Option<i32>,
     conversation_id: String,
+    stream_id: String,
 ) -> Result<String, String> {
     let client = Client::new();
     
@@ -2979,13 +2981,13 @@ pub async fn chat_openai(
         "custom"
     };
     
-    // Create cancellation channel for this conversation
+    // Create cancellation channel for this stream
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
     
     // Store the cancellation sender
     {
         let mut streams = ACTIVE_STREAMS.write().await;
-        streams.insert(conversation_id.clone(), cancel_tx);
+        streams.insert(stream_id.clone(), cancel_tx);
     }
     
     // Convert messages to OpenAI format, using content blocks when images are present
@@ -3067,10 +3069,10 @@ pub async fn chat_openai(
             cancel_result = cancel_rx.recv(), if cancel_active => {
                 match cancel_result {
                     Ok(_) => {
-                        println!("Stream cancelled for conversation: {}", conversation_id);
+                        println!("[ai.rs] Stream cancelled for stream_id={}, conversation_id={}", stream_id, conversation_id);
                         // Clean up
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err("Stream cancelled by user".to_string());
                     }
                     Err(_) => {
@@ -3092,7 +3094,7 @@ pub async fn chat_openai(
                             
                             let json_str = &line[6..];
                             if json_str == "[DONE]" {
-                                let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                     content: String::new(),
                                     done: true,
                                 });
@@ -3100,7 +3102,7 @@ pub async fn chat_openai(
                                 emit_token_usage(&app, &model_clone, provider, &prompt_content, &full_content);
                                 // Clean up on completion
                                 let mut streams = ACTIVE_STREAMS.write().await;
-                                streams.remove(&conversation_id);
+                                streams.remove(&stream_id);
                                 return Ok(full_content);
                             }
                             
@@ -3108,7 +3110,7 @@ pub async fn chat_openai(
                                 if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
                                     full_content.push_str(content);
                                     
-                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                    let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                         content: content.to_string(),
                                         done: false,
                                     });
@@ -3118,18 +3120,18 @@ pub async fn chat_openai(
                     }
                     Some(Err(e)) => {
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
                         // Stream ended
-                        let event_name = format!("ai-stream-{}", conversation_id);
+                        let event_name = format!("ai-stream-{}", stream_id);
                         let _ = app.emit(&event_name, StreamChunk {
                             content: String::new(),
                             done: true,
                         });
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         break;
                     }
                 }
@@ -3151,6 +3153,7 @@ pub async fn chat_copilot(
     temperature: Option<f32>,
     max_tokens: Option<i32>,
     conversation_id: String,
+    stream_id: String,
     agent_mode: Option<String>,
 ) -> Result<String, String> {
     let mode = agent_mode.as_deref().unwrap_or("chat");
@@ -3178,13 +3181,13 @@ pub async fn chat_copilot(
              final_model, mode, final_endpoint, is_claude);
     
     if final_endpoint == "/responses" {
-        chat_copilot_responses(app, final_model, messages, temperature, max_tokens, conversation_id).await
+        chat_copilot_responses(app, final_model, messages, temperature, max_tokens, conversation_id, stream_id).await
     } else if is_claude {
         // Claude models use Anthropic Messages API format
-        chat_copilot_messages(app, final_model, messages, temperature, max_tokens, conversation_id).await
+        chat_copilot_messages(app, final_model, messages, temperature, max_tokens, conversation_id, stream_id).await
     } else {
         // GPT models use OpenAI Chat Completions format
-        chat_copilot_chat_completions(app, final_model, messages, temperature, max_tokens, conversation_id).await
+        chat_copilot_chat_completions(app, final_model, messages, temperature, max_tokens, conversation_id, stream_id).await
     }
 }
 
@@ -3196,6 +3199,7 @@ async fn chat_copilot_messages(
     temperature: Option<f32>,
     max_tokens: Option<i32>,
     conversation_id: String,
+    stream_id: String,
 ) -> Result<String, String> {
     let client = Client::new();
     let github_token = load_copilot_token()?;
@@ -3213,13 +3217,13 @@ async fn chat_copilot_messages(
     let prompt_content: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
     let model_clone = model.clone();
     
-    // Create cancellation channel for this conversation
+    // Create cancellation channel for this stream
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
 
     // Store the cancellation sender
     {
         let mut streams = ACTIVE_STREAMS.write().await;
-        streams.insert(conversation_id.clone(), cancel_tx);
+        streams.insert(stream_id.clone(), cancel_tx);
     }
 
     // Convert messages to Anthropic Messages API format
@@ -3361,7 +3365,7 @@ async fn chat_copilot_messages(
                 match cancel_result {
                     Ok(_) => {
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err("Stream cancelled by user".to_string());
                     }
                     Err(_) => {
@@ -3403,7 +3407,7 @@ async fn chat_copilot_messages(
                                         // Text delta: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
                                         if let Some(text) = data["delta"]["text"].as_str() {
                                             full_content.push_str(text);
-                                            let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                            let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                                 content: text.to_string(),
                                                 done: false,
                                             });
@@ -3411,19 +3415,19 @@ async fn chat_copilot_messages(
                                     }
                                     "message_stop" => {
                                         // End of message
-                                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                        let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                             content: String::new(),
                                             done: true,
                                         });
                                         emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
                                         let mut streams = ACTIVE_STREAMS.write().await;
-                                        streams.remove(&conversation_id);
+                                        streams.remove(&stream_id);
                                         return Ok(full_content);
                                     }
                                     "error" => {
                                         let error_msg = data["error"]["message"].as_str().unwrap_or("Unknown error");
                                         let mut streams = ACTIVE_STREAMS.write().await;
-                                        streams.remove(&conversation_id);
+                                        streams.remove(&stream_id);
                                         return Err(format!("Anthropic API error: {}", error_msg));
                                     }
                                     _ => {
@@ -3436,17 +3440,17 @@ async fn chat_copilot_messages(
                     Some(Err(e)) => {
                         println!("[ai.rs] chat_copilot_messages: Stream error for {}: {}", conversation_id, e);
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
                         println!("[ai.rs] chat_copilot_messages: Stream ended for conversation: {}", conversation_id);
-                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                        let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                             content: String::new(),
                             done: true,
                         });
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         break;
                     }
                 }
@@ -3466,6 +3470,7 @@ async fn chat_copilot_chat_completions(
     temperature: Option<f32>,
     max_tokens: Option<i32>,
     conversation_id: String,
+    stream_id: String,
 ) -> Result<String, String> {
     let client = Client::new();
     let github_token = load_copilot_token()?;
@@ -3483,13 +3488,13 @@ async fn chat_copilot_chat_completions(
     let prompt_content: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
     let model_clone = model.clone();
     
-    // Create cancellation channel for this conversation
+    // Create cancellation channel for this stream
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
 
     // Store the cancellation sender
     {
         let mut streams = ACTIVE_STREAMS.write().await;
-        streams.insert(conversation_id.clone(), cancel_tx);
+        streams.insert(stream_id.clone(), cancel_tx);
     }
 
     // Convert messages to OpenAI format
@@ -3597,7 +3602,7 @@ async fn chat_copilot_chat_completions(
                 match cancel_result {
                     Ok(_) => {
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err("Stream cancelled by user".to_string());
                     }
                     Err(_) => {
@@ -3622,20 +3627,20 @@ async fn chat_copilot_chat_completions(
 
                             let json_str = &line[6..];
                             if json_str == "[DONE]" {
-                                let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                     content: String::new(),
                                     done: true,
                                 });
                                 emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
                                 let mut streams = ACTIVE_STREAMS.write().await;
-                                streams.remove(&conversation_id);
+                                streams.remove(&stream_id);
                                 return Ok(full_content);
                             }
 
                             if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
                                 if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
                                     full_content.push_str(content);
-                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                    let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                         content: content.to_string(),
                                         done: false,
                                     });
@@ -3646,7 +3651,7 @@ async fn chat_copilot_chat_completions(
                     Some(Err(e)) => {
                         println!("[ai.rs] chat_copilot_chat_completions: Stream error for {}: {}", conversation_id, e);
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
@@ -3655,12 +3660,12 @@ async fn chat_copilot_chat_completions(
                         println!("[ai.rs] Final content length: {}, ends with: {:?}", 
                             full_content.len(),
                             full_content.chars().rev().take(50).collect::<String>().chars().rev().collect::<String>());
-                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                        let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                             content: String::new(),
                             done: true,
                         });
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         break;
                     }
                 }
@@ -3680,6 +3685,7 @@ async fn chat_copilot_responses(
     _temperature: Option<f32>, // Not supported by Codex models
     max_tokens: Option<i32>,
     conversation_id: String,
+    stream_id: String,
 ) -> Result<String, String> {
     let client = Client::new();
     let github_token = load_copilot_token()?;
@@ -3699,7 +3705,7 @@ async fn chat_copilot_responses(
     let (cancel_tx, mut cancel_rx) = tokio::sync::broadcast::channel(1);
     {
         let mut streams = ACTIVE_STREAMS.write().await;
-        streams.insert(conversation_id.clone(), cancel_tx);
+        streams.insert(stream_id.clone(), cancel_tx);
     }
 
     // Convert messages to Responses API format
@@ -3759,7 +3765,7 @@ async fn chat_copilot_responses(
                 match cancel_result {
                     Ok(_) => {
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err("Stream cancelled by user".to_string());
                     }
                     Err(_) => {
@@ -3783,13 +3789,13 @@ async fn chat_copilot_responses(
 
                             let json_str = &line[6..];
                             if json_str == "[DONE]" {
-                                let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                     content: String::new(),
                                     done: true,
                                 });
                                 emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
                                 let mut streams = ACTIVE_STREAMS.write().await;
-                                streams.remove(&conversation_id);
+                                streams.remove(&stream_id);
                                 return Ok(full_content);
                             }
 
@@ -3803,26 +3809,26 @@ async fn chat_copilot_responses(
                                 if event_type == "response.output_text.delta" {
                                     if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
                                         full_content.push_str(delta);
-                                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                        let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                             content: delta.to_string(),
                                             done: false,
                                         });
                                     }
                                 } else if event_type == "response.output_text.done" || event_type == "response.done" {
                                     // Stream complete
-                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                    let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                         content: String::new(),
                                         done: true,
                                     });
                                     emit_token_usage(&app, &model_clone, "copilot", &prompt_content, &full_content);
                                     let mut streams = ACTIVE_STREAMS.write().await;
-                                    streams.remove(&conversation_id);
+                                    streams.remove(&stream_id);
                                     return Ok(full_content);
                                 } else if event_type.starts_with("response.content_part") {
                                     // Handle content part deltas (alternative format)
                                     if let Some(delta) = data.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
                                         full_content.push_str(delta);
-                                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                        let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                             content: delta.to_string(),
                                             done: false,
                                         });
@@ -3839,7 +3845,7 @@ async fn chat_copilot_responses(
                                                             if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
                                                                 if !text.is_empty() && !full_content.contains(text) {
                                                                     full_content.push_str(text);
-                                                                    let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                                                                    let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                                                                         content: text.to_string(),
                                                                         done: false,
                                                                     });
@@ -3857,16 +3863,16 @@ async fn chat_copilot_responses(
                     }
                     Some(Err(e)) => {
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
-                        let _ = app.emit(&format!("ai-stream-{}", conversation_id), StreamChunk {
+                        let _ = app.emit(&format!("ai-stream-{}", stream_id), StreamChunk {
                             content: String::new(),
                             done: true,
                         });
                         let mut streams = ACTIVE_STREAMS.write().await;
-                        streams.remove(&conversation_id);
+                        streams.remove(&stream_id);
                         break;
                     }
                 }
@@ -3878,25 +3884,33 @@ async fn chat_copilot_responses(
     Ok(full_content)
 }
 
-#[command]
-pub async fn stop_ai_stream() -> Result<(), String> {
-    println!("Stopping all active AI streams...");
-    
-    // Get all active streams and signal cancellation
-    let streams = ACTIVE_STREAMS.write().await;
-    let count = streams.len();
-    
-    for (conversation_id, sender) in streams.iter() {
-        println!("Cancelling stream for conversation: {}", conversation_id);
-        let _ = sender.send(()); // Send cancellation signal
-    }
-    
-    drop(streams); // Release lock before clearing
-    
-    // Clear all streams
+#[command(rename_all = "camelCase")]
+pub async fn stop_ai_stream(stream_id: Option<String>) -> Result<(), String> {
     let mut streams = ACTIVE_STREAMS.write().await;
+
+    if let Some(id) = stream_id {
+        println!("[ai.rs] Stopping AI stream: {}", id);
+        if let Some(sender) = streams.remove(&id) {
+            let _ = sender.send(()); // cancellation signal
+            println!("[ai.rs] Cancelled stream {}", id);
+        } else {
+            println!("[ai.rs] No active stream found for id={}", id);
+        }
+        return Ok(());
+    }
+
+    println!("[ai.rs] Stopping ALL active AI streams...");
+    let ids: Vec<String> = streams.keys().cloned().collect();
+    let count = ids.len();
+
+    for id in &ids {
+        if let Some(sender) = streams.get(id) {
+            println!("[ai.rs] Cancelling stream {}", id);
+            let _ = sender.send(()); // cancellation signal
+        }
+    }
+
     streams.clear();
-    
-    println!("Cancelled {} active stream(s)", count);
+    println!("[ai.rs] Cancelled {} active stream(s)", count);
     Ok(())
 }

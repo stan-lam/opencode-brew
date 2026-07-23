@@ -64,9 +64,12 @@ const normalizeLine = (content: string): string => {
   return content.endsWith('\n') ? content.slice(0, -1) : content;
 };
 
-const wrapDiffBlock = (diffText: string): string => {
+const wrapDiffBlock = (diffText: string, filePath?: string | null): string => {
+  // IMPORTANT: Do not use markdown code fences here.
+  // Plan Mode strips ``` blocks, and code review output quality tanks when the model mirrors markdown fences.
   const normalized = diffText.endsWith('\n') ? diffText.slice(0, -1) : diffText;
-  return `\`\`\`diff\n${normalized}\n\`\`\``;
+  const label = filePath ? ` (${filePath})` : '';
+  return `--- BEGIN DIFF${label} ---\n${normalized}\n--- END DIFF${label} ---`;
 };
 
 const formatFileDiff = (diff: FileDiff): string => {
@@ -275,9 +278,12 @@ export function CodeReviewPanel() {
       : '';
     return [
       'Review the changes below.',
-      'Provide findings ordered by severity with file paths.',
+      'Respond in plain text. Do NOT use Markdown headings, tables, or fenced code blocks (no ```).',
+      'Do NOT output tool tags like <read_file>, <search_files>, <search_web>, <fetch_url>, <create_file>, <edit_file>, <delete_file>.',
+      'Use ONLY the provided diff/context. Do not ask to open files or fetch more data.',
+      'Provide findings ordered by severity with file paths/line ranges when possible.',
       'If no issues, say so and mention test gaps.',
-      'If fixes are needed, include a checklist titled "Review Fix Plan" with actionable tasks.',
+      'If fixes are needed, include a checklist titled "Review Fix Plan" using "- [ ]" items.',
       'Be ready to revise the checklist if the user asks to add/remove tasks.',
       '',
       sections.join('\n\n'),
@@ -298,7 +304,7 @@ export function CodeReviewPanel() {
         diffText = `${diffText.slice(0, MAX_FILE_DIFF_CHARS)}\n...[truncated]`;
         onTruncate();
       }
-      parts.push(wrapDiffBlock(diffText));
+      parts.push(wrapDiffBlock(diffText, filePath));
     });
     return parts.join('\n\n');
   };
@@ -320,7 +326,7 @@ export function CodeReviewPanel() {
         chunkText = `${chunkText.slice(0, MAX_FILE_DIFF_CHARS)}\n...[truncated]`;
         onTruncate();
       }
-      parts.push(wrapDiffBlock(chunkText));
+      parts.push(wrapDiffBlock(chunkText, chunk.filePath));
     });
     return parts.join('\n\n');
   };
@@ -332,7 +338,7 @@ export function CodeReviewPanel() {
     totals: { totalChars: number; truncated: boolean; canContinue: boolean }
   ) => {
     if (!body.trim() || !totals.canContinue) return;
-    const section = `## ${title}\n${body}`;
+    const section = `=== ${title} ===\n${body}`;
     if (totals.totalChars + section.length <= MAX_TOTAL_CHARS) {
       sections.push(section);
       totals.totalChars += section.length;
@@ -636,9 +642,10 @@ export function CodeReviewPanel() {
                 className={styles.secondaryButton}
                 onClick={handleLoadPullRequests}
                 disabled={prLoading}
+                title={prLoading ? 'Loading pull requests…' : 'Refresh pull requests'}
+                aria-label={prLoading ? 'Loading pull requests' : 'Refresh pull requests'}
               >
                 {prLoading ? <Loader2 size={14} className={styles.spinning} /> : <RefreshCw size={14} />}
-                {prLoading ? 'Loading' : 'Refresh'}
               </button>
             </div>
             {selectedPr && (

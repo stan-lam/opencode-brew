@@ -307,10 +307,12 @@ pub struct ModelSettings {
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            provider: "ollama".to_string(),
+            // Important: defaults represent "unset" so global AI settings apply
+            // unless explicitly overridden at action/task level.
+            provider: String::new(),
             model: String::new(),
-            temperature: 0.7,
-            max_tokens: 4096,
+            temperature: 0.0,
+            max_tokens: 0,
             ollama_url: None,
             openai_key: None,
             anthropic_key: None,

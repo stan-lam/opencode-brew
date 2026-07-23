@@ -450,7 +450,8 @@ export const ai = {
     messages: ChatMessage[],
     temperature: number | undefined,
     maxTokens: number | undefined,
-    conversationId: string
+    conversationId: string,
+    streamId?: string
   ): Promise<string> => {
     const invoke = await getInvoke();
     return invoke('chat_ollama', {
@@ -460,6 +461,7 @@ export const ai = {
       temperature,
       maxTokens,
       conversationId,
+      streamId: streamId ?? conversationId,
     });
   },
   
@@ -470,10 +472,11 @@ export const ai = {
     messages: ChatMessage[],
     temperature: number | undefined,
     maxTokens: number | undefined,
-    conversationId: string
+    conversationId: string,
+    streamId?: string
   ): Promise<string> => {
     const invoke = await getInvoke();
-    return invoke('chat_openai_compatible', {
+    return invoke('chat_openai', {
       baseUrl,
       apiKey,
       model,
@@ -481,6 +484,7 @@ export const ai = {
       temperature,
       maxTokens,
       conversationId,
+      streamId: streamId ?? conversationId,
     });
   },
 
@@ -489,7 +493,8 @@ export const ai = {
     messages: ChatMessage[],
     temperature: number | undefined,
     maxTokens: number | undefined,
-    conversationId: string
+    conversationId: string,
+    streamId?: string
   ): Promise<string> => {
     const invoke = await getInvoke();
     return invoke('chat_copilot', {
@@ -498,6 +503,7 @@ export const ai = {
       temperature,
       maxTokens,
       conversationId,
+      streamId: streamId ?? conversationId,
     });
   },
   
@@ -511,9 +517,9 @@ export const ai = {
     });
   },
   
-  stopStream: async (): Promise<void> => {
+  stopStream: async (streamId?: string): Promise<void> => {
     const invoke = await getInvoke();
-    return invoke('stop_ai_stream');
+    return invoke('stop_ai_stream', { streamId });
   },
 };
 
