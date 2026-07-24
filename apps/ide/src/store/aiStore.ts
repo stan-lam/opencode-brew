@@ -274,6 +274,7 @@ interface AIState {
   saveWorkspaceHistory: () => Promise<void>;
   setThinkingStatus: (status: string | null) => void;
   importConversationsFromPath: (sourcePath: string) => Promise<{ imported: number; error?: string }>;
+  importConversationsFromFile: (filePath: string) => Promise<{ imported: number; error?: string }>;
   exportConversation: (conversationId: string) => Promise<string | null>;
   markFileOperationsAsKept: (operationIds: string[]) => void;
   unmarkFileOperationsAsKept: (operationIds: string[]) => void;
@@ -310,7 +311,9 @@ const SAVE_HISTORY_DEBOUNCE_MS = 2000;
 const MIN_SAVE_INTERVAL_MS = 8000;
 const STREAM_IDLE_TIMEOUT_MS = 90000;
 const STREAM_IDLE_TIMEOUT_PLAN_MS = 600000;
-const STREAM_COMPLETION_TIMEOUT_MS = 12000;
+// If we don't receive a `done` chunk, avoid finalizing too aggressively:
+// large scaffolds or provider hiccups can pause streaming for >12s.
+const STREAM_COMPLETION_TIMEOUT_MS = 60000;
 const SUMMARY_KEEP_MESSAGES = 8;
 const SUMMARY_MAX_TOKENS = 700;
 const SUMMARY_TIMEOUT_MS = 60000;
@@ -466,6 +469,22 @@ function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShoul
   const promisedAction = /(let me (write|make|create|implement|add|fix|update|apply)|i('ll| will) (write|make|create|implement|add|fix|update|apply)|here('s| is) the (fix|change|update|code|implementation))/i.test(lower);
   const hasFileOps = /<(create_file|edit_file|delete_file)\s/i.test(trimmed);
   const promisedButDidntDeliver = promisedAction && !hasFileOps && !hasUnclosedCodeBlock;
+
+  // If the response contains file-op tags but they are not closed, we almost certainly got cut off mid-write.
+  const countMatches = (re: RegExp) => (trimmed.match(re) || []).length;
+  const openCreate = countMatches(/<create_file\b/gi);
+  const closeCreate = countMatches(/<\/create_file>/gi);
+  const openEdit = countMatches(/<edit_file\b/gi);
+  const closeEdit = countMatches(/<\/edit_file>/gi);
+  const openOld = countMatches(/<old_content>/gi);
+  const closeOld = countMatches(/<\/old_content>/gi);
+  const openNew = countMatches(/<new_content>/gi);
+  const closeNew = countMatches(/<\/new_content>/gi);
+  const hasUnclosedFileOpsTags =
+    (openCreate !== closeCreate) ||
+    (openEdit !== closeEdit) ||
+    (openOld !== closeOld) ||
+    (openNew !== closeNew);
   
   const result = (endsWithSuspense && shortResponse) ||
     (lastSentenceHasAction && mediumResponse && !hasToolTags) ||
@@ -474,6 +493,7 @@ function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShoul
     (endsWithActionStatement && !hasToolTags) ||
     endsWithTruncation ||
     hasUnclosedCodeBlock ||
+    hasUnclosedFileOpsTags ||
     promisedButDidntDeliver;
   
   console.log(`${logPrefix}`, {
@@ -483,6 +503,7 @@ function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShoul
     endsWithActionStatement,
     lastSentenceHasAction,
     endsWithTruncation,
+    hasUnclosedFileOpsTags,
     hasToolTags,
   });
   
@@ -4311,6 +4332,150 @@ export const useAIStore = create<AIState>()(
           return { imported: conversationsToImport.length };
         } catch (error) {
           console.error('Failed to import conversations:', error);
+          return { imported: 0, error: error instanceof Error ? error.message : 'Failed to import' };
+        }
+      },
+
+      importConversationsFromFile: async (filePath: string) => {
+        try {
+          const content = await fs.readFile(filePath);
+          const parsed: unknown = JSON.parse(content);
+
+          // Accept multiple export shapes:
+          // 1) { schema: 'opencodebrew.chat.export.v1', conversation: {...} }
+          // 2) { conversations: [...] } (ai-history.json style)
+          // 3) { ...conversation } (raw conversation)
+          const isObject = (v: unknown): v is Record<string, unknown> =>
+            typeof v === 'object' && v !== null && !Array.isArray(v);
+
+          let importedRaw: unknown[] = [];
+          if (isObject(parsed) && parsed.schema === 'opencodebrew.chat.export.v1' && parsed.conversation) {
+            importedRaw = [parsed.conversation];
+          } else if (isObject(parsed) && Array.isArray(parsed.conversations)) {
+            importedRaw = parsed.conversations as unknown[];
+          } else {
+            importedRaw = [parsed];
+          }
+
+          const nowIso = new Date().toISOString();
+          const sanitizeImportedMessage = (raw: unknown): AIMessage => {
+            const isObj = (v: unknown): v is Record<string, unknown> =>
+              typeof v === 'object' && v !== null && !Array.isArray(v);
+
+            if (!isObj(raw)) {
+              return {
+                id: crypto.randomUUID(),
+                role: 'user',
+                content: '',
+                timestamp: nowIso,
+              };
+            }
+
+            const roleRaw = raw.role;
+            const role: AIMessage['role'] =
+              roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'system'
+                ? roleRaw
+                : 'user';
+
+            const attachmentsRaw = Array.isArray(raw.attachments) ? raw.attachments : undefined;
+            const attachments: MessageAttachment[] | undefined = attachmentsRaw
+              ? attachmentsRaw
+                  .filter((a) => typeof a === 'object' && a !== null)
+                  .map((a) => a as any)
+                  .map((a) => ({
+                    id: typeof a.id === 'string' && a.id ? a.id : crypto.randomUUID(),
+                    type: a.type === 'image' || a.type === 'file' ? a.type : 'file',
+                    name: typeof a.name === 'string' ? a.name : 'attachment',
+                    path: typeof a.path === 'string' ? a.path : undefined,
+                    data: typeof a.data === 'string' ? a.data : undefined,
+                    mimeType: typeof a.mimeType === 'string' ? a.mimeType : undefined,
+                    size: typeof a.size === 'number' ? a.size : undefined,
+                  }))
+              : undefined;
+
+            return {
+              id: typeof raw.id === 'string' && raw.id ? raw.id : crypto.randomUUID(),
+              role,
+              content: typeof raw.content === 'string' ? raw.content : '',
+              timestamp: typeof raw.timestamp === 'string' && raw.timestamp ? raw.timestamp : nowIso,
+              attachments,
+              usage: (typeof raw.usage === 'object' && raw.usage !== null) ? (raw.usage as any) : undefined,
+              runId: typeof raw.runId === 'string' ? raw.runId : undefined,
+              runLabel: typeof raw.runLabel === 'string' ? raw.runLabel : undefined,
+              profileId: typeof raw.profileId === 'string' ? raw.profileId : undefined,
+            };
+          };
+
+          const sanitizeImportedConversation = (raw: unknown): AIConversation | null => {
+            if (!isObject(raw)) return null;
+            const messagesRaw = Array.isArray(raw.messages) ? raw.messages : [];
+
+            const messages: AIMessage[] = messagesRaw
+              .map((m) => sanitizeImportedMessage(m))
+              .filter((m) => typeof m.content === 'string');
+
+            const baseTitle =
+              typeof raw.title === 'string' && raw.title.trim()
+                ? raw.title.trim()
+                : 'New Conversation';
+
+            const createdAt =
+              typeof raw.createdAt === 'string' && raw.createdAt
+                ? raw.createdAt
+                : nowIso;
+            const updatedAt =
+              typeof raw.updatedAt === 'string' && raw.updatedAt
+                ? raw.updatedAt
+                : nowIso;
+
+            return {
+              id: typeof raw.id === 'string' && raw.id ? raw.id : crypto.randomUUID(),
+              title: baseTitle,
+              messages,
+              createdAt,
+              updatedAt,
+              appliedFileOps: Array.isArray(raw.appliedFileOps) ? (raw.appliedFileOps as string[]) : undefined,
+              summary: typeof raw.summary === 'string' ? raw.summary : undefined,
+              summaryMessageCount: typeof raw.summaryMessageCount === 'number' ? raw.summaryMessageCount : undefined,
+              summaryUpdatedAt: typeof raw.summaryUpdatedAt === 'string' ? raw.summaryUpdatedAt : undefined,
+            };
+          };
+
+          const importedConversations = importedRaw
+            .map(sanitizeImportedConversation)
+            .filter((c): c is AIConversation => Boolean(c) && c!.messages.length >= 0);
+
+          if (importedConversations.length === 0) {
+            return { imported: 0, error: 'No conversations found in the selected file' };
+          }
+
+          // Generate new IDs for imported conversations to avoid conflicts
+          const existingIds = new Set(get().conversations.map(c => c.id));
+          const conversationsToImport = importedConversations.map(conv => {
+            let newId = conv.id;
+            while (existingIds.has(newId)) {
+              newId = crypto.randomUUID();
+            }
+            existingIds.add(newId);
+            return {
+              ...conv,
+              id: newId,
+              title: conv.title ? `[Imported] ${conv.title}` : '[Imported] New Conversation',
+              updatedAt: nowIso,
+            };
+          });
+
+          set((state) => ({
+            conversations: [...conversationsToImport, ...state.conversations],
+            activeConversation: state.activeConversation ?? conversationsToImport[0] ?? null,
+          }));
+
+          // Save after import
+          get().saveWorkspaceHistory();
+
+          return { imported: conversationsToImport.length };
+        } catch (error) {
+          console.error('Failed to import conversations from file:', error);
           return { imported: 0, error: error instanceof Error ? error.message : 'Failed to import' };
         }
       },

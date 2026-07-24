@@ -334,6 +334,26 @@ export function MonacoEditor({ path, content, language, onScroll }: MonacoEditor
     editorRef.current = editor;
     monacoRef.current = monaco;
 
+    // Ensure tokenizers are registered for common config languages.
+    // Monaco only highlights languages whose contributions are loaded.
+    const bestEffortImport = async (specifier: string) => {
+      try {
+        // Avoid Vite build-time resolution errors when a language isn't shipped
+        // by the current `monaco-editor` version.
+        await import(/* @vite-ignore */ specifier);
+      } catch {
+        // Ignore—if a contribution isn't available in this build, Monaco falls back to plaintext.
+      }
+    };
+
+    void Promise.allSettled([
+      bestEffortImport('monaco-editor/esm/vs/basic-languages/ini/ini.contribution'),
+      bestEffortImport('monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution'),
+      bestEffortImport('monaco-editor/esm/vs/basic-languages/toml/toml.contribution'),
+      bestEffortImport('monaco-editor/esm/vs/basic-languages/groovy/groovy.contribution'),
+      bestEffortImport('monaco-editor/esm/vs/basic-languages/kotlin/kotlin.contribution'),
+    ]);
+
     // Configure TypeScript/JavaScript compiler options for JSX support
     monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
       target: monaco.languages.typescript.ScriptTarget.Latest,

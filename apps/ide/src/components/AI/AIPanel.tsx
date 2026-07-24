@@ -10,6 +10,8 @@ import {
   User,
   History,
   MessageSquare,
+  Download,
+  Upload,
   X,
   FolderOpen,
   Square,
@@ -172,6 +174,7 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
   const lines = code.split('\n');
   const lineCount = lines.length;
   const shouldCollapse = lineCount > 15;
+  const COLLAPSED_MAX_LINES = 120;
   
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -284,9 +287,29 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
   // Basic syntax highlighting with diff support
   const highlightCode = (code: string, lang: string): React.ReactNode => {
     const codeLines = code.split('\n');
-    // Always render all lines - let CSS max-height and scroll handle visibility
+    // Performance: rendering thousands of lines with spans is extremely expensive and
+    // can freeze the UI (especially during window resize). When collapsed, render
+    // only a limited number of lines and let users expand for the full view.
+    const isCollapsed = shouldCollapse && !expanded;
+    const renderLines = isCollapsed ? codeLines.slice(0, COLLAPSED_MAX_LINES) : codeLines;
+    const truncated = isCollapsed && codeLines.length > renderLines.length;
     
-    return codeLines.map((line, lineIdx) => {
+    const inferLang = (raw: string): string => {
+      const sample = raw.slice(0, 4000);
+      if (/\bplugins\s*\{[\s\S]*?\}/i.test(sample) || /\bdependencies\s*\{/i.test(sample)) return 'gradle';
+      if (/\brootProject\.name\b/.test(sample) || /\binclude\s+['"][^'"]+['"]/.test(sample)) return 'gradle';
+      if (/\bpackage\s+[a-zA-Z_][\w.]*\s*;/.test(sample) || /\bpublic\s+class\s+\w+/.test(sample)) return 'java';
+      if (/^\s*import\s+.+\s+from\s+.+/m.test(sample) || /\bdef\s+\w+\s*\(/.test(sample)) return 'python';
+      if (/\bfunction\s+\w+\s*\(|\bconst\s+\w+\s*=|\bimport\s+.*\s+from\s+['"]/m.test(sample)) return 'javascript';
+      return '';
+    };
+
+    const rawLang = (lang || '').toLowerCase();
+    const effectiveLang = rawLang && rawLang !== 'text' && rawLang !== 'plaintext'
+      ? rawLang
+      : inferLang(code) || rawLang;
+
+    const rendered = renderLines.map((line, lineIdx) => {
       // Check for diff markers
       const isDiffAdd = isDiff && line.startsWith('+');
       const isDiffRemove = isDiff && line.startsWith('-');
@@ -300,14 +323,14 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
       const patterns: { regex: RegExp; className: string }[] = [];
       
       // Language-specific patterns
-      if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift'].includes(lang.toLowerCase())) {
+      if (!effectiveLang || ['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'gradle', 'groovy', 'kotlin'].includes(effectiveLang)) {
         patterns.push({ regex: /(\/\/.*$)/, className: styles.syntaxComment });
         patterns.push({ regex: /(\/\*[\s\S]*?\*\/)/, className: styles.syntaxComment });
       }
-      if (['python', 'py', 'ruby', 'bash', 'sh', 'shell', 'yaml', 'yml'].includes(lang.toLowerCase())) {
+      if (!effectiveLang || ['python', 'py', 'ruby', 'bash', 'sh', 'shell', 'yaml', 'yml'].includes(effectiveLang)) {
         patterns.push({ regex: /(#.*$)/, className: styles.syntaxComment });
       }
-      if (['html', 'xml', 'svg'].includes(lang.toLowerCase())) {
+      if (['html', 'xml', 'svg'].includes(effectiveLang)) {
         patterns.push({ regex: /(<!--[\s\S]*?-->)/, className: styles.syntaxComment });
       }
       
@@ -315,32 +338,44 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
       patterns.push({ regex: /('(?:[^'\\]|\\.)*')/, className: styles.syntaxString });
       patterns.push({ regex: /(`(?:[^`\\]|\\.)*`)/, className: styles.syntaxString });
       
-      const keywords = /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|export|from|async|await|try|catch|throw|new|this|super|extends|implements|public|private|protected|static|readonly|def|fn|pub|mod|use|struct|enum|impl|trait|match|loop|break|continue|true|false|null|undefined|None|True|False|self|nil)\b/g;
+      const baseKeywords = [
+        'const','let','var','function','return','if','else','for','while','class','interface','type','import','export','from',
+        'async','await','try','catch','throw','new','this','super','extends','implements','public','private','protected','static','readonly',
+        'def','fn','pub','mod','use','struct','enum','impl','trait','match','loop','break','continue',
+        'true','false','null','undefined','None','True','False','self','nil'
+      ];
+      const gradleKeywords = [
+        'plugins','dependencies','repositories','mavenCentral','gradlePluginPortal',
+        'implementation','api','compileOnly','runtimeOnly','testImplementation','annotationProcessor',
+        'group','version','id','java','test','sourceCompatibility','targetCompatibility','subprojects','allprojects','tasks'
+      ];
+      const keywordList = (effectiveLang === 'gradle' || effectiveLang === 'groovy' || effectiveLang === 'kotlin')
+        ? [...baseKeywords, ...gradleKeywords]
+        : baseKeywords;
+      const keywords = new RegExp(`\\\\b(${keywordList.map(k => k.replace(/[.*+?^${}()|[\\\\]\\\\]/g, '\\\\$&')).join('|')})\\\\b`, 'g');
       patterns.push({ regex: keywords, className: styles.syntaxKeyword });
       patterns.push({ regex: /\b(\d+\.?\d*)\b/, className: styles.syntaxNumber });
       patterns.push({ regex: /\b([a-zA-Z_]\w*)\s*(?=\()/, className: styles.syntaxFunction });
 
       const replacements: { start: number; end: number; element: React.ReactNode }[] = [];
 
-      if (lang) {
-        patterns.forEach(({ regex, className }) => {
-          const globalRegex = new RegExp(regex.source, 'g');
-          let match;
-          while ((match = globalRegex.exec(lineContent)) !== null) {
-            const overlaps = replacements.some(r => 
-              (match!.index >= r.start && match!.index < r.end) ||
-              (match!.index + match![0].length > r.start && match!.index + match![0].length <= r.end)
-            );
-            if (!overlaps) {
-              replacements.push({
-                start: match.index,
-                end: match.index + match[0].length,
-                element: <span key={`${lineIdx}-${tokenKey++}`} className={className}>{match[0]}</span>
-              });
-            }
+      patterns.forEach(({ regex, className }) => {
+        const globalRegex = new RegExp(regex.source, 'g');
+        let match;
+        while ((match = globalRegex.exec(lineContent)) !== null) {
+          const overlaps = replacements.some(r => 
+            (match!.index >= r.start && match!.index < r.end) ||
+            (match!.index + match![0].length > r.start && match!.index + match![0].length <= r.end)
+          );
+          if (!overlaps) {
+            replacements.push({
+              start: match.index,
+              end: match.index + match[0].length,
+              element: <span key={`${lineIdx}-${tokenKey++}`} className={className}>{match[0]}</span>
+            });
           }
-        });
-      }
+        }
+      });
 
       replacements.sort((a, b) => a.start - b.start);
 
@@ -371,6 +406,15 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
         </div>
       );
     });
+
+    if (!truncated) return rendered;
+    const remaining = codeLines.length - renderLines.length;
+    rendered.push(
+      <div key="__truncated__" className={styles.codeTruncatedLine}>
+        … {remaining} more line{remaining === 1 ? '' : 's'} (expand to view)
+      </div>
+    );
+    return rendered;
   };
 
   const displayLang = isAsciiArt ? 'diagram' : (language || 'text');
@@ -511,6 +555,8 @@ interface PendingFileOperation {
 
 const CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
 const WINDOWS_ABS_REGEX = /^[a-zA-Z]:[\\/]/;
+const INVALID_PATH_CHARS_REGEX = /[<>:"|?*]/;
+const MARKDOWN_PATH_HINT_REGEX = /\*\*|`{2,}|^:+\s*/;
 const SEVERITY_PATTERN = /(?:SEVERITY\s*[:\-–—]\s*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(?:\s+(?:ISSUES|SEVERITY)\s*:\s*\*\*)?/i;
 
 const getSeverityClassName = (severity: string): string => {
@@ -536,9 +582,16 @@ const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string 
   const trimmed = filePath.trim();
   if (!trimmed) return 'Path is empty.';
   if (CONTROL_CHAR_REGEX.test(trimmed)) return 'Path contains control characters.';
+  if (MARKDOWN_PATH_HINT_REGEX.test(trimmed)) return 'Path appears to include markdown formatting.';
 
   const normalized = trimmed.replace(/\\/g, '/');
   const isAbsolute = normalized.startsWith('/') || WINDOWS_ABS_REGEX.test(trimmed);
+
+  // Disallow characters that break paths on common platforms (especially Windows),
+  // while still allowing a Windows drive letter like "C:/".
+  const hasInvalidChars = INVALID_PATH_CHARS_REGEX.test(trimmed)
+    && !/^[a-zA-Z]:[\\/]/.test(trimmed);
+  if (hasInvalidChars) return 'Path contains invalid filename characters.';
   if (isAbsolute && !workspaceRoot) {
     return 'Absolute paths are not allowed.';
   }
@@ -561,9 +614,12 @@ const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string 
 };
 
 const normalizeRepoRelativePath = (workspaceRoot: string, filePath: string): string => {
+  const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
   let normalized = filePath.replace(/\\/g, '/').trim();
-  if (normalized.startsWith(workspaceRoot)) {
-    normalized = normalized.slice(workspaceRoot.length);
+  if (normalized === rootNormalized) {
+    normalized = '';
+  } else if (normalized.startsWith(`${rootNormalized}/`)) {
+    normalized = normalized.slice(rootNormalized.length);
   }
   normalized = normalized.replace(/^\/+/, '');
   normalized = normalized.replace(/^\.\//, '');
@@ -808,15 +864,50 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
   const combineReasons = (...reasons: Array<string | null | undefined>) =>
     reasons.filter(Boolean).join(' ');
   const hasCodeFence = (value?: string) => Boolean(value && /```/.test(value));
+  const looksLikePath = (value: string) => {
+    if (!value) return false;
+    if (value.length > 500) return false;
+    if (MARKDOWN_PATH_HINT_REGEX.test(value)) return false;
+    const hasInvalid = INVALID_PATH_CHARS_REGEX.test(value) && !/^[a-zA-Z]:\//.test(value);
+    if (hasInvalid) return false;
+    return /[\/\.]/.test(value) && !value.endsWith('/');
+  };
+  const coerceOperationPath = (raw: string) => {
+    let cleaned = sanitizeOperationPath(raw)
+      .replace(/^`+|`+$/g, '')
+      .replace(/^"+|"+$/g, '')
+      .trim();
+
+    // If the model appends descriptions like `path="foo/bar.txt: ..."`, keep the likely prefix.
+    const splitCandidates: number[] = [];
+    const firstColon = cleaned.indexOf(':');
+    const isWindowsDrive = /^[a-zA-Z]:\//.test(cleaned);
+    if (firstColon !== -1 && !(isWindowsDrive && firstColon === 1)) {
+      splitCandidates.push(firstColon);
+    }
+    const firstNewline = cleaned.search(/[\r\n]/);
+    if (firstNewline !== -1) splitCandidates.push(firstNewline);
+    const firstSpace = cleaned.indexOf(' ');
+    if (firstSpace !== -1) splitCandidates.push(firstSpace);
+
+    const cutAt = Math.min(...splitCandidates.filter((n) => n >= 0), Number.POSITIVE_INFINITY);
+    if (Number.isFinite(cutAt) && cutAt > 0) {
+      const prefix = cleaned.slice(0, cutAt).trim();
+      if (looksLikePath(prefix)) cleaned = prefix;
+    }
+
+    return cleaned;
+  };
   
   // Parse create_file tags — complete (with closing tag) only
   const createRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)<\/create_file>/g;
   let match;
   while ((match = createRegex.exec(content)) !== null) {
-    const path = match[1].trim();
+    const path = coerceOperationPath(match[1]);
     const opContent = match[2].trim();
     const invalidReason = combineReasons(
       getInvalidPathReason(path, workspaceRoot),
+      !opContent ? 'Create operations must include file content.' : null,
       hasCodeFence(opContent) ? 'Code fences are not allowed inside file operation tags.' : null
     );
     operations.push({
@@ -830,7 +921,7 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
   // Parse edit_file tags - first find all edit_file blocks, then extract old/new content
   const editBlockRegex = /<edit_file\s+path="([^"]+)"(?:\s+mode="(replace|insert)")?(?:\s+line="(\d+)")?>([\s\S]*?)<\/edit_file>/g;
   while ((match = editBlockRegex.exec(content)) !== null) {
-    const path = match[1].trim();
+    const path = coerceOperationPath(match[1]);
     const mode = (match[2] as 'replace' | 'insert') || 'replace';
     const line = match[3] ? parseInt(match[3]) : undefined;
     const body = match[4];
@@ -873,7 +964,7 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
   // Parse delete_file tags
   const deleteRegex = /<delete_file\s+path="([^"]+)"\s*\/>/g;
   while ((match = deleteRegex.exec(content)) !== null) {
-    const path = match[1].trim();
+    const path = coerceOperationPath(match[1]);
     const invalidReason = getInvalidPathReason(path, workspaceRoot);
     operations.push({
       type: 'delete',
@@ -3648,6 +3739,7 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
       // Disable this in Plan Mode to avoid misclassifying checklists/review prose as code blocks.
       const guessLooseCodeLanguage = (snippet: string): string => {
         const s = snippet.slice(0, 2000);
+        if (/\bplugins\s*\{/.test(s) || /\bdependencies\s*\{/.test(s) || /\brootProject\.name\b/.test(s) || /\binclude\s+['"][^'"]+['"]/.test(s)) return 'gradle';
         if (/\bpackage\s+[a-zA-Z_][\w.]*\s*;/.test(s) || /\bpublic\s+class\s+\w+/.test(s) || /\bimport\s+[\w.]+\s*;/.test(s)) return 'java';
         if (/^\s*(def|class)\s+\w+/m.test(s) || (/^\s*import\s+\w+/m.test(s) && !/;/.test(s))) return 'python';
         if (/\bfn\s+\w+/.test(s) || /\bpub\s+fn\s+/.test(s) || /\bstruct\s+\w+/.test(s) || /\bimpl\s+\w+/.test(s)) return 'rust';
@@ -3662,7 +3754,7 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         const patterns: { regex: RegExp; className: string }[] = [];
         const langLower = (lang || '').toLowerCase();
 
-        if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'code'].includes(langLower)) {
+        if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'gradle', 'groovy', 'kotlin', 'code'].includes(langLower)) {
           patterns.push({ regex: /(\/\/.*$)/, className: styles.syntaxComment });
           patterns.push({ regex: /(\/\*[\s\S]*?\*\/)/, className: styles.syntaxComment });
         }
@@ -3674,7 +3766,21 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         patterns.push({ regex: /('(?:[^'\\]|\\.)*')/, className: styles.syntaxString });
         patterns.push({ regex: /(`(?:[^`\\]|\\.)*`)/, className: styles.syntaxString });
 
-        const keywords = /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|export|from|async|await|try|catch|throw|new|this|super|extends|implements|public|private|protected|static|readonly|package|def|fn|pub|mod|use|struct|enum|impl|trait|match|loop|break|continue|true|false|null|undefined|None|True|False|self|nil)\b/g;
+        const baseKeywords = [
+          'const','let','var','function','return','if','else','for','while','class','interface','type','import','export','from',
+          'async','await','try','catch','throw','new','this','super','extends','implements','public','private','protected','static','readonly',
+          'package','def','fn','pub','mod','use','struct','enum','impl','trait','match','loop','break','continue',
+          'true','false','null','undefined','None','True','False','self','nil'
+        ];
+        const gradleKeywords = [
+          'plugins','dependencies','repositories','mavenCentral','gradlePluginPortal',
+          'implementation','api','compileOnly','runtimeOnly','testImplementation','annotationProcessor',
+          'group','version','id','java','test','sourceCompatibility','targetCompatibility','subprojects','allprojects','tasks'
+        ];
+        const keywordList = (langLower === 'gradle' || langLower === 'groovy' || langLower === 'kotlin')
+          ? [...baseKeywords, ...gradleKeywords]
+          : baseKeywords;
+        const keywords = new RegExp(`\\b(${keywordList.map(k => k.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')).join('|')})\\b`, 'g');
         patterns.push({ regex: keywords, className: styles.syntaxKeyword });
         patterns.push({ regex: /\b(\d+\.?\d*)\b/, className: styles.syntaxNumber });
         patterns.push({ regex: /\b([a-zA-Z_]\w*)\s*(?=\()/, className: styles.syntaxFunction });
@@ -4030,16 +4136,32 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
   onReject?: () => void; 
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
-  const [isCodeExpanded, setIsCodeExpanded] = useState(false);
-  const codeRef = useRef<HTMLPreElement>(null);
   const { openAIDiff } = useEditorStore();
 
-  // Auto-scroll to bottom during streaming
-  useEffect(() => {
-    if (codeRef.current && !isCodeExpanded) {
-      codeRef.current.scrollTop = codeRef.current.scrollHeight;
-    }
-  }, [operation.content, operation.newContent, operation.oldContent, isCodeExpanded]);
+  const languageFromPath = (p: string): string => {
+    const ext = (p.split('.').pop() || '').toLowerCase();
+    const map: Record<string, string> = {
+      ts: 'typescript',
+      tsx: 'typescript',
+      js: 'javascript',
+      jsx: 'javascript',
+      py: 'python',
+      rs: 'rust',
+      go: 'go',
+      java: 'java',
+      yml: 'yaml',
+      yaml: 'yaml',
+      json: 'json',
+      md: 'markdown',
+      sh: 'bash',
+      gradle: 'gradle',
+      groovy: 'groovy',
+      properties: 'properties',
+      xml: 'xml',
+      toml: 'toml',
+    };
+    return map[ext] || ext || 'text';
+  };
 
   const getOperationTitle = () => {
     switch (operation.type) {
@@ -4087,29 +4209,15 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
 
   const renderCodeBlock = (content: string | undefined, className: string) => {
     if (!content) return null;
-    
-    const lines = content.split('\n').length;
-    const needsExpand = lines > 20; // Show expand button if more than 20 lines
-    
+
     return (
       <div className={styles.codeBlockWrapper}>
-        <pre 
-          ref={codeRef}
-          className={`${className} ${!isCodeExpanded && needsExpand ? styles.codeCollapsed : styles.codeExpanded}`}
-        >
-          {content}
-        </pre>
-        {needsExpand && (
-          <button 
-            className={styles.codeExpandButton}
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsCodeExpanded(!isCodeExpanded);
-            }}
-          >
-            {isCodeExpanded ? 'Show Less' : `Show All (${lines} lines)`}
-          </button>
-        )}
+        <CodeBlock
+          code={content}
+          language={languageFromPath(operation.path)}
+          filename={operation.path}
+          isDiff={false}
+        />
       </div>
     );
   };
@@ -4193,7 +4301,7 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
 
 // Group operations by file path
 interface GroupedFileOperation {
-  path: string;
+  path: string; // canonical workspace-relative path (normalized)
   operations: { op: PendingFileOperation; originalIndex: number }[];
   totalAdded: number;
   totalRemoved: number;
@@ -4201,11 +4309,33 @@ interface GroupedFileOperation {
   anyApplied: boolean;
 }
 
-function groupOperationsByFile(operations: PendingFileOperation[]): GroupedFileOperation[] {
+function sanitizeOperationPath(rawPath: string): string {
+  // Remove invisible/control characters that can sneak into model output and
+  // cause "duplicate" entries + invalid path errors.
+  return (rawPath || '')
+    .normalize('NFC')
+    .replace(/\\/g, '/')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    // Normalize odd unicode spaces to regular spaces (then trim).
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .trim()
+    .replace(/\/{2,}/g, '/')
+    .replace(/^\.\/+/, '');
+}
+
+function canonicalizeOperationPath(opPath: string, workspaceRoot?: string): string {
+  if (!workspaceRoot) return opPath;
+  const cleaned = sanitizeOperationPath(opPath);
+  const relativePath = resolveWorkspaceRelativePath(workspaceRoot, cleaned);
+  return normalizeRepoRelativePath(workspaceRoot, relativePath);
+}
+
+function groupOperationsByFile(operations: PendingFileOperation[], workspaceRoot?: string): GroupedFileOperation[] {
   const groupMap = new Map<string, GroupedFileOperation>();
   
   operations.forEach((op, index) => {
-    const path = op.operation.path;
+    const path = canonicalizeOperationPath(op.operation.path, workspaceRoot);
     if (!groupMap.has(path)) {
       groupMap.set(path, {
         path,
@@ -4240,6 +4370,7 @@ function groupOperationsByFile(operations: PendingFileOperation[]): GroupedFileO
 // Unified File Operations Control Bar
 function FileOperationsBar({ 
   operations, 
+  workspaceRoot,
   expanded,
   onToggleExpanded,
   onKeepAll, 
@@ -4253,6 +4384,7 @@ function FileOperationsBar({
   onUndoFile
 }: { 
   operations: PendingFileOperation[];
+  workspaceRoot?: string;
   expanded: boolean;
   onToggleExpanded: () => void;
   onKeepAll: () => void;
@@ -4268,7 +4400,7 @@ function FileOperationsBar({
   if (operations.length === 0) return null;
 
   // Group operations by file path
-  const groupedOps = groupOperationsByFile(operations);
+  const groupedOps = groupOperationsByFile(operations, workspaceRoot);
   const fileCount = groupedOps.length;
   const appliedFileCount = groupedOps.filter(g => g.allApplied).length;
   const pendingCount = fileCount - appliedFileCount;
@@ -4315,6 +4447,48 @@ function FileOperationsBar({
   const getFileName = (path: string) => {
     return path.split('/').pop() || path;
   };
+
+  const buildUniqueDisplayPaths = (paths: string[]) => {
+    const cleanedPaths = paths.map((p) => sanitizeOperationPath(p));
+    const partsByPath = new Map<string, string[]>();
+    cleanedPaths.forEach((p) => {
+      partsByPath.set(p, p.split('/').filter(Boolean));
+    });
+
+    const result = new Map<string, string>();
+    const minLen = 2;
+    const maxLen = Math.max(1, ...cleanedPaths.map((p) => (partsByPath.get(p) || []).length));
+
+    for (let len = minLen; len <= maxLen; len++) {
+      const counts = new Map<string, number>();
+      cleanedPaths.forEach((p) => {
+        if (result.has(p)) return;
+        const parts = partsByPath.get(p) || [];
+        const sliceLen = Math.min(len, parts.length);
+        const suffix = parts.slice(Math.max(0, parts.length - sliceLen)).join('/');
+        counts.set(suffix, (counts.get(suffix) || 0) + 1);
+      });
+
+      cleanedPaths.forEach((p) => {
+        if (result.has(p)) return;
+        const parts = partsByPath.get(p) || [];
+        const sliceLen = Math.min(len, parts.length);
+        const suffix = parts.slice(Math.max(0, parts.length - sliceLen)).join('/');
+        if ((counts.get(suffix) || 0) === 1) {
+          result.set(p, suffix || p);
+        }
+      });
+    }
+
+    // Fallback to full path for any remaining collisions.
+    cleanedPaths.forEach((p) => {
+      if (!result.has(p)) result.set(p, p);
+    });
+
+    return result;
+  };
+
+  const displayPathByCanonical = buildUniqueDisplayPaths(groupedOps.map((g) => g.path));
 
   // Show batch actions only if there are pending operations
   const showBatchActions = pendingCount > 0;
@@ -4406,7 +4580,9 @@ function FileOperationsBar({
                 {getFileIcon(group.operations[0].op.operation.type)}
               </span>
               <span className={styles.fileOpsItemName}>
-                {getFileName(group.path)}
+                <span title={group.path}>
+                  {displayPathByCanonical.get(sanitizeOperationPath(group.path)) || group.path}
+                </span>
               </span>
               <span className={styles.fileOpsItemStats}>
                 {group.totalAdded > 0 && <span style={{ color: '#4caf50' }}>+{group.totalAdded}</span>}
@@ -4502,6 +4678,7 @@ export function AIPanel() {
     refreshAvailableModels,
     availableModels,
     copilotModelsMetadata,
+    importConversationsFromFile,
     clearAgentTasks,
     updateSessionUsage,
     resetSessionUsage,
@@ -4742,13 +4919,16 @@ export function AIPanel() {
       };
 
       try {
-        const status = await git.status(currentWorkspace.rootPath);
-        statusPaths = [
-          ...status.staged.map((entry) => entry.path),
-          ...status.unstaged.map((entry) => entry.path),
-          ...status.untracked.map((entry) => entry.path),
-        ];
-        hasStatusPaths = statusPaths.length > 0;
+        const isRepo = await git.isGitRepo(currentWorkspace.rootPath);
+        if (isRepo) {
+          const status = await git.status(currentWorkspace.rootPath);
+          statusPaths = [
+            ...status.staged.map((entry) => entry.path),
+            ...status.unstaged.map((entry) => entry.path),
+            ...status.untracked.map((entry) => entry.path),
+          ];
+          hasStatusPaths = statusPaths.length > 0;
+        }
       } catch (error) {
         console.warn('Failed to check git status for file ops:', error);
       }
@@ -5346,11 +5526,12 @@ export function AIPanel() {
   };
 
   const normalizeOperationPath = (opPath: string, workspaceRoot: string) => {
-    const invalidReason = getInvalidPathReason(opPath, workspaceRoot);
+    const cleaned = sanitizeOperationPath(opPath);
+    const invalidReason = getInvalidPathReason(cleaned, workspaceRoot);
     if (invalidReason) {
       return { normalizedOpPath: '', fullPath: '', error: invalidReason };
     }
-    const normalizedOpPath = normalizeRepoRelativePath(workspaceRoot, opPath);
+    const normalizedOpPath = normalizeRepoRelativePath(workspaceRoot, cleaned);
     const rootNormalized = workspaceRoot.replace(/\/+$/, '');
     const fullPath = `${rootNormalized}/${normalizedOpPath}`.replace(/\/+/g, '/');
     if (!fullPath.startsWith(`${rootNormalized}/`) && fullPath !== rootNormalized) {
@@ -5392,9 +5573,10 @@ export function AIPanel() {
     }
   };
 
-  const handleKeepAllOperations = async (options?: { skipReview?: boolean }) => {
+  const handleKeepAllOperations = async (options?: { skipReview?: boolean; openFilesAfterApply?: boolean }) => {
     const { currentWorkspace } = useWorkspaceStore.getState();
     const { openFile } = useEditorStore.getState();
+    const openFilesAfterApply = options?.openFilesAfterApply ?? false;
     
     if (!currentWorkspace) {
       console.error('No workspace open');
@@ -5508,7 +5690,9 @@ export function AIPanel() {
             }
             // Save to local history
             await history.save(item.operation.path, item.operation.content || '').catch(console.error);
-            await openFile(fullPath);
+            if (openFilesAfterApply) {
+              await openFile(fullPath);
+            }
             updatedOps[i] = {
               ...updatedOps[i],
               applied: true,
@@ -5549,7 +5733,9 @@ export function AIPanel() {
             await fs.writeFile(fullPath, updatedContent);
             // Save to local history
             await history.save(item.operation.path, updatedContent).catch(console.error);
-            await openFile(fullPath);
+            if (openFilesAfterApply) {
+              await openFile(fullPath);
+            }
             updatedOps[i] = {
               ...updatedOps[i],
               applied: true,
@@ -5625,6 +5811,8 @@ export function AIPanel() {
 
       if (successCount > 0) {
         console.log(`[FileOps] SUCCESS: Applied ${successCount} file(s) to: ${currentWorkspace.rootPath}`);
+        // Ensure Explorer reflects new/updated files even if FS watch misses the burst.
+        window.dispatchEvent(new CustomEvent('workspace-refresh', { detail: { reason: 'file-ops' } }));
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: { message: `Applied ${successCount} file(s) to ${currentWorkspace.rootPath}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`, type: 'success' }
         }));
@@ -5679,12 +5867,15 @@ export function AIPanel() {
 
       if (workspaceRoot) {
         try {
-          const status = await git.status(workspaceRoot);
-          statusPaths = [
-            ...status.staged.map((entry) => entry.path),
-            ...status.unstaged.map((entry) => entry.path),
-            ...status.untracked.map((entry) => entry.path),
-          ];
+          const isRepo = await git.isGitRepo(workspaceRoot);
+          if (isRepo) {
+            const status = await git.status(workspaceRoot);
+            statusPaths = [
+              ...status.staged.map((entry) => entry.path),
+              ...status.unstaged.map((entry) => entry.path),
+              ...status.untracked.map((entry) => entry.path),
+            ];
+          }
         } catch (error) {
           console.warn('Failed to load git status for undo:', error);
         }
@@ -5974,6 +6165,19 @@ export function AIPanel() {
     if (!currentWorkspace) return;
     if (item.applied) {
       const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, item.operation.path);
+      const isRepo = await git.isGitRepo(currentWorkspace.rootPath).catch(() => false);
+      if (!isRepo) {
+        const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
+        openAIDiff(
+          item.operation.path,
+          diffPayload.oldContent,
+          diffPayload.newContent,
+          diffPayload.operationType,
+          diffPayload.requiresOverwrite,
+          item.applied
+        );
+        return;
+      }
       try {
         const status = await git.status(currentWorkspace.rootPath);
         const normalizedTarget = normalizeRepoRelativePath(currentWorkspace.rootPath, relativePath);
@@ -5991,8 +6195,16 @@ export function AIPanel() {
           || getDiffStatusFromOperation(item.operation);
         openDiff(currentWorkspace.rootPath, normalizedTarget, Boolean(stagedEntry), diffStatus);
       } catch (error) {
-        const status = getDiffStatusFromOperation(item.operation);
-        openDiff(currentWorkspace.rootPath, relativePath, false, status);
+        // If status lookup failed (e.g. repo mis-detected), fall back to a disk-based AI diff.
+        const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
+        openAIDiff(
+          item.operation.path,
+          diffPayload.oldContent,
+          diffPayload.newContent,
+          diffPayload.operationType,
+          diffPayload.requiresOverwrite,
+          item.applied
+        );
       }
       return;
     }
@@ -6013,9 +6225,10 @@ export function AIPanel() {
     if (allPendingOps.length === 0) return;
     const grouped = new Map<string, PendingFileOperation[]>();
     allPendingOps.forEach((item) => {
-      const list = grouped.get(item.operation.path) || [];
+      const key = canonicalizeOperationPath(item.operation.path, currentWorkspace.rootPath);
+      const list = grouped.get(key) || [];
       list.push(item);
-      grouped.set(item.operation.path, list);
+      grouped.set(key, list);
     });
 
     for (const items of grouped.values()) {
@@ -6030,7 +6243,10 @@ export function AIPanel() {
   const handleViewFileOperation = async (path: string) => {
     if (!currentWorkspace) return;
     setShowEditorPanel(true);
-    const matches = allPendingOps.filter((op) => op.operation.path === path);
+    const targetKey = canonicalizeOperationPath(path, currentWorkspace.rootPath);
+    const matches = allPendingOps.filter((op) =>
+      canonicalizeOperationPath(op.operation.path, currentWorkspace.rootPath) === targetKey
+    );
     if (matches.length > 0) {
       const item = matches.find((entry) => entry.applied) || matches[0];
       await openAIOperationPreview(item);
@@ -6038,7 +6254,16 @@ export function AIPanel() {
       return;
     }
     const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, path);
-    openDiff(currentWorkspace.rootPath, relativePath, false);
+    const isRepo = await git.isGitRepo(currentWorkspace.rootPath).catch(() => false);
+    if (isRepo) {
+      openDiff(currentWorkspace.rootPath, relativePath, false);
+    } else {
+      const { openFile } = useEditorStore.getState();
+      const { fullPath, error } = normalizeOperationPath(path, currentWorkspace.rootPath);
+      if (!error && fullPath) {
+        await openFile(fullPath);
+      }
+    }
     setHasReviewedPendingOps(true);
   };
 
@@ -6132,6 +6357,58 @@ export function AIPanel() {
       setTimeout(() => setImportStatus(null), 3000);
     } catch (error) {
       setImportStatus('Failed to import');
+      setTimeout(() => setImportStatus(null), 3000);
+    }
+  };
+
+  const handleImportFromFile = async () => {
+    try {
+      const selected = await dialog.openFile();
+      if (!selected) return;
+
+      setImportStatus('Importing file...');
+      const result = await importConversationsFromFile(selected);
+
+      if (result.error) {
+        setImportStatus(`Error: ${result.error}`);
+      } else if (result.imported > 0) {
+        setImportStatus(`Imported ${result.imported} conversation${result.imported > 1 ? 's' : ''}`);
+      } else {
+        setImportStatus('No conversations to import');
+      }
+
+      setTimeout(() => setImportStatus(null), 3000);
+    } catch {
+      setImportStatus('Failed to import file');
+      setTimeout(() => setImportStatus(null), 3000);
+    }
+  };
+
+  const handleExportActiveConversation = async () => {
+    try {
+      if (!activeConversation) return;
+
+      const safeName = (activeConversation.title || 'chat')
+        .trim()
+        .replace(/[^\w.-]+/g, '_')
+        .slice(0, 80) || 'chat';
+
+      const target = await dialog.saveFile(`${safeName}.json`);
+      if (!target) return;
+
+      setImportStatus('Exporting...');
+
+      const payload = {
+        schema: 'opencodebrew.chat.export.v1',
+        exportedAt: new Date().toISOString(),
+        conversation: activeConversation,
+      };
+
+      await fs.writeFile(target, JSON.stringify(payload, null, 2));
+      setImportStatus('Exported chat');
+      setTimeout(() => setImportStatus(null), 3000);
+    } catch {
+      setImportStatus('Failed to export');
       setTimeout(() => setImportStatus(null), 3000);
     }
   };
@@ -6485,10 +6762,51 @@ export function AIPanel() {
                   plainTextKind={isCodeReviewPrompt ? 'diff' : 'text'}
                 onOperationsChange={async (ops) => {
                   const { isFileOperationKept } = useAIStore.getState();
+
+                  const workspaceRoot = currentWorkspace?.rootPath;
+                  const preparedOps = (() => {
+                    const result: FileOperation[] = [];
+                    const lastIdxByKey = new Map<string, number>();
+                    const seenEditSignatures = new Set<string>();
+
+                    for (const op of ops) {
+                      const cleanedPath = sanitizeOperationPath(op.path);
+                      const opCleaned: FileOperation = { ...op, path: cleanedPath };
+                      const canonicalKey = workspaceRoot
+                        ? canonicalizeOperationPath(cleanedPath, workspaceRoot)
+                        : cleanedPath;
+
+                      if (opCleaned.type === 'create' || opCleaned.type === 'delete') {
+                        // Keep only the last create/delete per file within a single message.
+                        const key = `${opCleaned.type}:${canonicalKey}`;
+                        const existingIdx = lastIdxByKey.get(key);
+                        if (existingIdx !== undefined) {
+                          result[existingIdx] = opCleaned;
+                        } else {
+                          lastIdxByKey.set(key, result.length);
+                          result.push(opCleaned);
+                        }
+                        continue;
+                      }
+
+                      if (opCleaned.type === 'edit') {
+                        // Drop exact duplicates; keep distinct edits (order can matter).
+                        const sig = `edit:${canonicalKey}:${opCleaned.oldContent || ''}=>${opCleaned.newContent || ''}:${opCleaned.insertLine ?? ''}`;
+                        if (seenEditSignatures.has(sig)) continue;
+                        seenEditSignatures.add(sig);
+                        result.push(opCleaned);
+                        continue;
+                      }
+
+                      result.push(opCleaned);
+                    }
+
+                    return result;
+                  })();
                   
                   // Check if operations are kept or if files already exist
                   const opsWithStatus: PendingFileOperation[] = await Promise.all(
-                    ops.map(async (op) => {
+                    preparedOps.map(async (op) => {
                       const operationId = `${message.id}:${op.type}:${op.path}`;
                       
                       // First check if operation is marked as kept in history
@@ -6738,9 +7056,11 @@ export function AIPanel() {
       {showFileOps && (
         <FileOperationsBar
           operations={allPendingOps}
+          workspaceRoot={currentWorkspace?.rootPath}
           expanded={fileOpsExpanded}
           onToggleExpanded={() => setFileOpsExpanded(!fileOpsExpanded)}
-          onKeepAll={handleKeepAllOperations}
+          // Keep All should apply changes without opening a review tab per file.
+          onKeepAll={() => { void handleKeepAllOperations({ skipReview: true, openFilesAfterApply: false }); }}
           onUndoAll={handleUndoAllOperations}
           onSoftUndoAll={handleSoftUndoAllOperations}
           onDismiss={handleDismissFileOperations}
@@ -6956,13 +7276,30 @@ export function AIPanel() {
             <div className={styles.historyHeader}>
               <h3>Chat History</h3>
               <div className={styles.historyActions}>
+                <button
+                  className={styles.importBtn}
+                  onClick={handleImportFromFile}
+                  title="Import chat from file"
+                >
+                  <Upload size={14} />
+                  <span>Import File</span>
+                </button>
                 <button 
                   className={styles.importBtn}
                   onClick={handleImportFromProject}
                   title="Import from another project"
                 >
                   <FolderOpen size={14} />
-                  <span>Import</span>
+                  <span>Import Project</span>
+                </button>
+                <button
+                  className={styles.importBtn}
+                  onClick={handleExportActiveConversation}
+                  title={activeConversation ? 'Export current chat to file' : 'Export current chat (open a chat first)'}
+                  disabled={!activeConversation}
+                >
+                  <Download size={14} />
+                  <span>Export</span>
                 </button>
                 <button 
                   className={styles.closeHistoryBtn}

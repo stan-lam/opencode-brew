@@ -116,6 +116,10 @@ const getLanguageFromPath = (filePath: string): string => {
     yml: 'yaml',
     toml: 'toml',
     ini: 'ini',
+    properties: 'ini',
+    gradle: 'groovy',
+    groovy: 'groovy',
+    kts: 'kotlin',
     dockerfile: 'dockerfile',
   };
   return langMap[ext] || 'plaintext';
