@@ -262,28 +262,24 @@ function generatePrompts(config: Record<string, any>) {
   const stateAbbr = zipCode.startsWith('98') ? 'wa' : 'ca';
   const stateName = stateAbbr === 'wa' ? 'washington' : 'california';
   
-  const searchGasPricesPrompt = `Find gas prices near ZIP code ${zipCode}.
+  const searchGasPricesPrompt = `Find gas stations within ${radius} miles of ${zipCode}.
 
-<fetch_url url="https://costcogaspricelive.com/${stateName}/" />
-<fetch_url url="https://aruljohn.com/gas/${stateAbbr}" />
-<search_web query="gas prices ${zipCode} cheapest stations" />
+${hasCostcoPreferred ? `<search_web query="Costco gas stations near ${zipCode}" />` : ''}
+${hasSamsClubPreferred ? `<search_web query="Sam's Club gas stations near ${zipCode}" />` : ''}
+${!hasCostcoPreferred && !hasSamsClubPreferred ? `<search_web query="cheapest gas stations near ${zipCode}" />` : ''}
 
-After fetching, EXTRACT and LIST every price found in the data:
+**EXTRACT from search results:**
+Look for "Nearby Costco gas stations" section with format:
+- Location name, City, distance, Regular price
 
-**IMPORTANT - EXTRACT THESE PATTERNS:**
-- "lowest-priced...at Costco Clarkston at $4.429" → Costco Clarkston - $4.429
-- "regular gas averages $4.872" → State Average - $4.872  
-- Any "$X.XX" with a station name → list it
+Example patterns to extract:
+- "Costco Kirkland...4.2 mi...Regular$4.869" → Costco Kirkland - $4.869 - 4.2 mi
+- "Costco Woodinville...7.8 mi...Regular$4.799" → Costco Woodinville - $4.799 - 7.8 mi
 
-**Output Format:**
-- Station Name - $X.XX - Address (if available)
+**OUTPUT FORMAT:**
+- Station Name - $X.XX - City (X.X mi)
 
-Example:
-- Costco Clarkston - $4.429 - Clarkston, WA
-- Costco Tukwila - $5.30 - Tukwila, WA
-- State Average - $4.872 - Washington
-
-DO NOT say "prices not provided". Extract every dollar amount you see.`;
+List ALL stations within ${radius} miles. Only use prices from search results.`;
 
   const sortInstructions: Record<string, string> = {
     'price_asc': 'Sort by price from lowest to highest',
@@ -292,35 +288,14 @@ DO NOT say "prices not provided". Extract every dollar amount you see.`;
     'station': 'Sort alphabetically by station name',
   };
 
-  const formatReportPrompt = `Create a formatted gas price report from this data.
+  const formatReportPrompt = `{{search-gas-prices_output}}
 
-📊 DATA FOR WASHINGTON STATE (includes ZIP ${zipCode} area):
+⛽ **Gas Prices** - ${zipCode}
 
-{{search-gas-prices_output}}
+| Station | Price | City |
+|---------|-------|------|
 
----
-
-FORMAT YOUR REPORT AS:
-
-⛽ **Gas Price Report** - ${zipCode}
-
-**Best Deal:** [station with lowest price] - $X.XX/gal
-
-| Station | Price | Address |
-|---------|-------|---------|
-| ⭐ Costco Location | $X.XX | Full Address |
-| Other Station | $X.XX | Full Address |
-
-⭐ = membership required (Costco, Sam's Club)
-
-INSTRUCTIONS:
-1. Extract ALL prices mentioned (e.g., "$4.872", "averages $4.87", "$4.429")
-2. For locations without specific prices, use the state average if provided
-3. Sort by price (lowest first)
-4. Mark Costco/Sam's Club stations with ⭐
-5. Include at least 3-5 stations in your table
-
-Last updated: {{datetime}}`;
+Sort by price. Mark Costco with ⭐.`;
 
   return {
     searchGasPrices: searchGasPricesPrompt,
@@ -328,27 +303,9 @@ Last updated: {{datetime}}`;
   };
 }
 
-const SEARCH_SYSTEM_PROMPT = `You are a gas price data extractor. Your job is to find and LIST gas prices from web data.
+const SEARCH_SYSTEM_PROMPT = `Extract gas station names, prices, and distances from search results. Format: Station - $X.XX - City (X mi). Only include data from results.`;
 
-To fetch a URL, output: <fetch_url url="..." />
-To search the web, output: <search_web query="..." />
-
-CRITICAL: When you receive data, extract and list EVERY specific price you find:
-- "$4.429 at Costco Clarkston" → list it
-- "regular averages $4.872" → list the average
-- Any dollar amount with a station name → list it
-
-Format: Station Name - $X.XX - Address
-DO NOT summarize. DO NOT say "prices not provided". LIST every price found.`;
-
-const FORMAT_REPORT_SYSTEM_PROMPT = `You are a report formatter. Your job is to extract data from provided text and create formatted reports.
-
-IMPORTANT:
-- DO NOT search for data - it is already provided to you
-- DO NOT output any <search_web> or <fetch_url> tags
-- Extract prices, station names, and addresses from the text given
-- If state-level averages are provided, use them for nearby locations
-- Format the data according to the requested output format`;
+const FORMAT_REPORT_SYSTEM_PROMPT = `Format gas data into a table. Only use provided data.`;
 
 function createAiAction(id: string, name: string, prompt: string, order: number, systemPrompt: string): Action {
   return {
