@@ -262,26 +262,34 @@ function generatePrompts(config: Record<string, any>) {
   const stateAbbr = zipCode.startsWith('98') ? 'wa' : 'ca';
   const stateName = stateAbbr === 'wa' ? 'washington' : 'california';
   
-  const searchGasPricesPrompt = `Find at least 10 gas stations within ${radius} miles of ${zipCode}.
+  const searchGasPricesPrompt = `Fetch Costco gas prices:
 
-**SEARCH 1: Preferred stations (search multiple times for comprehensive results)**
-${hasCostcoPreferred ? `<search_web query="Costco gas stations near ${zipCode}" />
-<search_web query="all Costco gas prices ${stateName} ${zipCode}" />` : ''}
-${hasSamsClubPreferred ? `<search_web query="Sam's Club gas stations near ${zipCode}" />` : ''}
+<fetch_url url="https://www.costcogasprices.com/station/us/8629-120th-ave-ne" />
 
-**SEARCH 2: Top stations in area (for more results)**
-<search_web query="top 10 cheapest gas stations ${zipCode}" />
+**EXTRACT ALL stations from the page:**
 
-**EXTRACT ALL stations from search results:**
-- Look for "Nearby Costco gas stations" lists
-- Look for station rankings with prices
-- Include ALL locations within ${radius} miles (e.g., Kirkland, Redmond, Tukwila, Issaquah, Seattle, etc.)
+1. MAIN STATION (at top of page):
+   - Look for "Regular $X.XX" - this is Costco Kirkland
 
-**OUTPUT: List 10+ stations with prices**
-Format: Station - $X.XX - City
+2. NEARBY STATIONS (in "Nearby Costco Gas Stations" section):
+   - Each entry shows: Price, Address, City (distance)
+   - Extract ALL stations within ${radius} miles
 
-Prioritize preferred stations (${preferredList}), then fill remaining slots with other stations.
-Only use prices from actual search results.`;
+**PAGE FORMAT:**
+$5.16
+### 7725 188th Ave NE
+Redmond, Washington (4.2 miles)
+
+**OUTPUT ALL stations found:**
+- Costco Kirkland - $5.15 - Kirkland (0 mi)
+- Costco Redmond - $5.16 - Redmond (4.2 mi)
+- Costco Woodinville - $5.10 - Woodinville (5.7 mi)
+- Costco Shoreline - $5.10 - Shoreline (9.9 mi)
+- Costco Issaquah - $5.06 - Issaquah (10.8 mi)
+- Costco Tukwila - $5.36 - Tukwila (16.5 mi)
+(etc. - list ALL within ${radius} miles)
+
+Use exact prices from page. Include distance in output.`;
 
   const sortInstructions: Record<string, string> = {
     'price_asc': 'Sort by price from lowest to highest',
@@ -305,7 +313,7 @@ Sort by price. Mark Costco with ⭐.`;
   };
 }
 
-const SEARCH_SYSTEM_PROMPT = `Extract 10+ gas stations with prices from search results. Format: Station - $X.XX - City. Prioritize preferred stations first, then add other stations.`;
+const SEARCH_SYSTEM_PROMPT = `Extract gas prices from fetched page content. Look for dollar amounts like "$5.00", "$5.30". The "Nearby Costco Gas Stations" section lists stations with prices and distances.`;
 
 const FORMAT_REPORT_SYSTEM_PROMPT = `Format gas data into a table. Only use provided data.`;
 
