@@ -7,6 +7,7 @@ import {
   History,
   Terminal,
   FlaskConical,
+  ListChecks,
 } from 'lucide-react';
 import { useLayoutStore, SidePanelTab, BottomPanelTab } from '../../store/layoutStore';
 import styles from './ActivityBar.module.css';
@@ -23,6 +24,7 @@ const activityItems: ActivityItem[] = [
   { id: 'search', icon: <Search size={22} />, title: 'Search (⌘⇧F)', position: 'side' },
   { id: 'git', icon: <GitBranch size={22} />, title: 'Source Control (⌘⇧G)', position: 'side' },
   { id: 'codeReview', icon: <GitPullRequest size={22} />, title: 'Code Review', position: 'side' },
+  { id: 'plans', icon: <ListChecks size={22} />, title: 'Plans', position: 'side' },
   { id: 'test', icon: <FlaskConical size={22} />, title: 'Test (⌘⇧T)', position: 'side' },
   { id: 'history', icon: <History size={22} />, title: 'Local History', position: 'side' },
 ];

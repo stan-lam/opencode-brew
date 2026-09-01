@@ -199,6 +199,46 @@ export interface QueuedPrompt {
   overrides?: AIMessageOverrides;
 }
 
+// Interactive question types for AI clarification
+export interface QuestionOption {
+  id: string;
+  label: string;
+  recommended?: boolean;
+}
+
+export interface PendingQuestion {
+  id: string;
+  title?: string;
+  question: string;
+  options: QuestionOption[];
+  answered: boolean;
+  selectedOptionId?: string;
+  selectedOptionLabel?: string;
+  messageId: string;
+  conversationId: string;
+}
+
+export type CommandStatus = 'pending' | 'approved' | 'running' | 'completed' | 'skipped' | 'failed';
+
+export interface CommandOperation {
+  id: string;
+  command: string;
+  description?: string;
+  sandbox?: boolean;
+  status: CommandStatus;
+  output?: string;
+  exitCode?: number;
+  error?: string;
+  messageId: string;
+  conversationId: string;
+}
+
+export interface CommandAllowlistEntry {
+  pattern: string;
+  scope: 'session' | 'workspace' | 'global';
+  addedAt: string;
+}
+
 export interface MCPServerState {
   id: string;
   name: string;
@@ -226,6 +266,10 @@ interface AIState {
   agentTaskIndex: number;
   webAccessStatus: WebAccessStatus;
   webAccessTraces: WebAccessTrace[];
+  pendingQuestions: PendingQuestion[];
+  questionBlockingStream: boolean;
+  pendingCommands: CommandOperation[];
+  commandAllowlist: CommandAllowlistEntry[];
   mcpServerStates: MCPServerState[];
   sessionUsage: SessionUsage;
   lastMessageUsage: MessageUsage | null;
@@ -255,6 +299,19 @@ interface AIState {
   setWebAccessTraces: (traces: WebAccessTrace[]) => void;
   clearWebAccessTraces: () => void;
   toggleWebAccessTraceExpanded: (traceId: string) => void;
+  setPendingQuestions: (questions: PendingQuestion[]) => void;
+  answerQuestion: (questionId: string, optionId: string, optionLabel: string) => void;
+  clearPendingQuestions: () => void;
+  setQuestionBlockingStream: (blocking: boolean) => void;
+  setPendingCommands: (commands: CommandOperation[]) => void;
+  addPendingCommand: (command: Omit<CommandOperation, 'id' | 'status'>) => void;
+  updateCommandStatus: (commandId: string, status: CommandStatus, output?: string, exitCode?: number, error?: string) => void;
+  skipCommand: (commandId: string) => void;
+  runCommand: (commandId: string) => Promise<void>;
+  addToCommandAllowlist: (pattern: string, scope?: 'session' | 'workspace' | 'global') => void;
+  removeFromCommandAllowlist: (pattern: string) => void;
+  isCommandAllowed: (command: string) => boolean;
+  clearPendingCommands: () => void;
   setAgentMode: (mode: AgentMode) => void;
   setAgentTasks: (tasks: string[]) => void;
   advanceAgentTask: () => void;
@@ -1862,6 +1919,10 @@ export const useAIStore = create<AIState>()(
       agentTaskIndex: -1,
       webAccessStatus: null,
       webAccessTraces: [],
+      pendingQuestions: [],
+      questionBlockingStream: false,
+      pendingCommands: [],
+      commandAllowlist: [],
       mcpServerStates: [],
       availableModels: {
         ollama: [],
@@ -2086,6 +2147,128 @@ export const useAIStore = create<AIState>()(
             trace.id === traceId ? { ...trace, expanded: !trace.expanded } : trace
           ),
         }));
+      },
+
+      setPendingQuestions: (questions: PendingQuestion[]) => {
+        set({ pendingQuestions: questions });
+      },
+
+      answerQuestion: (questionId: string, optionId: string, optionLabel: string) => {
+        set((state) => {
+          const updatedQuestions = state.pendingQuestions.map((q) =>
+            q.id === questionId
+              ? { ...q, answered: true, selectedOptionId: optionId, selectedOptionLabel: optionLabel }
+              : q
+          );
+          
+          // Check if all questions are now answered
+          const allAnswered = updatedQuestions.every((q) => q.answered);
+          
+          return {
+            pendingQuestions: updatedQuestions,
+            questionBlockingStream: !allAnswered,
+          };
+        });
+      },
+
+      clearPendingQuestions: () => {
+        set({ pendingQuestions: [], questionBlockingStream: false });
+      },
+
+      setQuestionBlockingStream: (blocking: boolean) => {
+        set({ questionBlockingStream: blocking });
+      },
+
+      setPendingCommands: (commands: CommandOperation[]) => {
+        set({ pendingCommands: commands });
+      },
+
+      addPendingCommand: (command) => {
+        const newCommand: CommandOperation = {
+          ...command,
+          id: `cmd-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          status: 'pending',
+        };
+        set((state) => ({
+          pendingCommands: [...state.pendingCommands, newCommand],
+        }));
+      },
+
+      updateCommandStatus: (commandId, status, output, exitCode, error) => {
+        set((state) => ({
+          pendingCommands: state.pendingCommands.map((cmd) =>
+            cmd.id === commandId
+              ? { ...cmd, status, output, exitCode, error }
+              : cmd
+          ),
+        }));
+      },
+
+      skipCommand: (commandId) => {
+        set((state) => ({
+          pendingCommands: state.pendingCommands.map((cmd) =>
+            cmd.id === commandId ? { ...cmd, status: 'skipped' } : cmd
+          ),
+        }));
+      },
+
+      runCommand: async (commandId) => {
+        const { pendingCommands, updateCommandStatus } = get();
+        const command = pendingCommands.find((c) => c.id === commandId);
+        if (!command) return;
+
+        updateCommandStatus(commandId, 'running');
+
+        try {
+          const tauri = await import('../services/tauri');
+          const result = await tauri.shell.executeCommand(command.command);
+          
+          updateCommandStatus(
+            commandId,
+            result.exitCode === 0 ? 'completed' : 'failed',
+            result.stdout + (result.stderr ? '\n' + result.stderr : ''),
+            result.exitCode,
+            result.exitCode !== 0 ? result.stderr : undefined
+          );
+        } catch (error) {
+          updateCommandStatus(
+            commandId,
+            'failed',
+            undefined,
+            undefined,
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      },
+
+      addToCommandAllowlist: (pattern, scope = 'session') => {
+        set((state) => ({
+          commandAllowlist: [
+            ...state.commandAllowlist.filter((e) => e.pattern !== pattern),
+            { pattern, scope, addedAt: new Date().toISOString() },
+          ],
+        }));
+      },
+
+      removeFromCommandAllowlist: (pattern) => {
+        set((state) => ({
+          commandAllowlist: state.commandAllowlist.filter((e) => e.pattern !== pattern),
+        }));
+      },
+
+      isCommandAllowed: (command) => {
+        const { commandAllowlist } = get();
+        return commandAllowlist.some((entry) => {
+          if (entry.pattern.includes('*')) {
+            const regex = new RegExp('^' + entry.pattern.replace(/\*/g, '.*') + '$');
+            return regex.test(command);
+          }
+          return command.startsWith(entry.pattern);
+        });
+      },
+
+      clearPendingCommands: () => {
+        set({ pendingCommands: [] });
       },
 
       setAgentMode: (mode: AgentMode) => {

@@ -17,6 +17,7 @@ interface WorkspaceState {
   removeRecentWorkspace: (id: string) => void;
   loadRecentWorkspaces: () => void;
   openFolder: (folderPath: string) => Promise<void>;
+  createAndOpenWorkspace: (folderPath: string, name: string) => Promise<void>;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>()(
@@ -152,6 +153,104 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           })();
         } catch (error) {
           console.error('Failed to open folder:', error);
+        }
+      },
+
+      createAndOpenWorkspace: async (folderPath: string, name: string) => {
+        console.log('workspaceStore.createAndOpenWorkspace called with:', { folderPath, name });
+        try {
+          const { fs } = await import('../services/tauri');
+          
+          // Check if the directory already exists
+          const exists = await fs.pathExists(folderPath);
+          
+          if (!exists) {
+            // Create the directory
+            console.log('Creating new directory:', folderPath);
+            await fs.createDirectory(folderPath);
+            console.log('Directory created successfully');
+          } else {
+            console.log('Directory already exists:', folderPath);
+          }
+          
+          // Now open the folder as a workspace
+          const workspace: Workspace = {
+            id: crypto.randomUUID(),
+            name,
+            rootPath: folderPath,
+            folders: [folderPath],
+            lastOpened: new Date().toISOString(),
+          };
+          
+          console.log('Setting current workspace:', workspace);
+          get().setCurrentWorkspace(workspace);
+          console.log('Workspace created and set successfully');
+
+          // Close any open files from the previous workspace
+          try {
+            const { useEditorStore } = await import('./editorStore');
+            useEditorStore.getState().closeAllFiles();
+            console.log('Closed open files from previous workspace');
+          } catch (editorError) {
+            console.log('Could not close open files:', editorError);
+          }
+
+          // Update window title with project name
+          try {
+            const { appWindow } = await import('../services/tauri');
+            await appWindow.setTitle(name);
+            console.log('Window title updated to:', name);
+          } catch (titleError) {
+            console.log('Could not update window title:', titleError);
+          }
+
+          // Switch to Explorer tab to show the files
+          try {
+            const { useLayoutStore } = await import('./layoutStore');
+            useLayoutStore.getState().setActiveSideTab('explorer');
+            console.log('Switched to Explorer tab');
+          } catch (layoutError) {
+            console.log('Could not switch to Explorer tab:', layoutError);
+          }
+
+          // Initialize AI chat history for this new workspace
+          try {
+            const { useAIStore } = await import('./aiStore');
+            await useAIStore.getState().loadWorkspaceHistory(folderPath);
+            console.log('AI history initialized for new workspace');
+          } catch (aiError) {
+            console.log('Could not initialize AI history:', aiError);
+          }
+
+          // Initialize git repository (optional, don't fail if git isn't available)
+          try {
+            const { git } = await import('../services/tauri');
+            const isRepo = await git.isGitRepo(folderPath);
+            if (!isRepo) {
+              console.log('New workspace is not a git repo yet');
+            }
+          } catch (gitError) {
+            console.log('Git check not available:', gitError);
+          }
+
+          // Detect project type
+          try {
+            const { useProjectStore } = await import('./projectStore');
+            await useProjectStore.getState().detectProject(folderPath);
+            console.log('Project type detected for new workspace');
+          } catch (projectError) {
+            console.log('Could not detect project type:', projectError);
+          }
+
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { 
+              message: `Created and opened workspace: ${name}`, 
+              type: 'success' 
+            }
+          }));
+        } catch (error) {
+          console.error('Failed to create workspace:', error);
+          throw error;
         }
       },
     }),

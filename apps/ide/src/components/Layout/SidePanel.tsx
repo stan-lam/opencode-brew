@@ -6,6 +6,7 @@ import { CodeReviewPanel } from '../CodeReview/CodeReviewPanel';
 import { TestPanel } from '../Test/TestPanel';
 import { HistoryPanel } from '../History/HistoryPanel';
 import { SettingsPanel } from '../Settings/SettingsPanel';
+import { PlansSidePanel } from '../Plans/PlansSidePanel';
 import styles from './SidePanel.module.css';
 
 const panelTitles: Record<string, string> = {
@@ -13,6 +14,7 @@ const panelTitles: Record<string, string> = {
   search: 'Search',
   git: 'Source Control',
   codeReview: 'Code Review',
+  plans: 'Plans',
   test: 'Test',
   history: 'Local History',
   settings: 'Settings',
@@ -41,6 +43,9 @@ export function SidePanel() {
         </div>
         <div className={styles.panelContainer} style={{ display: activeSideTab === 'codeReview' ? 'flex' : 'none' }}>
           <CodeReviewPanel />
+        </div>
+        <div className={styles.panelContainer} style={{ display: activeSideTab === 'plans' ? 'flex' : 'none' }}>
+          <PlansSidePanel />
         </div>
         <div className={styles.panelContainer} style={{ display: activeSideTab === 'test' ? 'flex' : 'none' }}>
           <TestPanel />

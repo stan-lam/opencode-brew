@@ -1,0 +1,468 @@
+/* ─── Plans Side Panel ─────────────────────────────────────────────────────── */
+
+.plansPanel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary, #1e1e1e);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  background: var(--bg-secondary, #252526);
+}
+
+.panelTitle {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary, #a0a0a0);
+}
+
+.panelStats {
+  font-size: 11px;
+  color: var(--text-muted, #666);
+}
+
+.plansList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+/* ─── Empty State ──────────────────────────────────────────────────────────── */
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.emptyIcon {
+  color: var(--text-muted, #666);
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+
+.emptyState p {
+  font-size: 13px;
+  color: var(--text-secondary, #a0a0a0);
+  margin: 0 0 4px 0;
+}
+
+.emptyHint {
+  font-size: 11px;
+  color: var(--text-muted, #666);
+}
+
+/* ─── Plan Card ────────────────────────────────────────────────────────────── */
+
+.planCard {
+  background: var(--bg-secondary, #252526);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.planHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.15s);
+}
+
+.planHeader:hover {
+  background: var(--bg-hover, #2a2a2a);
+}
+
+.planHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.planHeaderLeft svg {
+  flex-shrink: 0;
+  color: var(--text-muted, #666);
+}
+
+.planIcon {
+  color: var(--accent-blue, #007acc) !important;
+}
+
+.planName {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.planProgress {
+  font-size: 11px;
+  color: var(--text-muted, #666);
+  font-variant-numeric: tabular-nums;
+}
+
+.planMenuBtn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-muted, #666);
+  transition: all var(--transition-fast, 0.15s);
+}
+
+.planMenuBtn:hover {
+  background: var(--bg-tertiary, #333);
+  color: var(--text-primary, #e0e0e0);
+}
+
+.planMenu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg-secondary, #252526);
+  border: 1px solid var(--border-color, #3c3c3c);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  min-width: 150px;
+  overflow: hidden;
+}
+
+.planMenu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-primary, #e0e0e0);
+  text-align: left;
+  transition: background var(--transition-fast, 0.15s);
+}
+
+.planMenu button:hover {
+  background: var(--bg-hover, #2a2a2a);
+}
+
+.planMenu .dangerBtn {
+  color: #f87171;
+}
+
+.planMenu .dangerBtn:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* ─── Plan Content ─────────────────────────────────────────────────────────── */
+
+.planContent {
+  padding: 0 12px 12px;
+}
+
+.progressBar {
+  height: 4px;
+  background: var(--bg-tertiary, #333);
+  border-radius: 2px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e 0%, #4ade80 100%);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ─── Todo List ────────────────────────────────────────────────────────────── */
+
+.todoList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.todoItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.15s);
+}
+
+.todoItem:hover {
+  background: var(--bg-hover, #2a2a2a);
+}
+
+.todoCheckbox {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.todoIconPending {
+  color: var(--text-muted, #666);
+}
+
+.todoIconInProgress {
+  color: #fbbf24;
+}
+
+.todoIconCompleted {
+  color: #22c55e;
+}
+
+.todoIconSkipped {
+  color: var(--text-muted, #666);
+  opacity: 0.6;
+}
+
+.todoContent {
+  font-size: 12px;
+  color: var(--text-primary, #e0e0e0);
+  line-height: 1.4;
+  flex: 1;
+}
+
+.todoStatuspending .todoContent {
+  color: var(--text-primary, #e0e0e0);
+}
+
+.todoStatusinprogress .todoContent {
+  color: #fbbf24;
+}
+
+.todoStatuscompleted .todoContent {
+  color: var(--text-muted, #888);
+  text-decoration: line-through;
+}
+
+.todoStatusskipped .todoContent {
+  color: var(--text-muted, #666);
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.emptyTodos {
+  font-size: 11px;
+  color: var(--text-muted, #666);
+  text-align: center;
+  padding: 12px;
+}
+
+/* ─── Plan File Viewer ─────────────────────────────────────────────────────── */
+
+.planViewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary, #1e1e1e);
+}
+
+.viewerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  background: var(--bg-secondary, #252526);
+}
+
+.viewerTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.viewerTitle svg {
+  color: var(--accent-blue, #007acc);
+}
+
+.viewerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewerActionBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-primary, #e0e0e0);
+  background: var(--bg-tertiary, #333);
+  border-radius: 4px;
+  transition: all var(--transition-fast, 0.15s);
+}
+
+.viewerActionBtn:hover {
+  background: var(--bg-hover, #3a3a3a);
+}
+
+.viewerActionBtn.primary {
+  background: var(--accent-blue, #007acc);
+  color: white;
+}
+
+.viewerActionBtn.primary:hover {
+  background: #0069b3;
+}
+
+.viewerContent {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.viewerTodos {
+  width: 300px;
+  border-right: 1px solid var(--border-color, #3c3c3c);
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.viewerTodosHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.viewerTodosTitle {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary, #a0a0a0);
+}
+
+.viewerTodosCount {
+  font-size: 11px;
+  color: var(--text-muted, #666);
+}
+
+.viewerBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.viewerOverview {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--bg-secondary, #252526);
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #3c3c3c);
+}
+
+.viewerOverview h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+  margin: 0 0 8px 0;
+}
+
+.viewerOverview p {
+  font-size: 13px;
+  color: var(--text-secondary, #a0a0a0);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.viewerMarkdown {
+  font-size: 14px;
+  color: var(--text-primary, #e0e0e0);
+  line-height: 1.6;
+}
+
+.viewerMarkdown h1,
+.viewerMarkdown h2,
+.viewerMarkdown h3 {
+  color: var(--text-primary, #e0e0e0);
+  margin: 24px 0 12px 0;
+}
+
+.viewerMarkdown h1 {
+  font-size: 20px;
+  border-bottom: 1px solid var(--border-color, #3c3c3c);
+  padding-bottom: 8px;
+}
+
+.viewerMarkdown h2 {
+  font-size: 16px;
+}
+
+.viewerMarkdown h3 {
+  font-size: 14px;
+}
+
+.viewerMarkdown p {
+  margin: 0 0 12px 0;
+}
+
+.viewerMarkdown ul,
+.viewerMarkdown ol {
+  margin: 0 0 12px 0;
+  padding-left: 24px;
+}
+
+.viewerMarkdown li {
+  margin-bottom: 4px;
+}
+
+.viewerMarkdown code {
+  background: var(--bg-tertiary, #333);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.viewerMarkdown pre {
+  background: var(--bg-secondary, #252526);
+  padding: 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.viewerMarkdown pre code {
+  background: none;
+  padding: 0;
+}

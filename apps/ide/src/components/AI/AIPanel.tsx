@@ -35,7 +35,7 @@ import {
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage, git } from '../../services/tauri';
 import type { CopilotCachedAccount, CopilotDeviceCode } from '../../services/tauri';
-import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace, SubagentProfile } from '../../store/aiStore';
+import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace, SubagentProfile, PendingQuestion as StorePendingQuestion, CommandOperation, CommandStatus } from '../../store/aiStore';
 import type { AIProvider } from '../../store/aiStore';
 import { ContextBreakdownModal } from './ContextBreakdownModal';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -578,7 +578,16 @@ const getSeverityClassName = (severity: string): string => {
   }
 };
 
-const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string | null => {
+interface PathValidationOptions {
+  allowExternalPaths?: boolean;
+}
+
+const getInvalidPathReason = (
+  filePath: string, 
+  workspaceRoot?: string,
+  options?: PathValidationOptions
+): string | null => {
+  const { allowExternalPaths = false } = options || {};
   const trimmed = filePath.trim();
   if (!trimmed) return 'Path is empty.';
   if (CONTROL_CHAR_REGEX.test(trimmed)) return 'Path contains control characters.';
@@ -592,17 +601,20 @@ const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string 
   const hasInvalidChars = INVALID_PATH_CHARS_REGEX.test(trimmed)
     && !/^[a-zA-Z]:[\\/]/.test(trimmed);
   if (hasInvalidChars) return 'Path contains invalid filename characters.';
-  if (isAbsolute && !workspaceRoot) {
+  
+  // When allowExternalPaths is true, skip workspace containment checks for absolute paths
+  if (isAbsolute && !workspaceRoot && !allowExternalPaths) {
     return 'Absolute paths are not allowed.';
   }
 
-  if (isAbsolute && workspaceRoot) {
+  if (isAbsolute && workspaceRoot && !allowExternalPaths) {
     const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
     if (!normalized.startsWith(`${rootNormalized}/`) && normalized !== rootNormalized) {
       return 'Path is outside the workspace.';
     }
   }
 
+  // Path traversal is still blocked even for external paths
   const rootNormalized = workspaceRoot ? workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '') : '';
   const relativeCandidate = rootNormalized && normalized.startsWith(rootNormalized)
     ? normalized.slice(rootNormalized.length)
@@ -973,7 +985,226 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
     });
   }
   
+  // Deduplication: Remove duplicate operations on the same path
+  // Keep the last operation for each path (most recent wins)
+  const seenPaths = new Map<string, number>();
+  const deduplicatedOps: FileOperation[] = [];
+  
+  for (let i = operations.length - 1; i >= 0; i--) {
+    const op = operations[i];
+    const key = `${op.type}:${op.path}`;
+    
+    if (!seenPaths.has(key)) {
+      seenPaths.set(key, i);
+      deduplicatedOps.unshift(op);
+    } else {
+      // For create operations, if we see duplicates, the content might be different
+      // Check if content is identical to avoid losing unique operations
+      const existingIdx = seenPaths.get(key)!;
+      const existingOp = operations[existingIdx];
+      
+      if (op.type === 'create' && existingOp.type === 'create') {
+        // Keep both if content differs significantly
+        const contentSimilar = op.content === existingOp.content || 
+          (op.content && existingOp.content && 
+           Math.abs(op.content.length - existingOp.content.length) < 50 &&
+           op.content.substring(0, 100) === existingOp.content.substring(0, 100));
+        
+        if (!contentSimilar) {
+          // Mark the earlier one as potentially conflicting
+          const conflictOp = { ...op, invalidReason: op.invalidReason || 'Duplicate operation detected - review carefully.' };
+          deduplicatedOps.unshift(conflictOp);
+        }
+      }
+    }
+  }
+  
+  // Validate operation sequence: warn if delete followed by create on same path
+  const pathOperationOrder = new Map<string, string[]>();
+  for (const op of deduplicatedOps) {
+    const ops = pathOperationOrder.get(op.path) || [];
+    ops.push(op.type);
+    pathOperationOrder.set(op.path, ops);
+  }
+  
+  // Mark potential issues
+  for (let i = 0; i < deduplicatedOps.length; i++) {
+    const op = deduplicatedOps[i];
+    const pathOps = pathOperationOrder.get(op.path) || [];
+    
+    // If there's a delete followed by create on same path, that's a recreate pattern - acceptable
+    // If there's create followed by edit on same path, that's normal
+    // If there's multiple creates with different content, warn
+    if (op.type === 'create' && pathOps.filter(t => t === 'create').length > 1 && !op.invalidReason) {
+      deduplicatedOps[i] = { 
+        ...op, 
+        invalidReason: 'Multiple create operations for same file - review for conflicts.' 
+      };
+    }
+  }
+  
+  return deduplicatedOps;
+}
+
+// Interactive question types for AI clarification
+interface QuestionOption {
+  id: string;
+  label: string;
+  recommended?: boolean;
+}
+
+interface PendingQuestion {
+  id: string;
+  title?: string;
+  question: string;
+  options: QuestionOption[];
+  answered?: boolean;
+  selectedOptionId?: string;
+  selectedOptionLabel?: string;
+}
+
+// Parse interactive questions from AI response
+function parseQuestions(content: string): PendingQuestion[] {
+  const questions: PendingQuestion[] = [];
+  
+  // Match <ask_question> tags with id and optional title
+  const questionRegex = /<ask_question\s+id="([^"]+)"(?:\s+title="([^"]*)")?\s*>([\s\S]*?)<\/ask_question>/g;
+  let match;
+  
+  while ((match = questionRegex.exec(content)) !== null) {
+    const id = match[1];
+    const title = match[2] || undefined;
+    const body = match[3];
+    
+    // Extract the question text
+    const questionMatch = /<question>([\s\S]*?)<\/question>/.exec(body);
+    const questionText = questionMatch ? questionMatch[1].trim() : '';
+    
+    if (!questionText) continue;
+    
+    // Extract options
+    const options: QuestionOption[] = [];
+    const optionRegex = /<option\s+id="([^"]+)"(?:\s+recommended="(true)")?\s*>([\s\S]*?)<\/option>/g;
+    let optionMatch;
+    
+    while ((optionMatch = optionRegex.exec(body)) !== null) {
+      options.push({
+        id: optionMatch[1],
+        label: optionMatch[3].trim(),
+        recommended: optionMatch[2] === 'true',
+      });
+    }
+    
+    // Only add if we have at least 2 options
+    if (options.length >= 2) {
+      questions.push({
+        id,
+        title,
+        question: questionText,
+        options,
+        answered: false,
+      });
+    }
+  }
+  
+  return questions;
+}
+
+// Clean question tags from content for display
+function cleanQuestionTags(content: string): string {
+  return content.replace(/<ask_question\s+id="[^"]+"(?:\s+title="[^"]*")?\s*>[\s\S]*?<\/ask_question>/g, '').trim();
+}
+
+// Workspace operation types for creating new projects outside current workspace
+interface WorkspaceOperation {
+  type: 'create_workspace';
+  path: string;
+  name: string;
+  description?: string;
+  invalidReason?: string;
+}
+
+// Parse workspace creation operations from AI response
+function parseWorkspaceOperations(content: string): WorkspaceOperation[] {
+  const operations: WorkspaceOperation[] = [];
+  
+  // Match <create_workspace> tags with path and name attributes
+  const workspaceRegex = /<create_workspace\s+path="([^"]+)"\s+name="([^"]+)"(?:\s*>[\s\S]*?<description>([\s\S]*?)<\/description>[\s\S]*?<\/create_workspace>|\s*\/>)/g;
+  let match;
+  
+  while ((match = workspaceRegex.exec(content)) !== null) {
+    const path = match[1].trim();
+    const name = match[2].trim();
+    const description = match[3]?.trim();
+    
+    // Basic validation
+    let invalidReason: string | undefined;
+    if (!path) {
+      invalidReason = 'Workspace path is empty.';
+    } else if (!name) {
+      invalidReason = 'Workspace name is empty.';
+    } else if (!/^\/|^[a-zA-Z]:[\\/]/.test(path)) {
+      invalidReason = 'Workspace path must be an absolute path.';
+    } else if (/\.\./.test(path)) {
+      invalidReason = 'Path traversal is not allowed in workspace paths.';
+    }
+    
+    operations.push({
+      type: 'create_workspace',
+      path,
+      name,
+      description,
+      invalidReason,
+    });
+  }
+  
   return operations;
+}
+
+// Clean workspace operation tags from content for display
+function cleanWorkspaceOperationTags(content: string): string {
+  return content
+    .replace(/<create_workspace\s+path="[^"]+"\s+name="[^"]+"(?:\s*>[\s\S]*?<\/create_workspace>|\s*\/>)/g, '')
+    .trim();
+}
+
+// Command operation types for terminal command execution
+interface ParsedCommand {
+  command: string;
+  description?: string;
+  sandbox?: boolean;
+}
+
+// Parse command operations from AI response
+function parseCommandOperations(content: string): ParsedCommand[] {
+  const commands: ParsedCommand[] = [];
+  
+  // Match <run_command> tags with optional description and sandbox attributes
+  const commandRegex = /<run_command(?:\s+description="([^"]*)")?(?:\s+sandbox="(true|false)")?\s*>([\s\S]*?)<\/run_command>/g;
+  let match;
+  
+  while ((match = commandRegex.exec(content)) !== null) {
+    const description = match[1] || undefined;
+    const sandbox = match[2] === 'true';
+    const command = match[3].trim();
+    
+    if (command) {
+      commands.push({
+        command,
+        description,
+        sandbox,
+      });
+    }
+  }
+  
+  return commands;
+}
+
+// Clean command tags from content for display
+function cleanCommandTags(content: string): string {
+  return content
+    .replace(/<run_command(?:\s+description="[^"]*")?(?:\s+sandbox="(?:true|false)")?\s*>[\s\S]*?<\/run_command>/g, '')
+    .trim();
 }
 
 // Plan mode types
@@ -1237,25 +1468,16 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
     setIsSaving(true);
     
     try {
-      // Generate filename from plan title
-      const filename = plan.title.toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
+      const { usePlanStore } = await import('../../store/planStore');
+      const planStore = usePlanStore.getState();
       
-      const filePath = `${currentWorkspace.rootPath}/.plan-${filename}.md`;
-      
-      // Build markdown content
-      let content = `# ${plan.title}\n\n`;
-      content += `> Plan created: ${new Date().toLocaleString()}\n\n`;
-      
-      if (plan.overview) {
-        content += `## Overview\n\n${plan.overview}\n\n`;
-      }
+      // Build markdown content for the plan body
+      let content = '';
       
       if (plan.approaches.length > 0) {
         content += `## Approaches\n\n`;
         plan.approaches.forEach((approach) => {
-          content += `### ${approach.name}${approach.recommended ? ' ⭐ (Recommended)' : ''}\n\n`;
+          content += `### ${approach.name}${approach.recommended ? ' (Recommended)' : ''}\n\n`;
           if (approach.pros.length > 0) {
             content += `**Pros:**\n`;
             approach.pros.forEach(pro => content += `- ${pro}\n`);
@@ -1269,19 +1491,6 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
         });
       }
       
-      // Add tasks section with current state
-      content += `## Tasks\n\n`;
-      tasks.forEach(task => {
-        // Map status to checkbox marker
-        let marker = ' ';
-        if (task.status === 'completed') marker = 'x';
-        else if (task.status === 'in-progress') marker = '>';
-        else if (task.status === 'skipped') marker = '-';
-        
-        content += `- [${marker}] ${task.text}\n`;
-      });
-      content += '\n';
-      
       if (plan.architecture) {
         content += `## Architecture\n\n\`\`\`mermaid\n${plan.architecture}\n\`\`\`\n\n`;
       }
@@ -1292,12 +1501,25 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
         content += '\n';
       }
       
-      content += `---\n\n*This plan is managed by OpenCodeBrew. Edit tasks above and save to update.*\n`;
+      // Convert tasks to PlanTodo format
+      const todos = tasks.map(task => ({
+        id: task.id,
+        content: task.text,
+        status: task.status === 'in-progress' ? 'in_progress' as const : task.status as 'pending' | 'completed' | 'skipped',
+      }));
       
-      await fs.writeFile(filePath, content);
+      // Create plan using planStore
+      const savedPlan = await planStore.createPlan(
+        plan.title,
+        content,
+        todos
+      );
+      
+      // Open the plan file in editor
+      await planStore.openPlanInEditor(savedPlan.id);
       
       window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: { message: `Plan saved to ${filename}.md`, type: 'success' }
+        detail: { message: `Plan saved and opened: ${plan.title}`, type: 'success' }
       }));
       
     } catch (error) {
@@ -1794,6 +2016,284 @@ function MermaidDiagram({ chart, id }: { chart: string; id: string }) {
   );
 }
 
+// Component to display interactive AI questions with option selection
+interface QuestionBlockProps {
+  question: PendingQuestion;
+  onAnswer: (questionId: string, optionId: string, optionLabel: string) => void;
+  disabled?: boolean;
+}
+
+function QuestionBlock({ question, onAnswer, disabled }: QuestionBlockProps) {
+  const isAnswered = question.answered && question.selectedOptionId;
+  
+  return (
+    <div className={`${styles.questionBlock} ${isAnswered ? styles.questionBlockAnswered : ''}`}>
+      <div className={styles.questionHeader}>
+        <div className={styles.questionIcon}>
+          {isAnswered ? (
+            <Check size={16} />
+          ) : (
+            <MessageSquare size={16} />
+          )}
+        </div>
+        <h4 className={styles.questionTitle}>
+          {question.title || 'Question'}
+        </h4>
+      </div>
+      
+      <p className={styles.questionText}>{question.question}</p>
+      
+      <div className={styles.questionOptions}>
+        {question.options.map((option) => {
+          const isSelected = question.selectedOptionId === option.id;
+          return (
+            <button
+              key={option.id}
+              className={`${styles.questionOption} ${option.recommended ? styles.questionOptionRecommended : ''} ${isSelected ? styles.questionOptionSelected : ''}`}
+              onClick={() => !disabled && !isAnswered && onAnswer(question.id, option.id, option.label)}
+              disabled={disabled || isAnswered}
+            >
+              <div className={styles.questionOptionRadio} />
+              <div className={styles.questionOptionContent}>
+                <span className={styles.questionOptionLabel}>
+                  {option.label}
+                  {option.recommended && (
+                    <span className={styles.questionOptionBadge}>
+                      <Zap size={10} />
+                      Recommended
+                    </span>
+                  )}
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      
+      {isAnswered && question.selectedOptionLabel && (
+        <div className={styles.questionAnsweredBanner}>
+          <div className={styles.questionAnsweredIcon}>
+            <Check size={12} />
+          </div>
+          <span className={styles.questionAnsweredText}>
+            Selected: <strong>{question.selectedOptionLabel}</strong>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Component to display workspace creation request with confirmation
+interface WorkspaceCreationBlockProps {
+  operation: WorkspaceOperation;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isCreating?: boolean;
+  isCreated?: boolean;
+}
+
+function WorkspaceCreationBlock({ operation, onConfirm, onCancel, isCreating, isCreated }: WorkspaceCreationBlockProps) {
+  if (operation.invalidReason) {
+    return (
+      <div className={`${styles.workspaceBlock} ${styles.workspaceBlockInvalid}`}>
+        <div className={styles.workspaceHeader}>
+          <div className={styles.workspaceIcon}>
+            <AlertTriangle size={16} />
+          </div>
+          <h4 className={styles.workspaceTitle}>Invalid Workspace Request</h4>
+        </div>
+        <p className={styles.workspaceError}>{operation.invalidReason}</p>
+        <div className={styles.workspaceDetails}>
+          <div className={styles.workspaceDetail}>
+            <span className={styles.workspaceDetailLabel}>Path:</span>
+            <code className={styles.workspaceDetailValue}>{operation.path}</code>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${styles.workspaceBlock} ${isCreated ? styles.workspaceBlockCreated : ''}`}>
+      <div className={styles.workspaceHeader}>
+        <div className={styles.workspaceIcon}>
+          {isCreated ? <Check size={16} /> : <FolderOpen size={16} />}
+        </div>
+        <h4 className={styles.workspaceTitle}>
+          {isCreated ? 'Workspace Created' : 'Create New Workspace'}
+        </h4>
+      </div>
+      
+      <div className={styles.workspaceDetails}>
+        <div className={styles.workspaceDetail}>
+          <span className={styles.workspaceDetailLabel}>Name:</span>
+          <span className={styles.workspaceDetailValue}>{operation.name}</span>
+        </div>
+        <div className={styles.workspaceDetail}>
+          <span className={styles.workspaceDetailLabel}>Path:</span>
+          <code className={styles.workspaceDetailValue}>{operation.path}</code>
+        </div>
+        {operation.description && (
+          <div className={styles.workspaceDetail}>
+            <span className={styles.workspaceDetailLabel}>Description:</span>
+            <span className={styles.workspaceDetailValue}>{operation.description}</span>
+          </div>
+        )}
+      </div>
+      
+      {!isCreated && (
+        <div className={styles.workspaceActions}>
+          <button
+            className={styles.workspaceConfirmBtn}
+            onClick={onConfirm}
+            disabled={isCreating}
+          >
+            {isCreating ? (
+              <>
+                <Loader2 size={14} className={styles.spinning} />
+                Creating...
+              </>
+            ) : (
+              <>
+                <FolderOpen size={14} />
+                Create & Open Workspace
+              </>
+            )}
+          </button>
+          <button
+            className={styles.workspaceCancelBtn}
+            onClick={onCancel}
+            disabled={isCreating}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      
+      {isCreated && (
+        <div className={styles.workspaceCreatedBanner}>
+          <Check size={14} />
+          <span>Workspace created and opened successfully!</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Component to display command execution request with approval buttons
+interface CommandApprovalBlockProps {
+  command: ParsedCommand;
+  commandId: string;
+  status: 'pending' | 'approved' | 'running' | 'completed' | 'skipped' | 'failed';
+  output?: string;
+  exitCode?: number;
+  error?: string;
+  onSkip: () => void;
+  onAlwaysRun: () => void;
+  onRun: () => void;
+}
+
+function CommandApprovalBlock({
+  command,
+  commandId,
+  status,
+  output,
+  exitCode,
+  error,
+  onSkip,
+  onAlwaysRun,
+  onRun,
+}: CommandApprovalBlockProps) {
+  const [outputExpanded, setOutputExpanded] = useState(true);
+
+  return (
+    <div className={`${styles.commandBlock} ${styles[`commandBlock${status.charAt(0).toUpperCase()}${status.slice(1)}`]}`}>
+      <div className={styles.commandHeader}>
+        <div className={styles.commandHeaderLeft}>
+          <TerminalIcon size={14} className={styles.commandIcon} />
+          <span className={styles.commandDescription}>
+            {command.description || 'Run command'}
+          </span>
+          {command.sandbox && (
+            <span className={styles.commandSandboxBadge}>Sandbox</span>
+          )}
+        </div>
+        {status === 'running' && (
+          <Loader2 size={14} className={styles.spinning} />
+        )}
+        {status === 'completed' && (
+          <Check size={14} className={styles.commandIconCompleted} />
+        )}
+        {status === 'failed' && (
+          <AlertTriangle size={14} className={styles.commandIconFailed} />
+        )}
+        {status === 'skipped' && (
+          <span className={styles.commandSkippedBadge}>Skipped</span>
+        )}
+      </div>
+
+      <pre className={styles.commandCode}>{command.command}</pre>
+
+      {status === 'pending' && (
+        <div className={styles.commandApprovalActions}>
+          <span className={styles.commandPendingLabel}>Pending approval</span>
+          <div className={styles.commandApprovalButtons}>
+            <button
+              className={styles.commandSkipBtn}
+              onClick={onSkip}
+              title="Skip this command"
+            >
+              Skip
+            </button>
+            <button
+              className={styles.commandAlwaysRunBtn}
+              onClick={onAlwaysRun}
+              title="Always run commands like this"
+            >
+              Always Run
+            </button>
+            <button
+              className={styles.commandRunBtn}
+              onClick={onRun}
+              title="Run this command"
+            >
+              Run
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(status === 'running' || status === 'completed' || status === 'failed') && output && (
+        <div className={styles.commandOutput}>
+          <div
+            className={styles.commandOutputHeader}
+            onClick={() => setOutputExpanded(!outputExpanded)}
+          >
+            {outputExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span>Output</span>
+            {status === 'completed' && exitCode !== undefined && (
+              <span className={styles.commandExitCode}>
+                Exit code: {exitCode}
+              </span>
+            )}
+          </div>
+          {outputExpanded && (
+            <pre className={styles.commandOutputContent}>{output}</pre>
+          )}
+        </div>
+      )}
+
+      {status === 'failed' && error && (
+        <div className={styles.commandError}>
+          <AlertTriangle size={12} />
+          <span>{error}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Component to warn about code blocks being filtered in Plan Mode
 function CodeBlockWarning({ count, onSwitchToAgent }: { count: number; onSwitchToAgent: () => void }) {
   const [dismissed, setDismissed] = useState(false);
@@ -2265,13 +2765,14 @@ function DiffViewer({ text, title }: { text: string; title?: string }) {
 
 type PlainTextKind = 'text' | 'diff';
 
-function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTextTitle, plainTextDefaultExpanded, plainTextKind }: { 
+function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTextTitle, plainTextDefaultExpanded, plainTextKind, onImagePreview }: {
   message: AIMessage;
   onOperationsChange?: (ops: FileOperation[]) => void;
   renderAsPlainText?: boolean;
   plainTextTitle?: string;
   plainTextDefaultExpanded?: boolean;
   plainTextKind?: PlainTextKind;
+  onImagePreview?: (src: string, name: string) => void;
 }) {
   const isUser = message.role === 'user';
   const [pendingOps, setPendingOps] = useState<FileOperation[]>([]);
@@ -2279,9 +2780,33 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
   const [actionableTasks, setActionableTasks] = useState<string[]>([]);
   const [codeBlockTasks, setCodeBlockTasks] = useState<string[]>([]);
   const [hasImplementationOffer, setHasImplementationOffer] = useState(false);
-  const { currentWorkspace} = useWorkspaceStore();
+  const [localQuestions, setLocalQuestions] = useState<PendingQuestion[]>([]);
+  const [workspaceOps, setWorkspaceOps] = useState<WorkspaceOperation[]>([]);
+  const [workspaceCreating, setWorkspaceCreating] = useState<string | null>(null);
+  const [workspaceCreated, setWorkspaceCreated] = useState<string | null>(null);
+  const [localCommands, setLocalCommands] = useState<{ parsed: ParsedCommand; operation: CommandOperation }[]>([]);
+  const { currentWorkspace, createAndOpenWorkspace } = useWorkspaceStore();
   const { openFile } = useEditorStore();
-  const { agentMode, setAgentMode, sendMessage, setAgentTasks, queuePrompt } = useAIStore();
+  const { 
+    agentMode, 
+    setAgentMode, 
+    sendMessage, 
+    setAgentTasks, 
+    queuePrompt,
+    pendingQuestions,
+    setPendingQuestions,
+    answerQuestion,
+    setQuestionBlockingStream,
+    activeConversation,
+    pendingCommands,
+    setPendingCommands,
+    addPendingCommand,
+    updateCommandStatus,
+    skipCommand,
+    runCommand,
+    addToCommandAllowlist,
+    isCommandAllowed,
+  } = useAIStore();
 
   const removeChecklistSections = useCallback((content: string, checklists: Checklist[]): string => {
     if (checklists.length === 0) return content;
@@ -2338,6 +2863,99 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
     navigator.clipboard.writeText(message.content);
   };
 
+  // Handle workspace creation
+  const handleCreateWorkspace = useCallback(async (operation: WorkspaceOperation) => {
+    if (operation.invalidReason || !createAndOpenWorkspace) return;
+    
+    setWorkspaceCreating(operation.path);
+    try {
+      await createAndOpenWorkspace(operation.path, operation.name);
+      setWorkspaceCreated(operation.path);
+      setWorkspaceCreating(null);
+      
+      // Send a confirmation message to continue the conversation
+      sendMessage(`Workspace "${operation.name}" has been created at ${operation.path}. Please proceed with setting up the project.`);
+    } catch (error) {
+      console.error('Failed to create workspace:', error);
+      setWorkspaceCreating(null);
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: { message: `Failed to create workspace: ${error}`, type: 'error' }
+      }));
+    }
+  }, [createAndOpenWorkspace, sendMessage]);
+
+  const handleCancelWorkspace = useCallback(() => {
+    // Just dismiss the workspace creation block
+    setWorkspaceOps([]);
+    sendMessage('I decided not to create this workspace. Please suggest an alternative approach or let me create the project manually.');
+  }, [sendMessage]);
+
+  // Handle command actions
+  const handleSkipCommand = useCallback((commandId: string) => {
+    skipCommand(commandId);
+    setLocalCommands(prev => prev.map(c => 
+      c.operation.id === commandId 
+        ? { ...c, operation: { ...c.operation, status: 'skipped' as CommandStatus } }
+        : c
+    ));
+  }, [skipCommand]);
+
+  const handleAlwaysRunCommand = useCallback((commandId: string, command: string) => {
+    // Add to allowlist (pattern is the first part of the command up to first space or first 20 chars)
+    const pattern = command.split(' ')[0];
+    addToCommandAllowlist(pattern);
+    
+    // Then run the command
+    runCommand(commandId);
+    setLocalCommands(prev => prev.map(c => 
+      c.operation.id === commandId 
+        ? { ...c, operation: { ...c.operation, status: 'running' as CommandStatus } }
+        : c
+    ));
+  }, [addToCommandAllowlist, runCommand]);
+
+  const handleRunCommand = useCallback((commandId: string) => {
+    runCommand(commandId);
+    setLocalCommands(prev => prev.map(c => 
+      c.operation.id === commandId 
+        ? { ...c, operation: { ...c.operation, status: 'running' as CommandStatus } }
+        : c
+    ));
+  }, [runCommand]);
+
+  // Handle answering an interactive question
+  const handleAnswerQuestion = useCallback((questionId: string, optionId: string, optionLabel: string) => {
+    // Update local state
+    setLocalQuestions(prev => prev.map(q => 
+      q.id === questionId 
+        ? { ...q, answered: true, selectedOptionId: optionId, selectedOptionLabel: optionLabel }
+        : q
+    ));
+    
+    // Update store state
+    answerQuestion(questionId, optionId, optionLabel);
+    
+    // Check if all questions are now answered
+    const updatedQuestions = localQuestions.map(q => 
+      q.id === questionId ? { ...q, answered: true } : q
+    );
+    const allAnswered = updatedQuestions.every(q => q.answered);
+    
+    if (allAnswered) {
+      // Build the answer context and send as a follow-up message
+      const answersText = updatedQuestions.map(q => {
+        const selected = q.id === questionId 
+          ? optionLabel 
+          : q.selectedOptionLabel || '';
+        return `**${q.title || 'Question'}:** ${selected}`;
+      }).join('\n');
+      
+      // Send the answers as user response to continue the conversation
+      sendMessage(`Based on my selections:\n\n${answersText}\n\nPlease proceed with the implementation.`);
+      setQuestionBlockingStream(false);
+    }
+  }, [localQuestions, answerQuestion, sendMessage, setQuestionBlockingStream]);
+
   // Switch to agent mode and auto-send tasks one-by-one so progress can be tracked
   const handleImplementInAgent = useCallback((tasks: string[]) => {
     if (tasks.length === 0) return;
@@ -2382,6 +3000,88 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           checklists: planComps.checklists.length,
           decisions: planComps.decisions.length
         });
+      }
+      
+      // Parse interactive questions
+      const questions = parseQuestions(message.content);
+      if (questions.length > 0) {
+        // Merge with existing answered state from store
+        const storeQuestions = pendingQuestions.filter(q => q.messageId === message.id);
+        const mergedQuestions = questions.map(q => {
+          const existing = storeQuestions.find(sq => sq.id === q.id);
+          if (existing) {
+            return { ...q, answered: existing.answered, selectedOptionId: existing.selectedOptionId, selectedOptionLabel: existing.selectedOptionLabel };
+          }
+          return q;
+        });
+        setLocalQuestions(mergedQuestions);
+        
+        // If there are unanswered questions, update the store
+        const unansweredQuestions = mergedQuestions.filter(q => !q.answered);
+        if (unansweredQuestions.length > 0 && activeConversation) {
+          const storeFormatQuestions: StorePendingQuestion[] = mergedQuestions.map(q => ({
+            ...q,
+            messageId: message.id,
+            conversationId: activeConversation.id,
+          }));
+          setPendingQuestions(storeFormatQuestions);
+          setQuestionBlockingStream(true);
+        }
+      } else {
+        setLocalQuestions([]);
+      }
+      
+      // Parse workspace creation operations
+      const wsOps = parseWorkspaceOperations(message.content);
+      setWorkspaceOps(wsOps);
+      
+      // Parse command operations
+      const parsedCmds = parseCommandOperations(message.content);
+      if (parsedCmds.length > 0 && activeConversation) {
+        // Check existing pending commands from store
+        const existingCmds = pendingCommands.filter(c => c.messageId === message.id);
+        
+        // Create or update command operations
+        const commandsWithOps = parsedCmds.map((parsed, idx) => {
+          const existing = existingCmds[idx];
+          if (existing) {
+            return { parsed, operation: existing };
+          }
+          
+          // Check if command is in allowlist and auto-run if so
+          const shouldAutoRun = isCommandAllowed(parsed.command);
+          
+          const newOp: CommandOperation = {
+            id: `cmd-${message.id}-${idx}-${Date.now()}`,
+            command: parsed.command,
+            description: parsed.description,
+            sandbox: parsed.sandbox,
+            status: shouldAutoRun ? 'approved' : 'pending',
+            messageId: message.id,
+            conversationId: activeConversation.id,
+          };
+          
+          return { parsed, operation: newOp };
+        });
+        
+        setLocalCommands(commandsWithOps);
+        
+        // Update store with new pending commands
+        const newPendingCmds = commandsWithOps
+          .filter(c => c.operation.status === 'pending' || c.operation.status === 'approved')
+          .map(c => c.operation);
+        if (newPendingCmds.length > 0) {
+          setPendingCommands([...pendingCommands.filter(c => c.messageId !== message.id), ...newPendingCmds]);
+        }
+        
+        // Auto-run commands that are in the allowlist
+        commandsWithOps.forEach(({ operation }) => {
+          if (operation.status === 'approved') {
+            runCommand(operation.id);
+          }
+        });
+      } else {
+        setLocalCommands([]);
       }
       
       // Detect actionable tasks and code blocks in Plan Mode
@@ -2671,7 +3371,13 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
   };
 
   const assistantContent = useMemo(() => {
-    const cleaned = getCleanedContent(message.content);
+    let cleaned = getCleanedContent(message.content);
+    // Clean question tags from display since they're rendered separately
+    cleaned = cleanQuestionTags(cleaned);
+    // Clean workspace operation tags from display since they're rendered separately
+    cleaned = cleanWorkspaceOperationTags(cleaned);
+    // Clean command tags from display since they're rendered separately
+    cleaned = cleanCommandTags(cleaned);
     return removeChecklistSections(cleaned, planComponents.checklists);
   }, [message.content, planComponents.checklists, removeChecklistSections]);
 
@@ -2700,6 +3406,8 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
                   src={attachment.data} 
                   alt={attachment.name} 
                   className={styles.messageAttachmentImage}
+                  onClick={() => onImagePreview?.(attachment.data!, attachment.name)}
+                  style={{ cursor: 'pointer' }}
                 />
               ) : (
                 <div className={styles.messageAttachmentFile}>
@@ -2790,6 +3498,59 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           {planComponents.decisions.map((decision, idx) => (
             <DecisionView key={idx} decision={decision} />
           ))}
+        </div>
+      )}
+      {!isUser && localQuestions.length > 0 && (
+        <div className={styles.questionsContainer}>
+          {localQuestions.map((question) => (
+            <QuestionBlock
+              key={question.id}
+              question={question}
+              onAnswer={handleAnswerQuestion}
+              disabled={false}
+            />
+          ))}
+        </div>
+      )}
+      {!isUser && workspaceOps.length > 0 && (
+        <div className={styles.workspaceOpsContainer}>
+          {workspaceOps.map((op) => (
+            <WorkspaceCreationBlock
+              key={op.path}
+              operation={op}
+              onConfirm={() => handleCreateWorkspace(op)}
+              onCancel={handleCancelWorkspace}
+              isCreating={workspaceCreating === op.path}
+              isCreated={workspaceCreated === op.path}
+            />
+          ))}
+        </div>
+      )}
+      {!isUser && localCommands.length > 0 && (
+        <div className={styles.commandOpsContainer}>
+          {localCommands.map(({ parsed, operation }) => {
+            // Get the latest status from store if available
+            const storeCmd = pendingCommands.find(c => c.id === operation.id);
+            const currentStatus = storeCmd?.status || operation.status;
+            const currentOutput = storeCmd?.output || operation.output;
+            const currentExitCode = storeCmd?.exitCode ?? operation.exitCode;
+            const currentError = storeCmd?.error || operation.error;
+            
+            return (
+              <CommandApprovalBlock
+                key={operation.id}
+                command={parsed}
+                commandId={operation.id}
+                status={currentStatus}
+                output={currentOutput}
+                exitCode={currentExitCode}
+                error={currentError}
+                onSkip={() => handleSkipCommand(operation.id)}
+                onAlwaysRun={() => handleAlwaysRunCommand(operation.id, parsed.command)}
+                onRun={() => handleRunCommand(operation.id)}
+              />
+            );
+          })}
         </div>
       )}
       {!isUser && agentMode === 'plan' && codeBlockTasks.length > 0 && (
@@ -4663,6 +5424,12 @@ export function AIPanel() {
     agentTasks,
     webAccessStatus,
     webAccessTraces,
+    pendingQuestions,
+    questionBlockingStream,
+    setPendingQuestions,
+    answerQuestion,
+    clearPendingQuestions,
+    setQuestionBlockingStream,
     sessionUsage,
     lastMessageUsage,
     contextBreakdown,
@@ -4708,6 +5475,7 @@ export function AIPanel() {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; name: string } | null>(null);
   const [allPendingOps, setAllPendingOps] = useState<PendingFileOperation[]>([]);
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
   const [showFileOps, setShowFileOps] = useState(false);
@@ -4727,6 +5495,18 @@ export function AIPanel() {
       setSelectedSubagentProfileId(next);
     }
   }, [config.defaultSubagentProfileId, subagentProfiles, selectedSubagentProfileId]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPreviewImage(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [previewImage]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { deleteConversation, importConversationsFromPath } = useAIStore();
@@ -5460,31 +6240,59 @@ export function AIPanel() {
   };
 
   useEffect(() => {
+    let mounted = true;
     let unlistenDrop: (() => void) | null = null;
     let unlistenHover: (() => void) | null = null;
     let unlistenCancel: (() => void) | null = null;
 
     const setup = async () => {
       console.log('[AIPanel] Setting up Tauri native file drop listeners');
-      unlistenDrop = await appEvents.onFileDrop(async (paths) => {
-        console.log('[AIPanel] Tauri file-drop event received, paths:', paths);
-        setIsDragging(false);
-        await handleFilePathUpload(paths);
-      });
-      unlistenHover = await appEvents.onFileDropHover((paths) => {
-        console.log('[AIPanel] Tauri file-drop-hover event, paths:', paths);
-        setIsDragging(true);
-      });
-      unlistenCancel = await appEvents.onFileDropCancel(() => {
-        console.log('[AIPanel] Tauri file-drop-cancelled event');
-        setIsDragging(false);
-      });
-      console.log('[AIPanel] Tauri native file drop listeners set up');
+      try {
+        const dropUnsub = await appEvents.onFileDrop(async (paths) => {
+          console.log('[AIPanel] Tauri file-drop event received, paths:', paths);
+          if (!mounted) {
+            console.log('[AIPanel] Component unmounted, ignoring drop event');
+            return;
+          }
+          setIsDragging(false);
+          await handleFilePathUpload(paths);
+        });
+        if (mounted) {
+          unlistenDrop = dropUnsub;
+        } else {
+          dropUnsub();
+        }
+
+        const hoverUnsub = await appEvents.onFileDropHover((paths) => {
+          console.log('[AIPanel] Tauri file-drop-hover event, paths:', paths);
+          if (mounted) setIsDragging(true);
+        });
+        if (mounted) {
+          unlistenHover = hoverUnsub;
+        } else {
+          hoverUnsub();
+        }
+
+        const cancelUnsub = await appEvents.onFileDropCancel(() => {
+          console.log('[AIPanel] Tauri file-drop-cancelled event');
+          if (mounted) setIsDragging(false);
+        });
+        if (mounted) {
+          unlistenCancel = cancelUnsub;
+        } else {
+          cancelUnsub();
+        }
+
+        console.log('[AIPanel] Tauri native file drop listeners set up successfully');
+      } catch (error) {
+        console.error('[AIPanel] Failed to set up Tauri file drop listeners:', error);
+      }
     };
 
     setup();
 
     return () => {
+      mounted = false;
       unlistenDrop?.();
       unlistenHover?.();
       unlistenCancel?.();
@@ -6760,6 +7568,7 @@ export function AIPanel() {
                 plainTextTitle={isCodeReviewPrompt ? 'Review Input' : (isStreamingAssistant ? 'Streaming' : undefined)}
                 plainTextDefaultExpanded={isStreamingAssistant}
                   plainTextKind={isCodeReviewPrompt ? 'diff' : 'text'}
+                onImagePreview={(src, name) => setPreviewImage({ src, name })}
                 onOperationsChange={async (ops) => {
                   const { isFileOperationKept } = useAIStore.getState();
 
@@ -7104,7 +7913,11 @@ export function AIPanel() {
               {attachments.map((attachment) => (
                 <div key={attachment.id} className={styles.attachmentItem}>
                   {attachment.type === 'image' ? (
-                    <div className={styles.attachmentPreview}>
+                    <div 
+                      className={styles.attachmentPreview}
+                      onClick={() => attachment.data && setPreviewImage({ src: attachment.data, name: attachment.name })}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <img src={attachment.data} alt={attachment.name} className={styles.attachmentImage} />
                       <div className={styles.attachmentOverlay}>
                         <ImageIcon size={16} />
@@ -7360,6 +8173,32 @@ export function AIPanel() {
             <div className={styles.dropMessage}>
               <Paperclip size={32} />
               <p>Drop files here to attach</p>
+            </div>
+          </div>
+        )}
+
+        {previewImage && (
+          <div 
+            className={styles.imagePreviewOverlay}
+            onClick={() => setPreviewImage(null)}
+          >
+            <div className={styles.imagePreviewContent} onClick={(e) => e.stopPropagation()}>
+              <div className={styles.imagePreviewHeader}>
+                <span className={styles.imagePreviewName}>{previewImage.name}</span>
+                <button 
+                  className={styles.imagePreviewClose}
+                  onClick={() => setPreviewImage(null)}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className={styles.imagePreviewBody}>
+                <img 
+                  src={previewImage.src} 
+                  alt={previewImage.name}
+                  className={styles.imagePreviewImage}
+                />
+              </div>
             </div>
           </div>
         )}

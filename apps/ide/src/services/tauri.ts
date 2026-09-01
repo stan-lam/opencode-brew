@@ -354,6 +354,12 @@ export const dialog = {
 };
 
 // Shell operations
+export interface ShellCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
 export const shell = {
   openExternal: async (url: string): Promise<void> => {
     const { open } = await getShell();
@@ -363,6 +369,17 @@ export const shell = {
     const { Command } = await getShell();
     const command = Command.create(program, args);
     await command.execute();
+  },
+  executeCommand: async (commandStr: string): Promise<ShellCommandResult> => {
+    const { Command } = await getShell();
+    // Use sh -c to execute the command string
+    const command = Command.create('sh', ['-c', commandStr]);
+    const result = await command.execute();
+    return {
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+      exitCode: result.code ?? 0,
+    };
   },
 };
 
@@ -792,8 +809,9 @@ export const appEvents = {
     
     const processDropEvent = (paths: string[], source: string) => {
       const now = Date.now();
-      const pathsKey = paths.sort().join('|');
-      const lastPathsKey = lastDropPaths.sort().join('|');
+      // Use spread to avoid mutating the original arrays
+      const pathsKey = [...paths].sort().join('|');
+      const lastPathsKey = [...lastDropPaths].sort().join('|');
       
       // Deduplicate: ignore if same paths within 500ms
       if (now - lastDropTime < 500 && pathsKey === lastPathsKey) {
@@ -808,20 +826,35 @@ export const appEvents = {
     };
     
     const unlisten1 = await listenFn('tauri://drag-drop', (event) => {
-      console.log('[tauri.ts] tauri://drag-drop event:', JSON.stringify(event.payload));
-      const payload = event.payload as DragDropPayload | string[];
+      console.log('[tauri.ts] tauri://drag-drop event received');
+      console.log('[tauri.ts] Event payload:', JSON.stringify(event.payload, null, 2));
+      console.log('[tauri.ts] Payload type:', typeof event.payload);
+      
+      const payload = event.payload as DragDropPayload | string[] | { paths: string[]; position?: { x: number; y: number } };
       
       let paths: string[] | undefined;
       if (Array.isArray(payload)) {
+        // Direct array of paths (some Tauri versions)
+        console.log('[tauri.ts] Payload is direct array');
         paths = payload;
-      } else if (payload?.paths) {
-        if (!payload.type || payload.type === 'drop') {
-          paths = payload.paths;
+      } else if (typeof payload === 'object' && payload !== null) {
+        console.log('[tauri.ts] Payload is object, type field:', (payload as DragDropPayload).type);
+        // Object with paths property
+        const objPayload = payload as DragDropPayload;
+        // In Tauri v2, check for 'drop' type or handle when type is not present
+        if (!objPayload.type || objPayload.type === 'drop') {
+          paths = objPayload.paths;
+          console.log('[tauri.ts] Extracted paths from object:', paths);
+        } else {
+          console.log('[tauri.ts] Ignoring non-drop event type:', objPayload.type);
         }
       }
       
       if (paths?.length) {
+        console.log('[tauri.ts] Calling processDropEvent with', paths.length, 'paths');
         processDropEvent(paths, 'drag-drop');
+      } else {
+        console.log('[tauri.ts] No paths found in payload');
       }
     });
     
