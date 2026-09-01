@@ -262,24 +262,26 @@ function generatePrompts(config: Record<string, any>) {
   const stateAbbr = zipCode.startsWith('98') ? 'wa' : 'ca';
   const stateName = stateAbbr === 'wa' ? 'washington' : 'california';
   
-  const searchGasPricesPrompt = `Find gas stations within ${radius} miles of ${zipCode}.
+  const searchGasPricesPrompt = `Find at least 10 gas stations within ${radius} miles of ${zipCode}.
 
-${hasCostcoPreferred ? `<search_web query="Costco gas stations near ${zipCode}" />` : ''}
+**SEARCH 1: Preferred stations (search multiple times for comprehensive results)**
+${hasCostcoPreferred ? `<search_web query="Costco gas stations near ${zipCode}" />
+<search_web query="all Costco gas prices ${stateName} ${zipCode}" />` : ''}
 ${hasSamsClubPreferred ? `<search_web query="Sam's Club gas stations near ${zipCode}" />` : ''}
-${!hasCostcoPreferred && !hasSamsClubPreferred ? `<search_web query="cheapest gas stations near ${zipCode}" />` : ''}
 
-**EXTRACT from search results:**
-Look for "Nearby Costco gas stations" section with format:
-- Location name, City, distance, Regular price
+**SEARCH 2: Top stations in area (for more results)**
+<search_web query="top 10 cheapest gas stations ${zipCode}" />
 
-Example patterns to extract:
-- "Costco Kirkland...4.2 mi...Regular$4.869" → Costco Kirkland - $4.869 - 4.2 mi
-- "Costco Woodinville...7.8 mi...Regular$4.799" → Costco Woodinville - $4.799 - 7.8 mi
+**EXTRACT ALL stations from search results:**
+- Look for "Nearby Costco gas stations" lists
+- Look for station rankings with prices
+- Include ALL locations within ${radius} miles (e.g., Kirkland, Redmond, Tukwila, Issaquah, Seattle, etc.)
 
-**OUTPUT FORMAT:**
-- Station Name - $X.XX - City (X.X mi)
+**OUTPUT: List 10+ stations with prices**
+Format: Station - $X.XX - City
 
-List ALL stations within ${radius} miles. Only use prices from search results.`;
+Prioritize preferred stations (${preferredList}), then fill remaining slots with other stations.
+Only use prices from actual search results.`;
 
   const sortInstructions: Record<string, string> = {
     'price_asc': 'Sort by price from lowest to highest',
@@ -303,7 +305,7 @@ Sort by price. Mark Costco with ⭐.`;
   };
 }
 
-const SEARCH_SYSTEM_PROMPT = `Extract gas station names, prices, and distances from search results. Format: Station - $X.XX - City (X mi). Only include data from results.`;
+const SEARCH_SYSTEM_PROMPT = `Extract 10+ gas stations with prices from search results. Format: Station - $X.XX - City. Prioritize preferred stations first, then add other stations.`;
 
 const FORMAT_REPORT_SYSTEM_PROMPT = `Format gas data into a table. Only use provided data.`;
 
