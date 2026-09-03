@@ -59,18 +59,23 @@ export function AIDiffEditor({
     setIsApplying(true);
     try {
       if (operationType === 'delete') {
-        // For delete, we'd need to delete the file
-        // For now, just close the diff
+        await fs.deletePath(resolvedPath);
       } else {
         await fs.writeFile(resolvedPath, newContent);
       }
-      // Close this diff tab and open the actual file
+      
+      // Dispatch event to notify AIPanel that file operation was applied/overwritten
+      window.dispatchEvent(new CustomEvent('file-op-applied', {
+        detail: { filePath, operationType }
+      }));
+      
+      // Close this diff tab and open the actual file with fresh content
       const diffPath = useEditorStore.getState().activeFile?.path;
       if (diffPath) {
         closeFile(diffPath);
       }
       if (operationType !== 'delete') {
-        await openFile(resolvedPath);
+        await openFile(resolvedPath, true); // forceReload = true to refresh content from disk
       }
     } catch (error) {
       console.error('Failed to apply changes:', error);

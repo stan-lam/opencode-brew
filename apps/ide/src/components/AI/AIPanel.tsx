@@ -10,6 +10,8 @@ import {
   User,
   History,
   MessageSquare,
+  Download,
+  Upload,
   X,
   FolderOpen,
   Square,
@@ -33,7 +35,7 @@ import {
 } from 'lucide-react';
 import { ai, appEvents, dialog, fs, history, shell, listenForTokenUsage, usage, git } from '../../services/tauri';
 import type { CopilotCachedAccount, CopilotDeviceCode } from '../../services/tauri';
-import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace, SubagentProfile } from '../../store/aiStore';
+import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace, SubagentProfile, PendingQuestion as StorePendingQuestion, CommandOperation, CommandStatus } from '../../store/aiStore';
 import type { AIProvider } from '../../store/aiStore';
 import { ContextBreakdownModal } from './ContextBreakdownModal';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -42,6 +44,7 @@ import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import styles from './AIPanel.module.css';
+import { ContextMenu, ContextMenuItem, ContextMenuPosition } from '../FileTree/ContextMenu';
 import mermaid from 'mermaid';
 
 // Initialize mermaid with dark theme
@@ -172,6 +175,112 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
   const lines = code.split('\n');
   const lineCount = lines.length;
   const shouldCollapse = lineCount > 15;
+  const COLLAPSED_MAX_LINES = 120;
+  
+  // Context menu state for line number right-click
+  const [lineContextMenu, setLineContextMenu] = useState<{
+    position: ContextMenuPosition;
+    lineNumber: number;
+    lineContent: string;
+  } | null>(null);
+  
+  const { activeConversation } = useAIStore();
+  
+  // Handle right-click on line number
+  const handleLineContextMenu = useCallback((
+    e: React.MouseEvent,
+    lineNumber: number,
+    lineContent: string
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setLineContextMenu({
+      position: { x: e.clientX, y: e.clientY },
+      lineNumber,
+      lineContent,
+    });
+  }, []);
+  
+  // Close context menu
+  const closeLineContextMenu = useCallback(() => {
+    setLineContextMenu(null);
+  }, []);
+  
+  // Handle AI action from context menu - dispatch event to prefill AI input
+  const handleAIAction = useCallback((
+    action: 'review' | 'ask' | 'research',
+    startNewConversation: boolean
+  ) => {
+    if (!lineContextMenu) return;
+    
+    // Dispatch event to prefill the AI input instead of sending directly
+    window.dispatchEvent(new CustomEvent('prefill-ai-input', {
+      detail: {
+        action,
+        lineNumber: lineContextMenu.lineNumber,
+        lineContent: lineContextMenu.lineContent,
+        filename,
+        language,
+        startNewConversation,
+      }
+    }));
+    
+    closeLineContextMenu();
+  }, [lineContextMenu, filename, language, closeLineContextMenu]);
+  
+  // Build context menu items for line number right-click
+  const buildLineContextMenuItems = useCallback((): ContextMenuItem[] => {
+    const hasActiveConversation = !!activeConversation;
+    const items: ContextMenuItem[] = [];
+    
+    // Review section
+    items.push({
+      id: 'review-new',
+      label: '🔍 Review (New Chat)',
+      action: () => handleAIAction('review', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'review-continue',
+        label: '🔍 Review (Continue)',
+        action: () => handleAIAction('review', false),
+      });
+    }
+    
+    items.push({ id: 'divider-1', divider: true });
+    
+    // Ask section
+    items.push({
+      id: 'ask-new',
+      label: '💬 Ask AI (New Chat)',
+      action: () => handleAIAction('ask', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'ask-continue',
+        label: '💬 Ask AI (Continue)',
+        action: () => handleAIAction('ask', false),
+      });
+    }
+    
+    items.push({ id: 'divider-2', divider: true });
+    
+    // Research section
+    items.push({
+      id: 'research-new',
+      label: '📚 Research (New Chat)',
+      action: () => handleAIAction('research', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'research-continue',
+        label: '📚 Research (Continue)',
+        action: () => handleAIAction('research', false),
+      });
+    }
+    
+    return items;
+  }, [activeConversation, handleAIAction]);
   
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -284,9 +393,29 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
   // Basic syntax highlighting with diff support
   const highlightCode = (code: string, lang: string): React.ReactNode => {
     const codeLines = code.split('\n');
-    // Always render all lines - let CSS max-height and scroll handle visibility
+    // Performance: rendering thousands of lines with spans is extremely expensive and
+    // can freeze the UI (especially during window resize). When collapsed, render
+    // only a limited number of lines and let users expand for the full view.
+    const isCollapsed = shouldCollapse && !expanded;
+    const renderLines = isCollapsed ? codeLines.slice(0, COLLAPSED_MAX_LINES) : codeLines;
+    const truncated = isCollapsed && codeLines.length > renderLines.length;
     
-    return codeLines.map((line, lineIdx) => {
+    const inferLang = (raw: string): string => {
+      const sample = raw.slice(0, 4000);
+      if (/\bplugins\s*\{[\s\S]*?\}/i.test(sample) || /\bdependencies\s*\{/i.test(sample)) return 'gradle';
+      if (/\brootProject\.name\b/.test(sample) || /\binclude\s+['"][^'"]+['"]/.test(sample)) return 'gradle';
+      if (/\bpackage\s+[a-zA-Z_][\w.]*\s*;/.test(sample) || /\bpublic\s+class\s+\w+/.test(sample)) return 'java';
+      if (/^\s*import\s+.+\s+from\s+.+/m.test(sample) || /\bdef\s+\w+\s*\(/.test(sample)) return 'python';
+      if (/\bfunction\s+\w+\s*\(|\bconst\s+\w+\s*=|\bimport\s+.*\s+from\s+['"]/m.test(sample)) return 'javascript';
+      return '';
+    };
+
+    const rawLang = (lang || '').toLowerCase();
+    const effectiveLang = rawLang && rawLang !== 'text' && rawLang !== 'plaintext'
+      ? rawLang
+      : inferLang(code) || rawLang;
+
+    const rendered = renderLines.map((line, lineIdx) => {
       // Check for diff markers
       const isDiffAdd = isDiff && line.startsWith('+');
       const isDiffRemove = isDiff && line.startsWith('-');
@@ -300,14 +429,14 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
       const patterns: { regex: RegExp; className: string }[] = [];
       
       // Language-specific patterns
-      if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift'].includes(lang.toLowerCase())) {
+      if (!effectiveLang || ['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'gradle', 'groovy', 'kotlin'].includes(effectiveLang)) {
         patterns.push({ regex: /(\/\/.*$)/, className: styles.syntaxComment });
         patterns.push({ regex: /(\/\*[\s\S]*?\*\/)/, className: styles.syntaxComment });
       }
-      if (['python', 'py', 'ruby', 'bash', 'sh', 'shell', 'yaml', 'yml'].includes(lang.toLowerCase())) {
+      if (!effectiveLang || ['python', 'py', 'ruby', 'bash', 'sh', 'shell', 'yaml', 'yml'].includes(effectiveLang)) {
         patterns.push({ regex: /(#.*$)/, className: styles.syntaxComment });
       }
-      if (['html', 'xml', 'svg'].includes(lang.toLowerCase())) {
+      if (['html', 'xml', 'svg'].includes(effectiveLang)) {
         patterns.push({ regex: /(<!--[\s\S]*?-->)/, className: styles.syntaxComment });
       }
       
@@ -315,32 +444,44 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
       patterns.push({ regex: /('(?:[^'\\]|\\.)*')/, className: styles.syntaxString });
       patterns.push({ regex: /(`(?:[^`\\]|\\.)*`)/, className: styles.syntaxString });
       
-      const keywords = /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|export|from|async|await|try|catch|throw|new|this|super|extends|implements|public|private|protected|static|readonly|def|fn|pub|mod|use|struct|enum|impl|trait|match|loop|break|continue|true|false|null|undefined|None|True|False|self|nil)\b/g;
+      const baseKeywords = [
+        'const','let','var','function','return','if','else','for','while','class','interface','type','import','export','from',
+        'async','await','try','catch','throw','new','this','super','extends','implements','public','private','protected','static','readonly',
+        'def','fn','pub','mod','use','struct','enum','impl','trait','match','loop','break','continue',
+        'true','false','null','undefined','None','True','False','self','nil'
+      ];
+      const gradleKeywords = [
+        'plugins','dependencies','repositories','mavenCentral','gradlePluginPortal',
+        'implementation','api','compileOnly','runtimeOnly','testImplementation','annotationProcessor',
+        'group','version','id','java','test','sourceCompatibility','targetCompatibility','subprojects','allprojects','tasks'
+      ];
+      const keywordList = (effectiveLang === 'gradle' || effectiveLang === 'groovy' || effectiveLang === 'kotlin')
+        ? [...baseKeywords, ...gradleKeywords]
+        : baseKeywords;
+      const keywords = new RegExp(`\\\\b(${keywordList.map(k => k.replace(/[.*+?^${}()|[\\\\]\\\\]/g, '\\\\$&')).join('|')})\\\\b`, 'g');
       patterns.push({ regex: keywords, className: styles.syntaxKeyword });
       patterns.push({ regex: /\b(\d+\.?\d*)\b/, className: styles.syntaxNumber });
       patterns.push({ regex: /\b([a-zA-Z_]\w*)\s*(?=\()/, className: styles.syntaxFunction });
 
       const replacements: { start: number; end: number; element: React.ReactNode }[] = [];
 
-      if (lang) {
-        patterns.forEach(({ regex, className }) => {
-          const globalRegex = new RegExp(regex.source, 'g');
-          let match;
-          while ((match = globalRegex.exec(lineContent)) !== null) {
-            const overlaps = replacements.some(r => 
-              (match!.index >= r.start && match!.index < r.end) ||
-              (match!.index + match![0].length > r.start && match!.index + match![0].length <= r.end)
-            );
-            if (!overlaps) {
-              replacements.push({
-                start: match.index,
-                end: match.index + match[0].length,
-                element: <span key={`${lineIdx}-${tokenKey++}`} className={className}>{match[0]}</span>
-              });
-            }
+      patterns.forEach(({ regex, className }) => {
+        const globalRegex = new RegExp(regex.source, 'g');
+        let match;
+        while ((match = globalRegex.exec(lineContent)) !== null) {
+          const overlaps = replacements.some(r => 
+            (match!.index >= r.start && match!.index < r.end) ||
+            (match!.index + match![0].length > r.start && match!.index + match![0].length <= r.end)
+          );
+          if (!overlaps) {
+            replacements.push({
+              start: match.index,
+              end: match.index + match[0].length,
+              element: <span key={`${lineIdx}-${tokenKey++}`} className={className}>{match[0]}</span>
+            });
           }
-        });
-      }
+        }
+      });
 
       replacements.sort((a, b) => a.start - b.start);
 
@@ -365,12 +506,27 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
 
       return (
         <div key={lineIdx} className={`${styles.codeLine} ${diffClass}`}>
-          <span className={styles.lineNumber}>{lineNumber}</span>
+          <span 
+            className={`${styles.lineNumber} ${styles.lineNumberClickable}`}
+            onContextMenu={(e) => handleLineContextMenu(e, lineNumber, lineContent)}
+            title="Right-click for AI options"
+          >
+            {lineNumber}
+          </span>
           {isDiff && <span className={styles.diffMarker}>{isDiffAdd ? '+' : isDiffRemove ? '-' : ' '}</span>}
           <span className={styles.lineContent}>{highlightedContent}</span>
         </div>
       );
     });
+
+    if (!truncated) return rendered;
+    const remaining = codeLines.length - renderLines.length;
+    rendered.push(
+      <div key="__truncated__" className={styles.codeTruncatedLine}>
+        … {remaining} more line{remaining === 1 ? '' : 's'} (expand to view)
+      </div>
+    );
+    return rendered;
   };
 
   const displayLang = isAsciiArt ? 'diagram' : (language || 'text');
@@ -418,6 +574,15 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
             <code className={styles.asciiArtText}>{asciiContent}</code>
           </pre>
         </div>
+        
+        {/* Line number context menu for AI actions */}
+        {lineContextMenu && (
+          <ContextMenu
+            position={lineContextMenu.position}
+            onClose={closeLineContextMenu}
+            items={buildLineContextMenuItems()}
+          />
+        )}
       </div>
     );
   }
@@ -482,6 +647,15 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
           <code>{highlightCode(code, language)}</code>
         </pre>
       </div>
+      
+      {/* Line number context menu for AI actions */}
+      {lineContextMenu && (
+        <ContextMenu
+          position={lineContextMenu.position}
+          onClose={closeLineContextMenu}
+          items={buildLineContextMenuItems()}
+        />
+      )}
     </div>
   );
 }
@@ -511,6 +685,8 @@ interface PendingFileOperation {
 
 const CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
 const WINDOWS_ABS_REGEX = /^[a-zA-Z]:[\\/]/;
+const INVALID_PATH_CHARS_REGEX = /[<>:"|?*]/;
+const MARKDOWN_PATH_HINT_REGEX = /\*\*|`{2,}|^:+\s*/;
 const SEVERITY_PATTERN = /(?:SEVERITY\s*[:\-–—]\s*)?\[?(CRITICAL|HIGH|MEDIUM|LOW|INFO|TEST)(?:\s*\/\s*(CODE QUALITY))?\]?(?:\s+(?:ISSUES|SEVERITY)\s*:\s*\*\*)?/i;
 
 const getSeverityClassName = (severity: string): string => {
@@ -532,24 +708,43 @@ const getSeverityClassName = (severity: string): string => {
   }
 };
 
-const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string | null => {
+interface PathValidationOptions {
+  allowExternalPaths?: boolean;
+}
+
+const getInvalidPathReason = (
+  filePath: string, 
+  workspaceRoot?: string,
+  options?: PathValidationOptions
+): string | null => {
+  const { allowExternalPaths = false } = options || {};
   const trimmed = filePath.trim();
   if (!trimmed) return 'Path is empty.';
   if (CONTROL_CHAR_REGEX.test(trimmed)) return 'Path contains control characters.';
+  if (MARKDOWN_PATH_HINT_REGEX.test(trimmed)) return 'Path appears to include markdown formatting.';
 
   const normalized = trimmed.replace(/\\/g, '/');
   const isAbsolute = normalized.startsWith('/') || WINDOWS_ABS_REGEX.test(trimmed);
-  if (isAbsolute && !workspaceRoot) {
+
+  // Disallow characters that break paths on common platforms (especially Windows),
+  // while still allowing a Windows drive letter like "C:/".
+  const hasInvalidChars = INVALID_PATH_CHARS_REGEX.test(trimmed)
+    && !/^[a-zA-Z]:[\\/]/.test(trimmed);
+  if (hasInvalidChars) return 'Path contains invalid filename characters.';
+  
+  // When allowExternalPaths is true, skip workspace containment checks for absolute paths
+  if (isAbsolute && !workspaceRoot && !allowExternalPaths) {
     return 'Absolute paths are not allowed.';
   }
 
-  if (isAbsolute && workspaceRoot) {
+  if (isAbsolute && workspaceRoot && !allowExternalPaths) {
     const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
     if (!normalized.startsWith(`${rootNormalized}/`) && normalized !== rootNormalized) {
       return 'Path is outside the workspace.';
     }
   }
 
+  // Path traversal is still blocked even for external paths
   const rootNormalized = workspaceRoot ? workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '') : '';
   const relativeCandidate = rootNormalized && normalized.startsWith(rootNormalized)
     ? normalized.slice(rootNormalized.length)
@@ -561,9 +756,12 @@ const getInvalidPathReason = (filePath: string, workspaceRoot?: string): string 
 };
 
 const normalizeRepoRelativePath = (workspaceRoot: string, filePath: string): string => {
+  const rootNormalized = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
   let normalized = filePath.replace(/\\/g, '/').trim();
-  if (normalized.startsWith(workspaceRoot)) {
-    normalized = normalized.slice(workspaceRoot.length);
+  if (normalized === rootNormalized) {
+    normalized = '';
+  } else if (normalized.startsWith(`${rootNormalized}/`)) {
+    normalized = normalized.slice(rootNormalized.length);
   }
   normalized = normalized.replace(/^\/+/, '');
   normalized = normalized.replace(/^\.\//, '');
@@ -686,8 +884,11 @@ const buildAIOperationDiffFromDisk = async (
 
   const baseContent = previousContent ?? diskContent ?? opOld;
   if (baseContent) {
-    const { updatedContent } = applyEditOperation(baseContent, operation);
-    return { oldContent: baseContent, newContent: updatedContent, operationType, requiresOverwrite: false };
+    const { updatedContent, changed } = applyEditOperation(baseContent, operation);
+    if (changed) {
+      return { oldContent: baseContent, newContent: updatedContent, operationType, requiresOverwrite: false };
+    }
+    // Apply simulation failed (content mismatch), fall back to operation's proposed diff
   }
 
   return { oldContent: opOld, newContent: opNew, operationType, requiresOverwrite: false };
@@ -808,15 +1009,50 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
   const combineReasons = (...reasons: Array<string | null | undefined>) =>
     reasons.filter(Boolean).join(' ');
   const hasCodeFence = (value?: string) => Boolean(value && /```/.test(value));
+  const looksLikePath = (value: string) => {
+    if (!value) return false;
+    if (value.length > 500) return false;
+    if (MARKDOWN_PATH_HINT_REGEX.test(value)) return false;
+    const hasInvalid = INVALID_PATH_CHARS_REGEX.test(value) && !/^[a-zA-Z]:\//.test(value);
+    if (hasInvalid) return false;
+    return /[\/\.]/.test(value) && !value.endsWith('/');
+  };
+  const coerceOperationPath = (raw: string) => {
+    let cleaned = sanitizeOperationPath(raw)
+      .replace(/^`+|`+$/g, '')
+      .replace(/^"+|"+$/g, '')
+      .trim();
+
+    // If the model appends descriptions like `path="foo/bar.txt: ..."`, keep the likely prefix.
+    const splitCandidates: number[] = [];
+    const firstColon = cleaned.indexOf(':');
+    const isWindowsDrive = /^[a-zA-Z]:\//.test(cleaned);
+    if (firstColon !== -1 && !(isWindowsDrive && firstColon === 1)) {
+      splitCandidates.push(firstColon);
+    }
+    const firstNewline = cleaned.search(/[\r\n]/);
+    if (firstNewline !== -1) splitCandidates.push(firstNewline);
+    const firstSpace = cleaned.indexOf(' ');
+    if (firstSpace !== -1) splitCandidates.push(firstSpace);
+
+    const cutAt = Math.min(...splitCandidates.filter((n) => n >= 0), Number.POSITIVE_INFINITY);
+    if (Number.isFinite(cutAt) && cutAt > 0) {
+      const prefix = cleaned.slice(0, cutAt).trim();
+      if (looksLikePath(prefix)) cleaned = prefix;
+    }
+
+    return cleaned;
+  };
   
   // Parse create_file tags — complete (with closing tag) only
   const createRegex = /<create_file\s+path="([^"]+)">([\s\S]*?)<\/create_file>/g;
   let match;
   while ((match = createRegex.exec(content)) !== null) {
-    const path = match[1].trim();
+    const path = coerceOperationPath(match[1]);
     const opContent = match[2].trim();
     const invalidReason = combineReasons(
       getInvalidPathReason(path, workspaceRoot),
+      !opContent ? 'Create operations must include file content.' : null,
       hasCodeFence(opContent) ? 'Code fences are not allowed inside file operation tags.' : null
     );
     operations.push({
@@ -830,7 +1066,7 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
   // Parse edit_file tags - first find all edit_file blocks, then extract old/new content
   const editBlockRegex = /<edit_file\s+path="([^"]+)"(?:\s+mode="(replace|insert)")?(?:\s+line="(\d+)")?>([\s\S]*?)<\/edit_file>/g;
   while ((match = editBlockRegex.exec(content)) !== null) {
-    const path = match[1].trim();
+    const path = coerceOperationPath(match[1]);
     const mode = (match[2] as 'replace' | 'insert') || 'replace';
     const line = match[3] ? parseInt(match[3]) : undefined;
     const body = match[4];
@@ -873,7 +1109,7 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
   // Parse delete_file tags
   const deleteRegex = /<delete_file\s+path="([^"]+)"\s*\/>/g;
   while ((match = deleteRegex.exec(content)) !== null) {
-    const path = match[1].trim();
+    const path = coerceOperationPath(match[1]);
     const invalidReason = getInvalidPathReason(path, workspaceRoot);
     operations.push({
       type: 'delete',
@@ -882,7 +1118,226 @@ function parseFileOperations(content: string, workspaceRoot?: string): FileOpera
     });
   }
   
+  // Deduplication: Remove duplicate operations on the same path
+  // Keep the last operation for each path (most recent wins)
+  const seenPaths = new Map<string, number>();
+  const deduplicatedOps: FileOperation[] = [];
+  
+  for (let i = operations.length - 1; i >= 0; i--) {
+    const op = operations[i];
+    const key = `${op.type}:${op.path}`;
+    
+    if (!seenPaths.has(key)) {
+      seenPaths.set(key, i);
+      deduplicatedOps.unshift(op);
+    } else {
+      // For create operations, if we see duplicates, the content might be different
+      // Check if content is identical to avoid losing unique operations
+      const existingIdx = seenPaths.get(key)!;
+      const existingOp = operations[existingIdx];
+      
+      if (op.type === 'create' && existingOp.type === 'create') {
+        // Keep both if content differs significantly
+        const contentSimilar = op.content === existingOp.content || 
+          (op.content && existingOp.content && 
+           Math.abs(op.content.length - existingOp.content.length) < 50 &&
+           op.content.substring(0, 100) === existingOp.content.substring(0, 100));
+        
+        if (!contentSimilar) {
+          // Mark the earlier one as potentially conflicting
+          const conflictOp = { ...op, invalidReason: op.invalidReason || 'Duplicate operation detected - review carefully.' };
+          deduplicatedOps.unshift(conflictOp);
+        }
+      }
+    }
+  }
+  
+  // Validate operation sequence: warn if delete followed by create on same path
+  const pathOperationOrder = new Map<string, string[]>();
+  for (const op of deduplicatedOps) {
+    const ops = pathOperationOrder.get(op.path) || [];
+    ops.push(op.type);
+    pathOperationOrder.set(op.path, ops);
+  }
+  
+  // Mark potential issues
+  for (let i = 0; i < deduplicatedOps.length; i++) {
+    const op = deduplicatedOps[i];
+    const pathOps = pathOperationOrder.get(op.path) || [];
+    
+    // If there's a delete followed by create on same path, that's a recreate pattern - acceptable
+    // If there's create followed by edit on same path, that's normal
+    // If there's multiple creates with different content, warn
+    if (op.type === 'create' && pathOps.filter(t => t === 'create').length > 1 && !op.invalidReason) {
+      deduplicatedOps[i] = { 
+        ...op, 
+        invalidReason: 'Multiple create operations for same file - review for conflicts.' 
+      };
+    }
+  }
+  
+  return deduplicatedOps;
+}
+
+// Interactive question types for AI clarification
+interface QuestionOption {
+  id: string;
+  label: string;
+  recommended?: boolean;
+}
+
+interface PendingQuestion {
+  id: string;
+  title?: string;
+  question: string;
+  options: QuestionOption[];
+  answered?: boolean;
+  selectedOptionId?: string;
+  selectedOptionLabel?: string;
+}
+
+// Parse interactive questions from AI response
+function parseQuestions(content: string): PendingQuestion[] {
+  const questions: PendingQuestion[] = [];
+  
+  // Match <ask_question> tags with id and optional title
+  const questionRegex = /<ask_question\s+id="([^"]+)"(?:\s+title="([^"]*)")?\s*>([\s\S]*?)<\/ask_question>/g;
+  let match;
+  
+  while ((match = questionRegex.exec(content)) !== null) {
+    const id = match[1];
+    const title = match[2] || undefined;
+    const body = match[3];
+    
+    // Extract the question text
+    const questionMatch = /<question>([\s\S]*?)<\/question>/.exec(body);
+    const questionText = questionMatch ? questionMatch[1].trim() : '';
+    
+    if (!questionText) continue;
+    
+    // Extract options
+    const options: QuestionOption[] = [];
+    const optionRegex = /<option\s+id="([^"]+)"(?:\s+recommended="(true)")?\s*>([\s\S]*?)<\/option>/g;
+    let optionMatch;
+    
+    while ((optionMatch = optionRegex.exec(body)) !== null) {
+      options.push({
+        id: optionMatch[1],
+        label: optionMatch[3].trim(),
+        recommended: optionMatch[2] === 'true',
+      });
+    }
+    
+    // Only add if we have at least 2 options
+    if (options.length >= 2) {
+      questions.push({
+        id,
+        title,
+        question: questionText,
+        options,
+        answered: false,
+      });
+    }
+  }
+  
+  return questions;
+}
+
+// Clean question tags from content for display
+function cleanQuestionTags(content: string): string {
+  return content.replace(/<ask_question\s+id="[^"]+"(?:\s+title="[^"]*")?\s*>[\s\S]*?<\/ask_question>/g, '').trim();
+}
+
+// Workspace operation types for creating new projects outside current workspace
+interface WorkspaceOperation {
+  type: 'create_workspace';
+  path: string;
+  name: string;
+  description?: string;
+  invalidReason?: string;
+}
+
+// Parse workspace creation operations from AI response
+function parseWorkspaceOperations(content: string): WorkspaceOperation[] {
+  const operations: WorkspaceOperation[] = [];
+  
+  // Match <create_workspace> tags with path and name attributes
+  const workspaceRegex = /<create_workspace\s+path="([^"]+)"\s+name="([^"]+)"(?:\s*>[\s\S]*?<description>([\s\S]*?)<\/description>[\s\S]*?<\/create_workspace>|\s*\/>)/g;
+  let match;
+  
+  while ((match = workspaceRegex.exec(content)) !== null) {
+    const path = match[1].trim();
+    const name = match[2].trim();
+    const description = match[3]?.trim();
+    
+    // Basic validation
+    let invalidReason: string | undefined;
+    if (!path) {
+      invalidReason = 'Workspace path is empty.';
+    } else if (!name) {
+      invalidReason = 'Workspace name is empty.';
+    } else if (!/^\/|^[a-zA-Z]:[\\/]/.test(path)) {
+      invalidReason = 'Workspace path must be an absolute path.';
+    } else if (/\.\./.test(path)) {
+      invalidReason = 'Path traversal is not allowed in workspace paths.';
+    }
+    
+    operations.push({
+      type: 'create_workspace',
+      path,
+      name,
+      description,
+      invalidReason,
+    });
+  }
+  
   return operations;
+}
+
+// Clean workspace operation tags from content for display
+function cleanWorkspaceOperationTags(content: string): string {
+  return content
+    .replace(/<create_workspace\s+path="[^"]+"\s+name="[^"]+"(?:\s*>[\s\S]*?<\/create_workspace>|\s*\/>)/g, '')
+    .trim();
+}
+
+// Command operation types for terminal command execution
+interface ParsedCommand {
+  command: string;
+  description?: string;
+  sandbox?: boolean;
+}
+
+// Parse command operations from AI response
+function parseCommandOperations(content: string): ParsedCommand[] {
+  const commands: ParsedCommand[] = [];
+  
+  // Match <run_command> tags with optional description and sandbox attributes
+  const commandRegex = /<run_command(?:\s+description="([^"]*)")?(?:\s+sandbox="(true|false)")?\s*>([\s\S]*?)<\/run_command>/g;
+  let match;
+  
+  while ((match = commandRegex.exec(content)) !== null) {
+    const description = match[1] || undefined;
+    const sandbox = match[2] === 'true';
+    const command = match[3].trim();
+    
+    if (command) {
+      commands.push({
+        command,
+        description,
+        sandbox,
+      });
+    }
+  }
+  
+  return commands;
+}
+
+// Clean command tags from content for display
+function cleanCommandTags(content: string): string {
+  return content
+    .replace(/<run_command(?:\s+description="[^"]*")?(?:\s+sandbox="(?:true|false)")?\s*>[\s\S]*?<\/run_command>/g, '')
+    .trim();
 }
 
 // Plan mode types
@@ -1007,8 +1462,11 @@ function parsePlanComponents(content: string): {
   }
 
   // Parse <checklist> tags (support any attributes, extract title if present)
+  // First, parse complete checklist tags
   const checklistRegex = /<checklist([^>]*)>([\s\S]*?)<\/checklist>/g;
+  const completedChecklistPositions = new Set<number>();
   while ((match = checklistRegex.exec(content)) !== null) {
+    completedChecklistPositions.add(match.index);
     const attrs = match[1];
     const titleMatch = attrs.match(/title="([^"]+)"/i);
     const title = titleMatch ? titleMatch[1] : 'Checklist';
@@ -1019,6 +1477,29 @@ function parsePlanComponents(content: string): {
       .map(l => l.replace(/^-\s*(?:\[[ xX>-]\]\s*)?/, '').trim())
       .filter(l => l.length > 0);
     checklists.push({ title, items });
+  }
+  
+  // Then, parse incomplete checklist tags (streaming support)
+  // Only match if there's no closing tag and at least one list item
+  const incompleteChecklistRegex = /<checklist([^>]*)>([\s\S]*)$/g;
+  while ((match = incompleteChecklistRegex.exec(content)) !== null) {
+    // Skip if this position was already matched as a complete checklist
+    if (completedChecklistPositions.has(match.index)) continue;
+    // Only process if content doesn't contain a closing tag (truly incomplete)
+    if (match[2].includes('</checklist>')) continue;
+    
+    const attrs = match[1];
+    const titleMatch = attrs.match(/title="([^"]+)"/i);
+    const title = titleMatch ? titleMatch[1] : 'Checklist';
+    const items = match[2].split('\n')
+      .map(l => l.trim())
+      .filter(l => l.startsWith('-'))
+      .map(l => l.replace(/^-\s*(?:\[[ xX>-]\]\s*)?/, '').trim())
+      .filter(l => l.length > 0);
+    // Only add if we have at least one item
+    if (items.length > 0) {
+      checklists.push({ title, items });
+    }
   }
 
   // Parse <decision> tags
@@ -1146,25 +1627,16 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
     setIsSaving(true);
     
     try {
-      // Generate filename from plan title
-      const filename = plan.title.toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
+      const { usePlanStore } = await import('../../store/planStore');
+      const planStore = usePlanStore.getState();
       
-      const filePath = `${currentWorkspace.rootPath}/.plan-${filename}.md`;
-      
-      // Build markdown content
-      let content = `# ${plan.title}\n\n`;
-      content += `> Plan created: ${new Date().toLocaleString()}\n\n`;
-      
-      if (plan.overview) {
-        content += `## Overview\n\n${plan.overview}\n\n`;
-      }
+      // Build markdown content for the plan body
+      let content = '';
       
       if (plan.approaches.length > 0) {
         content += `## Approaches\n\n`;
         plan.approaches.forEach((approach) => {
-          content += `### ${approach.name}${approach.recommended ? ' ⭐ (Recommended)' : ''}\n\n`;
+          content += `### ${approach.name}${approach.recommended ? ' (Recommended)' : ''}\n\n`;
           if (approach.pros.length > 0) {
             content += `**Pros:**\n`;
             approach.pros.forEach(pro => content += `- ${pro}\n`);
@@ -1178,19 +1650,6 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
         });
       }
       
-      // Add tasks section with current state
-      content += `## Tasks\n\n`;
-      tasks.forEach(task => {
-        // Map status to checkbox marker
-        let marker = ' ';
-        if (task.status === 'completed') marker = 'x';
-        else if (task.status === 'in-progress') marker = '>';
-        else if (task.status === 'skipped') marker = '-';
-        
-        content += `- [${marker}] ${task.text}\n`;
-      });
-      content += '\n';
-      
       if (plan.architecture) {
         content += `## Architecture\n\n\`\`\`mermaid\n${plan.architecture}\n\`\`\`\n\n`;
       }
@@ -1201,12 +1660,25 @@ function PlanView({ plan, onProceedWithApproach }: { plan: Plan; onProceedWithAp
         content += '\n';
       }
       
-      content += `---\n\n*This plan is managed by OpenCodeBrew. Edit tasks above and save to update.*\n`;
+      // Convert tasks to PlanTodo format
+      const todos = tasks.map(task => ({
+        id: task.id,
+        content: task.text,
+        status: task.status === 'in-progress' ? 'in_progress' as const : task.status as 'pending' | 'completed' | 'skipped',
+      }));
       
-      await fs.writeFile(filePath, content);
+      // Create plan using planStore
+      const savedPlan = await planStore.createPlan(
+        plan.title,
+        content,
+        todos
+      );
+      
+      // Open the plan file in editor
+      await planStore.openPlanInEditor(savedPlan.id);
       
       window.dispatchEvent(new CustomEvent('show-notification', {
-        detail: { message: `Plan saved to ${filename}.md`, type: 'success' }
+        detail: { message: `Plan saved and opened: ${plan.title}`, type: 'success' }
       }));
       
     } catch (error) {
@@ -1532,9 +2004,6 @@ function ChecklistView({ checklist, onImplementInAgent }: {
   const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
   const remainingCount = Math.max(0, totalCount - completedCount);
 
-  const toggleItem = (idx: number) => {
-    setChecked(prev => prev.map((v, i) => (i === idx ? !v : v)));
-  };
 
   return (
     <div className={styles.checklistContainer}>
@@ -1577,14 +2046,8 @@ function ChecklistView({ checklist, onImplementInAgent }: {
           <li
             key={idx}
             className={`${styles.checklistItem} ${checked[idx] ? styles.checklistItemDone : ''}`}
-            onClick={() => toggleItem(idx)}
           >
-            <input
-              type="checkbox"
-              checked={checked[idx]}
-              onChange={() => {}}
-              className={styles.checklistCheckbox}
-            />
+            <span className={checked[idx] ? styles.checklistCircleDone : styles.checklistCircle} />
             <div className={styles.checklistItemText}>
               <MarkdownRenderer content={item} />
             </div>
@@ -1703,6 +2166,284 @@ function MermaidDiagram({ chart, id }: { chart: string; id: string }) {
   );
 }
 
+// Component to display interactive AI questions with option selection
+interface QuestionBlockProps {
+  question: PendingQuestion;
+  onAnswer: (questionId: string, optionId: string, optionLabel: string) => void;
+  disabled?: boolean;
+}
+
+function QuestionBlock({ question, onAnswer, disabled }: QuestionBlockProps) {
+  const isAnswered = question.answered && question.selectedOptionId;
+  
+  return (
+    <div className={`${styles.questionBlock} ${isAnswered ? styles.questionBlockAnswered : ''}`}>
+      <div className={styles.questionHeader}>
+        <div className={styles.questionIcon}>
+          {isAnswered ? (
+            <Check size={16} />
+          ) : (
+            <MessageSquare size={16} />
+          )}
+        </div>
+        <h4 className={styles.questionTitle}>
+          {question.title || 'Question'}
+        </h4>
+      </div>
+      
+      <p className={styles.questionText}>{question.question}</p>
+      
+      <div className={styles.questionOptions}>
+        {question.options.map((option) => {
+          const isSelected = question.selectedOptionId === option.id;
+          return (
+            <button
+              key={option.id}
+              className={`${styles.questionOption} ${option.recommended ? styles.questionOptionRecommended : ''} ${isSelected ? styles.questionOptionSelected : ''}`}
+              onClick={() => !disabled && !isAnswered && onAnswer(question.id, option.id, option.label)}
+              disabled={disabled || isAnswered}
+            >
+              <div className={styles.questionOptionRadio} />
+              <div className={styles.questionOptionContent}>
+                <span className={styles.questionOptionLabel}>
+                  {option.label}
+                  {option.recommended && (
+                    <span className={styles.questionOptionBadge}>
+                      <Zap size={10} />
+                      Recommended
+                    </span>
+                  )}
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      
+      {isAnswered && question.selectedOptionLabel && (
+        <div className={styles.questionAnsweredBanner}>
+          <div className={styles.questionAnsweredIcon}>
+            <Check size={12} />
+          </div>
+          <span className={styles.questionAnsweredText}>
+            Selected: <strong>{question.selectedOptionLabel}</strong>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Component to display workspace creation request with confirmation
+interface WorkspaceCreationBlockProps {
+  operation: WorkspaceOperation;
+  onConfirm: () => void;
+  onCancel: () => void;
+  isCreating?: boolean;
+  isCreated?: boolean;
+}
+
+function WorkspaceCreationBlock({ operation, onConfirm, onCancel, isCreating, isCreated }: WorkspaceCreationBlockProps) {
+  if (operation.invalidReason) {
+    return (
+      <div className={`${styles.workspaceBlock} ${styles.workspaceBlockInvalid}`}>
+        <div className={styles.workspaceHeader}>
+          <div className={styles.workspaceIcon}>
+            <AlertTriangle size={16} />
+          </div>
+          <h4 className={styles.workspaceTitle}>Invalid Workspace Request</h4>
+        </div>
+        <p className={styles.workspaceError}>{operation.invalidReason}</p>
+        <div className={styles.workspaceDetails}>
+          <div className={styles.workspaceDetail}>
+            <span className={styles.workspaceDetailLabel}>Path:</span>
+            <code className={styles.workspaceDetailValue}>{operation.path}</code>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${styles.workspaceBlock} ${isCreated ? styles.workspaceBlockCreated : ''}`}>
+      <div className={styles.workspaceHeader}>
+        <div className={styles.workspaceIcon}>
+          {isCreated ? <Check size={16} /> : <FolderOpen size={16} />}
+        </div>
+        <h4 className={styles.workspaceTitle}>
+          {isCreated ? 'Workspace Created' : 'Create New Workspace'}
+        </h4>
+      </div>
+      
+      <div className={styles.workspaceDetails}>
+        <div className={styles.workspaceDetail}>
+          <span className={styles.workspaceDetailLabel}>Name:</span>
+          <span className={styles.workspaceDetailValue}>{operation.name}</span>
+        </div>
+        <div className={styles.workspaceDetail}>
+          <span className={styles.workspaceDetailLabel}>Path:</span>
+          <code className={styles.workspaceDetailValue}>{operation.path}</code>
+        </div>
+        {operation.description && (
+          <div className={styles.workspaceDetail}>
+            <span className={styles.workspaceDetailLabel}>Description:</span>
+            <span className={styles.workspaceDetailValue}>{operation.description}</span>
+          </div>
+        )}
+      </div>
+      
+      {!isCreated && (
+        <div className={styles.workspaceActions}>
+          <button
+            className={styles.workspaceConfirmBtn}
+            onClick={onConfirm}
+            disabled={isCreating}
+          >
+            {isCreating ? (
+              <>
+                <Loader2 size={14} className={styles.spinning} />
+                Creating...
+              </>
+            ) : (
+              <>
+                <FolderOpen size={14} />
+                Create & Open Workspace
+              </>
+            )}
+          </button>
+          <button
+            className={styles.workspaceCancelBtn}
+            onClick={onCancel}
+            disabled={isCreating}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      
+      {isCreated && (
+        <div className={styles.workspaceCreatedBanner}>
+          <Check size={14} />
+          <span>Workspace created and opened successfully!</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Component to display command execution request with approval buttons
+interface CommandApprovalBlockProps {
+  command: ParsedCommand;
+  commandId: string;
+  status: 'pending' | 'approved' | 'running' | 'completed' | 'skipped' | 'failed';
+  output?: string;
+  exitCode?: number;
+  error?: string;
+  onSkip: () => void;
+  onAlwaysRun: () => void;
+  onRun: () => void;
+}
+
+function CommandApprovalBlock({
+  command,
+  commandId,
+  status,
+  output,
+  exitCode,
+  error,
+  onSkip,
+  onAlwaysRun,
+  onRun,
+}: CommandApprovalBlockProps) {
+  const [outputExpanded, setOutputExpanded] = useState(true);
+
+  return (
+    <div className={`${styles.commandBlock} ${styles[`commandBlock${status.charAt(0).toUpperCase()}${status.slice(1)}`]}`}>
+      <div className={styles.commandHeader}>
+        <div className={styles.commandHeaderLeft}>
+          <TerminalIcon size={14} className={styles.commandIcon} />
+          <span className={styles.commandDescription}>
+            {command.description || 'Run command'}
+          </span>
+          {command.sandbox && (
+            <span className={styles.commandSandboxBadge}>Sandbox</span>
+          )}
+        </div>
+        {status === 'running' && (
+          <Loader2 size={14} className={styles.spinning} />
+        )}
+        {status === 'completed' && (
+          <Check size={14} className={styles.commandIconCompleted} />
+        )}
+        {status === 'failed' && (
+          <AlertTriangle size={14} className={styles.commandIconFailed} />
+        )}
+        {status === 'skipped' && (
+          <span className={styles.commandSkippedBadge}>Skipped</span>
+        )}
+      </div>
+
+      <pre className={styles.commandCode}>{command.command}</pre>
+
+      {status === 'pending' && (
+        <div className={styles.commandApprovalActions}>
+          <span className={styles.commandPendingLabel}>Pending approval</span>
+          <div className={styles.commandApprovalButtons}>
+            <button
+              className={styles.commandSkipBtn}
+              onClick={onSkip}
+              title="Skip this command"
+            >
+              Skip
+            </button>
+            <button
+              className={styles.commandAlwaysRunBtn}
+              onClick={onAlwaysRun}
+              title="Always run commands like this"
+            >
+              Always Run
+            </button>
+            <button
+              className={styles.commandRunBtn}
+              onClick={onRun}
+              title="Run this command"
+            >
+              Run
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(status === 'running' || status === 'completed' || status === 'failed') && output && (
+        <div className={styles.commandOutput}>
+          <div
+            className={styles.commandOutputHeader}
+            onClick={() => setOutputExpanded(!outputExpanded)}
+          >
+            {outputExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span>Output</span>
+            {status === 'completed' && exitCode !== undefined && (
+              <span className={styles.commandExitCode}>
+                Exit code: {exitCode}
+              </span>
+            )}
+          </div>
+          {outputExpanded && (
+            <pre className={styles.commandOutputContent}>{output}</pre>
+          )}
+        </div>
+      )}
+
+      {status === 'failed' && error && (
+        <div className={styles.commandError}>
+          <AlertTriangle size={12} />
+          <span>{error}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Component to warn about code blocks being filtered in Plan Mode
 function CodeBlockWarning({ count, onSwitchToAgent }: { count: number; onSwitchToAgent: () => void }) {
   const [dismissed, setDismissed] = useState(false);
@@ -1800,10 +2541,58 @@ function ActionableTasksSuggestion({ tasks, onSwitchToAgent }: { tasks: string[]
   );
 }
 
+// ─── Switch to Agent Mode Prompt (shown when AI suggests switching to Agent mode) ─────
+function SwitchToAgentPrompt({
+  onSwitchToAgent
+}: {
+  onSwitchToAgent: () => void;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+
+  if (dismissed) return null;
+
+  return (
+    <div className={styles.switchToAgentPrompt}>
+      <div className={styles.suggestionHeader}>
+        <div className={styles.suggestionIcon}>⚡</div>
+        <div className={styles.suggestionTitle}>Switch to Agent Mode for Implementation</div>
+        <button
+          className={styles.suggestionDismiss}
+          onClick={() => setDismissed(true)}
+          title="Dismiss"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      <div className={styles.suggestionContent}>
+        <p className={styles.suggestionText}>
+          The AI recommends switching to <strong>Agent Mode</strong> to implement these changes.
+          Agent Mode can create, edit, and delete files in your workspace.
+        </p>
+        <div className={styles.suggestionActions}>
+          <button
+            className={styles.suggestionPrimaryBtn}
+            onClick={onSwitchToAgent}
+          >
+            <TerminalIcon size={14} />
+            Switch to Agent Mode
+          </button>
+          <button
+            className={styles.suggestionSecondaryBtn}
+            onClick={() => setDismissed(true)}
+          >
+            Stay in Current Mode
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Implementation Offer Prompt (shown in Chat mode when AI offers to implement) ─────
-function ImplementationOfferPrompt({ 
-  onSwitchToAgent 
-}: { 
+function ImplementationOfferPrompt({
+  onSwitchToAgent
+}: {
   onSwitchToAgent: () => void;
 }) {
   const [dismissed, setDismissed] = useState(false);
@@ -1815,7 +2604,7 @@ function ImplementationOfferPrompt({
       <div className={styles.suggestionHeader}>
         <div className={styles.suggestionIcon}>🚀</div>
         <div className={styles.suggestionTitle}>Ready to implement?</div>
-        <button 
+        <button
           className={styles.suggestionDismiss}
           onClick={() => setDismissed(true)}
           title="Dismiss"
@@ -1828,7 +2617,7 @@ function ImplementationOfferPrompt({
           Switch to <strong>Agent Mode</strong> to let the AI create and edit files in your workspace.
         </p>
         <div className={styles.suggestionActions}>
-          <button 
+          <button
             className={styles.suggestionPrimaryBtn}
             onClick={onSwitchToAgent}
           >
@@ -2174,13 +2963,14 @@ function DiffViewer({ text, title }: { text: string; title?: string }) {
 
 type PlainTextKind = 'text' | 'diff';
 
-function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTextTitle, plainTextDefaultExpanded, plainTextKind }: { 
+function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTextTitle, plainTextDefaultExpanded, plainTextKind, onImagePreview }: {
   message: AIMessage;
   onOperationsChange?: (ops: FileOperation[]) => void;
   renderAsPlainText?: boolean;
   plainTextTitle?: string;
   plainTextDefaultExpanded?: boolean;
   plainTextKind?: PlainTextKind;
+  onImagePreview?: (src: string, name: string) => void;
 }) {
   const isUser = message.role === 'user';
   const [pendingOps, setPendingOps] = useState<FileOperation[]>([]);
@@ -2188,9 +2978,34 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
   const [actionableTasks, setActionableTasks] = useState<string[]>([]);
   const [codeBlockTasks, setCodeBlockTasks] = useState<string[]>([]);
   const [hasImplementationOffer, setHasImplementationOffer] = useState(false);
-  const { currentWorkspace} = useWorkspaceStore();
+  const [hasSwitchToAgentSuggestion, setHasSwitchToAgentSuggestion] = useState(false);
+  const [localQuestions, setLocalQuestions] = useState<PendingQuestion[]>([]);
+  const [workspaceOps, setWorkspaceOps] = useState<WorkspaceOperation[]>([]);
+  const [workspaceCreating, setWorkspaceCreating] = useState<string | null>(null);
+  const [workspaceCreated, setWorkspaceCreated] = useState<string | null>(null);
+  const [localCommands, setLocalCommands] = useState<{ parsed: ParsedCommand; operation: CommandOperation }[]>([]);
+  const { currentWorkspace, createAndOpenWorkspace } = useWorkspaceStore();
   const { openFile } = useEditorStore();
-  const { agentMode, setAgentMode, sendMessage, setAgentTasks, queuePrompt } = useAIStore();
+  const { 
+    agentMode, 
+    setAgentMode, 
+    sendMessage, 
+    setAgentTasks, 
+    queuePrompt,
+    pendingQuestions,
+    setPendingQuestions,
+    answerQuestion,
+    setQuestionBlockingStream,
+    activeConversation,
+    pendingCommands,
+    setPendingCommands,
+    addPendingCommand,
+    updateCommandStatus,
+    skipCommand,
+    runCommand,
+    addToCommandAllowlist,
+    isCommandAllowed,
+  } = useAIStore();
 
   const removeChecklistSections = useCallback((content: string, checklists: Checklist[]): string => {
     if (checklists.length === 0) return content;
@@ -2247,6 +3062,99 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
     navigator.clipboard.writeText(message.content);
   };
 
+  // Handle workspace creation
+  const handleCreateWorkspace = useCallback(async (operation: WorkspaceOperation) => {
+    if (operation.invalidReason || !createAndOpenWorkspace) return;
+    
+    setWorkspaceCreating(operation.path);
+    try {
+      await createAndOpenWorkspace(operation.path, operation.name);
+      setWorkspaceCreated(operation.path);
+      setWorkspaceCreating(null);
+      
+      // Send a confirmation message to continue the conversation
+      sendMessage(`Workspace "${operation.name}" has been created at ${operation.path}. Please proceed with setting up the project.`);
+    } catch (error) {
+      console.error('Failed to create workspace:', error);
+      setWorkspaceCreating(null);
+      window.dispatchEvent(new CustomEvent('show-notification', {
+        detail: { message: `Failed to create workspace: ${error}`, type: 'error' }
+      }));
+    }
+  }, [createAndOpenWorkspace, sendMessage]);
+
+  const handleCancelWorkspace = useCallback(() => {
+    // Just dismiss the workspace creation block
+    setWorkspaceOps([]);
+    sendMessage('I decided not to create this workspace. Please suggest an alternative approach or let me create the project manually.');
+  }, [sendMessage]);
+
+  // Handle command actions
+  const handleSkipCommand = useCallback((commandId: string) => {
+    skipCommand(commandId);
+    setLocalCommands(prev => prev.map(c => 
+      c.operation.id === commandId 
+        ? { ...c, operation: { ...c.operation, status: 'skipped' as CommandStatus } }
+        : c
+    ));
+  }, [skipCommand]);
+
+  const handleAlwaysRunCommand = useCallback((commandId: string, command: string) => {
+    // Add to allowlist (pattern is the first part of the command up to first space or first 20 chars)
+    const pattern = command.split(' ')[0];
+    addToCommandAllowlist(pattern);
+    
+    // Then run the command
+    runCommand(commandId);
+    setLocalCommands(prev => prev.map(c => 
+      c.operation.id === commandId 
+        ? { ...c, operation: { ...c.operation, status: 'running' as CommandStatus } }
+        : c
+    ));
+  }, [addToCommandAllowlist, runCommand]);
+
+  const handleRunCommand = useCallback((commandId: string) => {
+    runCommand(commandId);
+    setLocalCommands(prev => prev.map(c => 
+      c.operation.id === commandId 
+        ? { ...c, operation: { ...c.operation, status: 'running' as CommandStatus } }
+        : c
+    ));
+  }, [runCommand]);
+
+  // Handle answering an interactive question
+  const handleAnswerQuestion = useCallback((questionId: string, optionId: string, optionLabel: string) => {
+    // Update local state
+    setLocalQuestions(prev => prev.map(q => 
+      q.id === questionId 
+        ? { ...q, answered: true, selectedOptionId: optionId, selectedOptionLabel: optionLabel }
+        : q
+    ));
+    
+    // Update store state
+    answerQuestion(questionId, optionId, optionLabel);
+    
+    // Check if all questions are now answered
+    const updatedQuestions = localQuestions.map(q => 
+      q.id === questionId ? { ...q, answered: true } : q
+    );
+    const allAnswered = updatedQuestions.every(q => q.answered);
+    
+    if (allAnswered) {
+      // Build the answer context and send as a follow-up message
+      const answersText = updatedQuestions.map(q => {
+        const selected = q.id === questionId 
+          ? optionLabel 
+          : q.selectedOptionLabel || '';
+        return `**${q.title || 'Question'}:** ${selected}`;
+      }).join('\n');
+      
+      // Send the answers as user response to continue the conversation
+      sendMessage(`Based on my selections:\n\n${answersText}\n\nPlease proceed with the implementation.`);
+      setQuestionBlockingStream(false);
+    }
+  }, [localQuestions, answerQuestion, sendMessage, setQuestionBlockingStream]);
+
   // Switch to agent mode and auto-send tasks one-by-one so progress can be tracked
   const handleImplementInAgent = useCallback((tasks: string[]) => {
     if (tasks.length === 0) return;
@@ -2263,11 +3171,23 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
     });
   }, [setAgentMode, sendMessage, setAgentTasks, queuePrompt]);
 
+  // Listen for file operations cleared event (from Undo All / Dismiss)
+  useEffect(() => {
+    const handleFileOpsCleared = () => {
+      setPendingOps([]);
+      if (onOperationsChange) {
+        onOperationsChange([]);
+      }
+    };
+    window.addEventListener('file-ops-cleared', handleFileOpsCleared);
+    return () => window.removeEventListener('file-ops-cleared', handleFileOpsCleared);
+  }, [onOperationsChange]);
+
   // Parse file operations and plan components from assistant messages
   useEffect(() => {
     if (!isUser && message.content) {
-      // Only parse file operations if NOT in plan mode
-      if (agentMode !== 'plan') {
+      // Only parse file operations in Agent mode - skip for Chat and Plan modes
+      if (agentMode === 'agent') {
         const ops = parseFileOperations(message.content, currentWorkspace?.rootPath);
         setPendingOps(ops);
         // Notify parent of operations
@@ -2275,7 +3195,7 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           onOperationsChange(ops);
         }
       } else {
-        setPendingOps([]); // Clear any file operations in plan mode
+        setPendingOps([]); // Clear any file operations in non-agent modes
         if (onOperationsChange) {
           onOperationsChange([]);
         }
@@ -2291,6 +3211,88 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           checklists: planComps.checklists.length,
           decisions: planComps.decisions.length
         });
+      }
+      
+      // Parse interactive questions
+      const questions = parseQuestions(message.content);
+      if (questions.length > 0) {
+        // Merge with existing answered state from store
+        const storeQuestions = pendingQuestions.filter(q => q.messageId === message.id);
+        const mergedQuestions = questions.map(q => {
+          const existing = storeQuestions.find(sq => sq.id === q.id);
+          if (existing) {
+            return { ...q, answered: existing.answered, selectedOptionId: existing.selectedOptionId, selectedOptionLabel: existing.selectedOptionLabel };
+          }
+          return q;
+        });
+        setLocalQuestions(mergedQuestions);
+        
+        // If there are unanswered questions, update the store
+        const unansweredQuestions = mergedQuestions.filter(q => !q.answered);
+        if (unansweredQuestions.length > 0 && activeConversation) {
+          const storeFormatQuestions: StorePendingQuestion[] = mergedQuestions.map(q => ({
+            ...q,
+            messageId: message.id,
+            conversationId: activeConversation.id,
+          }));
+          setPendingQuestions(storeFormatQuestions);
+          setQuestionBlockingStream(true);
+        }
+      } else {
+        setLocalQuestions([]);
+      }
+      
+      // Parse workspace creation operations
+      const wsOps = parseWorkspaceOperations(message.content);
+      setWorkspaceOps(wsOps);
+      
+      // Parse command operations
+      const parsedCmds = parseCommandOperations(message.content);
+      if (parsedCmds.length > 0 && activeConversation) {
+        // Check existing pending commands from store
+        const existingCmds = pendingCommands.filter(c => c.messageId === message.id);
+        
+        // Create or update command operations
+        const commandsWithOps = parsedCmds.map((parsed, idx) => {
+          const existing = existingCmds[idx];
+          if (existing) {
+            return { parsed, operation: existing };
+          }
+          
+          // Check if command is in allowlist and auto-run if so
+          const shouldAutoRun = isCommandAllowed(parsed.command);
+          
+          const newOp: CommandOperation = {
+            id: `cmd-${message.id}-${idx}-${Date.now()}`,
+            command: parsed.command,
+            description: parsed.description,
+            sandbox: parsed.sandbox,
+            status: shouldAutoRun ? 'approved' : 'pending',
+            messageId: message.id,
+            conversationId: activeConversation.id,
+          };
+          
+          return { parsed, operation: newOp };
+        });
+        
+        setLocalCommands(commandsWithOps);
+        
+        // Update store with new pending commands
+        const newPendingCmds = commandsWithOps
+          .filter(c => c.operation.status === 'pending' || c.operation.status === 'approved')
+          .map(c => c.operation);
+        if (newPendingCmds.length > 0) {
+          setPendingCommands([...pendingCommands.filter(c => c.messageId !== message.id), ...newPendingCmds]);
+        }
+        
+        // Auto-run commands that are in the allowlist
+        commandsWithOps.forEach(({ operation }) => {
+          if (operation.status === 'approved') {
+            runCommand(operation.id);
+          }
+        });
+      } else {
+        setLocalCommands([]);
       }
       
       // Detect actionable tasks and code blocks in Plan Mode
@@ -2333,7 +3335,7 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
         setCodeBlockTasks(detectedCodeBlocks);
         setHasImplementationOffer(false);
       } else if (agentMode === 'chat') {
-        // Detect when AI offers to implement in Chat mode
+        // Detect when AI offers to implement in Chat mode or generates file operation blocks
         const implementationOfferPatterns = [
           /would you like me to (?:create|implement|write|build|generate|make|add)/i,
           /shall i (?:create|implement|write|build|generate|make|add)/i,
@@ -2344,14 +3346,40 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           /want me to (?:go ahead|proceed) (?:and|with) (?:creat|implement|writ|build)/i,
           /\?[\s\S]{0,50}(?:create|implement|write|build|add) (?:this|that|the|it)/i,
         ];
+        // Also detect file operation XML blocks that shouldn't be in Chat mode
+        const fileOperationPatterns = [
+          /<create_file\s+path=/i,
+          /<edit_file\s+path=/i,
+          /<delete_file\s+path=/i,
+          /<file_operation\s+/i,
+        ];
         const hasOffer = implementationOfferPatterns.some(p => p.test(message.content));
-        setHasImplementationOffer(hasOffer);
+        const hasFileOps = fileOperationPatterns.some(p => p.test(message.content));
+        setHasImplementationOffer(hasOffer || hasFileOps);
         setActionableTasks([]);
         setCodeBlockTasks([]);
       } else {
         setActionableTasks([]);
         setCodeBlockTasks([]);
         setHasImplementationOffer(false);
+      }
+      
+      // Detect when AI suggests switching to Agent mode (applies to all non-agent modes)
+      if (agentMode !== 'agent') {
+        const switchToAgentPatterns = [
+          /switch(?:ing)?\s+to\s+agent\s+mode/i,
+          /please\s+switch\s+to\s+agent\s+mode/i,
+          /use\s+(?:the\s+)?agent\s+mode/i,
+          /to\s+implement\s+(?:these\s+)?changes?,?\s+(?:please\s+)?switch/i,
+          /in\s+agent\s+mode,?\s+(?:i\s+can|you\s+can|the\s+ai\s+can)/i,
+          /agent\s+mode\s+(?:is\s+required|will\s+allow|enables?|can)/i,
+          /(?:need|require)s?\s+agent\s+mode/i,
+          /mode\s+selector.*agent/i,
+        ];
+        const hasSwitchSuggestion = switchToAgentPatterns.some(p => p.test(message.content));
+        setHasSwitchToAgentSuggestion(hasSwitchSuggestion);
+      } else {
+        setHasSwitchToAgentSuggestion(false);
       }
     }
   }, [message.content, isUser, agentMode]);
@@ -2580,7 +3608,13 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
   };
 
   const assistantContent = useMemo(() => {
-    const cleaned = getCleanedContent(message.content);
+    let cleaned = getCleanedContent(message.content);
+    // Clean question tags from display since they're rendered separately
+    cleaned = cleanQuestionTags(cleaned);
+    // Clean workspace operation tags from display since they're rendered separately
+    cleaned = cleanWorkspaceOperationTags(cleaned);
+    // Clean command tags from display since they're rendered separately
+    cleaned = cleanCommandTags(cleaned);
     return removeChecklistSections(cleaned, planComponents.checklists);
   }, [message.content, planComponents.checklists, removeChecklistSections]);
 
@@ -2609,6 +3643,8 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
                   src={attachment.data} 
                   alt={attachment.name} 
                   className={styles.messageAttachmentImage}
+                  onClick={() => onImagePreview?.(attachment.data!, attachment.name)}
+                  style={{ cursor: 'pointer' }}
                 />
               ) : (
                 <div className={styles.messageAttachmentFile}>
@@ -2701,6 +3737,59 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           ))}
         </div>
       )}
+      {!isUser && localQuestions.length > 0 && (
+        <div className={styles.questionsContainer}>
+          {localQuestions.map((question) => (
+            <QuestionBlock
+              key={question.id}
+              question={question}
+              onAnswer={handleAnswerQuestion}
+              disabled={false}
+            />
+          ))}
+        </div>
+      )}
+      {!isUser && workspaceOps.length > 0 && (
+        <div className={styles.workspaceOpsContainer}>
+          {workspaceOps.map((op) => (
+            <WorkspaceCreationBlock
+              key={op.path}
+              operation={op}
+              onConfirm={() => handleCreateWorkspace(op)}
+              onCancel={handleCancelWorkspace}
+              isCreating={workspaceCreating === op.path}
+              isCreated={workspaceCreated === op.path}
+            />
+          ))}
+        </div>
+      )}
+      {!isUser && localCommands.length > 0 && (
+        <div className={styles.commandOpsContainer}>
+          {localCommands.map(({ parsed, operation }) => {
+            // Get the latest status from store if available
+            const storeCmd = pendingCommands.find(c => c.id === operation.id);
+            const currentStatus = storeCmd?.status || operation.status;
+            const currentOutput = storeCmd?.output || operation.output;
+            const currentExitCode = storeCmd?.exitCode ?? operation.exitCode;
+            const currentError = storeCmd?.error || operation.error;
+            
+            return (
+              <CommandApprovalBlock
+                key={operation.id}
+                command={parsed}
+                commandId={operation.id}
+                status={currentStatus}
+                output={currentOutput}
+                exitCode={currentExitCode}
+                error={currentError}
+                onSkip={() => handleSkipCommand(operation.id)}
+                onAlwaysRun={() => handleAlwaysRunCommand(operation.id, parsed.command)}
+                onRun={() => handleRunCommand(operation.id)}
+              />
+            );
+          })}
+        </div>
+      )}
       {!isUser && agentMode === 'plan' && codeBlockTasks.length > 0 && (
         <CodeBlockWarning 
           count={codeBlockTasks.length}
@@ -2715,6 +3804,11 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
       )}
       {!isUser && agentMode === 'chat' && hasImplementationOffer && (
         <ImplementationOfferPrompt 
+          onSwitchToAgent={() => setAgentMode('agent')} 
+        />
+      )}
+      {!isUser && agentMode !== 'agent' && hasSwitchToAgentSuggestion && !hasImplementationOffer && (
+        <SwitchToAgentPrompt 
           onSwitchToAgent={() => setAgentMode('agent')} 
         />
       )}
@@ -3648,6 +4742,7 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
       // Disable this in Plan Mode to avoid misclassifying checklists/review prose as code blocks.
       const guessLooseCodeLanguage = (snippet: string): string => {
         const s = snippet.slice(0, 2000);
+        if (/\bplugins\s*\{/.test(s) || /\bdependencies\s*\{/.test(s) || /\brootProject\.name\b/.test(s) || /\binclude\s+['"][^'"]+['"]/.test(s)) return 'gradle';
         if (/\bpackage\s+[a-zA-Z_][\w.]*\s*;/.test(s) || /\bpublic\s+class\s+\w+/.test(s) || /\bimport\s+[\w.]+\s*;/.test(s)) return 'java';
         if (/^\s*(def|class)\s+\w+/m.test(s) || (/^\s*import\s+\w+/m.test(s) && !/;/.test(s))) return 'python';
         if (/\bfn\s+\w+/.test(s) || /\bpub\s+fn\s+/.test(s) || /\bstruct\s+\w+/.test(s) || /\bimpl\s+\w+/.test(s)) return 'rust';
@@ -3662,7 +4757,7 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         const patterns: { regex: RegExp; className: string }[] = [];
         const langLower = (lang || '').toLowerCase();
 
-        if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'code'].includes(langLower)) {
+        if (['javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'rust', 'go', 'swift', 'gradle', 'groovy', 'kotlin', 'code'].includes(langLower)) {
           patterns.push({ regex: /(\/\/.*$)/, className: styles.syntaxComment });
           patterns.push({ regex: /(\/\*[\s\S]*?\*\/)/, className: styles.syntaxComment });
         }
@@ -3674,7 +4769,21 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         patterns.push({ regex: /('(?:[^'\\]|\\.)*')/, className: styles.syntaxString });
         patterns.push({ regex: /(`(?:[^`\\]|\\.)*`)/, className: styles.syntaxString });
 
-        const keywords = /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|export|from|async|await|try|catch|throw|new|this|super|extends|implements|public|private|protected|static|readonly|package|def|fn|pub|mod|use|struct|enum|impl|trait|match|loop|break|continue|true|false|null|undefined|None|True|False|self|nil)\b/g;
+        const baseKeywords = [
+          'const','let','var','function','return','if','else','for','while','class','interface','type','import','export','from',
+          'async','await','try','catch','throw','new','this','super','extends','implements','public','private','protected','static','readonly',
+          'package','def','fn','pub','mod','use','struct','enum','impl','trait','match','loop','break','continue',
+          'true','false','null','undefined','None','True','False','self','nil'
+        ];
+        const gradleKeywords = [
+          'plugins','dependencies','repositories','mavenCentral','gradlePluginPortal',
+          'implementation','api','compileOnly','runtimeOnly','testImplementation','annotationProcessor',
+          'group','version','id','java','test','sourceCompatibility','targetCompatibility','subprojects','allprojects','tasks'
+        ];
+        const keywordList = (langLower === 'gradle' || langLower === 'groovy' || langLower === 'kotlin')
+          ? [...baseKeywords, ...gradleKeywords]
+          : baseKeywords;
+        const keywords = new RegExp(`\\b(${keywordList.map(k => k.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')).join('|')})\\b`, 'g');
         patterns.push({ regex: keywords, className: styles.syntaxKeyword });
         patterns.push({ regex: /\b(\d+\.?\d*)\b/, className: styles.syntaxNumber });
         patterns.push({ regex: /\b([a-zA-Z_]\w*)\s*(?=\()/, className: styles.syntaxFunction });
@@ -4030,16 +5139,32 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
   onReject?: () => void; 
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
-  const [isCodeExpanded, setIsCodeExpanded] = useState(false);
-  const codeRef = useRef<HTMLPreElement>(null);
   const { openAIDiff } = useEditorStore();
 
-  // Auto-scroll to bottom during streaming
-  useEffect(() => {
-    if (codeRef.current && !isCodeExpanded) {
-      codeRef.current.scrollTop = codeRef.current.scrollHeight;
-    }
-  }, [operation.content, operation.newContent, operation.oldContent, isCodeExpanded]);
+  const languageFromPath = (p: string): string => {
+    const ext = (p.split('.').pop() || '').toLowerCase();
+    const map: Record<string, string> = {
+      ts: 'typescript',
+      tsx: 'typescript',
+      js: 'javascript',
+      jsx: 'javascript',
+      py: 'python',
+      rs: 'rust',
+      go: 'go',
+      java: 'java',
+      yml: 'yaml',
+      yaml: 'yaml',
+      json: 'json',
+      md: 'markdown',
+      sh: 'bash',
+      gradle: 'gradle',
+      groovy: 'groovy',
+      properties: 'properties',
+      xml: 'xml',
+      toml: 'toml',
+    };
+    return map[ext] || ext || 'text';
+  };
 
   const getOperationTitle = () => {
     switch (operation.type) {
@@ -4087,29 +5212,15 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
 
   const renderCodeBlock = (content: string | undefined, className: string) => {
     if (!content) return null;
-    
-    const lines = content.split('\n').length;
-    const needsExpand = lines > 20; // Show expand button if more than 20 lines
-    
+
     return (
       <div className={styles.codeBlockWrapper}>
-        <pre 
-          ref={codeRef}
-          className={`${className} ${!isCodeExpanded && needsExpand ? styles.codeCollapsed : styles.codeExpanded}`}
-        >
-          {content}
-        </pre>
-        {needsExpand && (
-          <button 
-            className={styles.codeExpandButton}
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsCodeExpanded(!isCodeExpanded);
-            }}
-          >
-            {isCodeExpanded ? 'Show Less' : `Show All (${lines} lines)`}
-          </button>
-        )}
+        <CodeBlock
+          code={content}
+          language={languageFromPath(operation.path)}
+          filename={operation.path}
+          isDiff={false}
+        />
       </div>
     );
   };
@@ -4193,7 +5304,7 @@ function FileOperationPreview({ operation, onApprove, onReject }: {
 
 // Group operations by file path
 interface GroupedFileOperation {
-  path: string;
+  path: string; // canonical workspace-relative path (normalized)
   operations: { op: PendingFileOperation; originalIndex: number }[];
   totalAdded: number;
   totalRemoved: number;
@@ -4201,11 +5312,33 @@ interface GroupedFileOperation {
   anyApplied: boolean;
 }
 
-function groupOperationsByFile(operations: PendingFileOperation[]): GroupedFileOperation[] {
+function sanitizeOperationPath(rawPath: string): string {
+  // Remove invisible/control characters that can sneak into model output and
+  // cause "duplicate" entries + invalid path errors.
+  return (rawPath || '')
+    .normalize('NFC')
+    .replace(/\\/g, '/')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    // Normalize odd unicode spaces to regular spaces (then trim).
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .trim()
+    .replace(/\/{2,}/g, '/')
+    .replace(/^\.\/+/, '');
+}
+
+function canonicalizeOperationPath(opPath: string, workspaceRoot?: string): string {
+  if (!workspaceRoot) return opPath;
+  const cleaned = sanitizeOperationPath(opPath);
+  const relativePath = resolveWorkspaceRelativePath(workspaceRoot, cleaned);
+  return normalizeRepoRelativePath(workspaceRoot, relativePath);
+}
+
+function groupOperationsByFile(operations: PendingFileOperation[], workspaceRoot?: string): GroupedFileOperation[] {
   const groupMap = new Map<string, GroupedFileOperation>();
   
   operations.forEach((op, index) => {
-    const path = op.operation.path;
+    const path = canonicalizeOperationPath(op.operation.path, workspaceRoot);
     if (!groupMap.has(path)) {
       groupMap.set(path, {
         path,
@@ -4240,6 +5373,7 @@ function groupOperationsByFile(operations: PendingFileOperation[]): GroupedFileO
 // Unified File Operations Control Bar
 function FileOperationsBar({ 
   operations, 
+  workspaceRoot,
   expanded,
   onToggleExpanded,
   onKeepAll, 
@@ -4250,9 +5384,11 @@ function FileOperationsBar({
   onDismiss,
   onViewFile,
   onAcceptFile,
-  onUndoFile
+  onUndoFile,
+  isProcessing = false,
 }: { 
   operations: PendingFileOperation[];
+  workspaceRoot?: string;
   expanded: boolean;
   onToggleExpanded: () => void;
   onKeepAll: () => void;
@@ -4264,13 +5400,20 @@ function FileOperationsBar({
   onViewFile: (path: string) => void;
   onAcceptFile: (index: number) => void;
   onUndoFile: (index: number) => void;
+  isProcessing?: boolean;
 }) {
   if (operations.length === 0) return null;
 
   // Group operations by file path
-  const groupedOps = groupOperationsByFile(operations);
+  const groupedOps = groupOperationsByFile(operations, workspaceRoot);
   const fileCount = groupedOps.length;
   const appliedFileCount = groupedOps.filter(g => g.allApplied).length;
+  
+  // Count operations that can actually be auto-applied (not already applied, not requiring overwrite, not invalid)
+  const canAutoApplyCount = operations.filter(op => 
+    !op.applied && !op.requiresOverwrite && !op.operation.invalidReason
+  ).length;
+  
   const pendingCount = fileCount - appliedFileCount;
 
   // If all operations are applied, show a dismiss option instead of hiding completely
@@ -4316,8 +5459,52 @@ function FileOperationsBar({
     return path.split('/').pop() || path;
   };
 
+  const buildUniqueDisplayPaths = (paths: string[]) => {
+    const cleanedPaths = paths.map((p) => sanitizeOperationPath(p));
+    const partsByPath = new Map<string, string[]>();
+    cleanedPaths.forEach((p) => {
+      partsByPath.set(p, p.split('/').filter(Boolean));
+    });
+
+    const result = new Map<string, string>();
+    const minLen = 2;
+    const maxLen = Math.max(1, ...cleanedPaths.map((p) => (partsByPath.get(p) || []).length));
+
+    for (let len = minLen; len <= maxLen; len++) {
+      const counts = new Map<string, number>();
+      cleanedPaths.forEach((p) => {
+        if (result.has(p)) return;
+        const parts = partsByPath.get(p) || [];
+        const sliceLen = Math.min(len, parts.length);
+        const suffix = parts.slice(Math.max(0, parts.length - sliceLen)).join('/');
+        counts.set(suffix, (counts.get(suffix) || 0) + 1);
+      });
+
+      cleanedPaths.forEach((p) => {
+        if (result.has(p)) return;
+        const parts = partsByPath.get(p) || [];
+        const sliceLen = Math.min(len, parts.length);
+        const suffix = parts.slice(Math.max(0, parts.length - sliceLen)).join('/');
+        if ((counts.get(suffix) || 0) === 1) {
+          result.set(p, suffix || p);
+        }
+      });
+    }
+
+    // Fallback to full path for any remaining collisions.
+    cleanedPaths.forEach((p) => {
+      if (!result.has(p)) result.set(p, p);
+    });
+
+    return result;
+  };
+
+  const displayPathByCanonical = buildUniqueDisplayPaths(groupedOps.map((g) => g.path));
+
   // Show batch actions only if there are pending operations
   const showBatchActions = pendingCount > 0;
+  // Disable Keep All if there's nothing that can be auto-applied
+  const canKeepAll = canAutoApplyCount > 0;
 
   return (
     <div className={styles.fileOpsBar}>
@@ -4335,6 +5522,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onDismiss(); }}
               title="Dismiss file operations"
+              disabled={isProcessing}
             >
               Dismiss
             </button>
@@ -4342,6 +5530,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
               title="Undo All"
+              disabled={isProcessing}
             >
               Undo All
             </button>
@@ -4349,6 +5538,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
               title="Soft undo (restore pre-apply content only)"
+              disabled={isProcessing}
             >
               Soft Undo
             </button>
@@ -4356,6 +5546,7 @@ function FileOperationsBar({
               className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
               onClick={(e) => { e.stopPropagation(); onViewAll(); }}
               title="View All Changes"
+              disabled={isProcessing}
             >
               View All
             </button>
@@ -4366,6 +5557,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
               title="Undo All"
+              disabled={isProcessing}
             >
               Undo All
             </button>
@@ -4373,13 +5565,15 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
               title="Soft undo (restore pre-apply content only)"
+              disabled={isProcessing}
             >
               Soft Undo
             </button>
             <button 
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onKeepAll(); }}
-              title="Keep All"
+              title={canKeepAll ? "Keep All" : "No operations can be auto-applied"}
+              disabled={isProcessing || !canKeepAll}
             >
               Keep All
             </button>
@@ -4387,6 +5581,7 @@ function FileOperationsBar({
               className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
               onClick={(e) => { e.stopPropagation(); onViewAll(); }}
               title="View All Changes"
+              disabled={isProcessing}
             >
               View All
             </button>
@@ -4406,7 +5601,9 @@ function FileOperationsBar({
                 {getFileIcon(group.operations[0].op.operation.type)}
               </span>
               <span className={styles.fileOpsItemName}>
-                {getFileName(group.path)}
+                <span title={group.path}>
+                  {displayPathByCanonical.get(sanitizeOperationPath(group.path)) || group.path}
+                </span>
               </span>
               <span className={styles.fileOpsItemStats}>
                 {group.totalAdded > 0 && <span style={{ color: '#4caf50' }}>+{group.totalAdded}</span>}
@@ -4428,6 +5625,7 @@ function FileOperationsBar({
                         });
                       }}
                       title="Accept"
+                      disabled={isProcessing}
                     >
                       ✓
                     </button>
@@ -4443,6 +5641,7 @@ function FileOperationsBar({
                         });
                       }}
                       title="Reject"
+                      disabled={isProcessing}
                     >
                       ✕
                     </button>
@@ -4460,6 +5659,7 @@ function FileOperationsBar({
                       });
                     }}
                     title="Undo"
+                    disabled={isProcessing}
                   >
                     ✕
                   </button>
@@ -4487,6 +5687,12 @@ export function AIPanel() {
     agentTasks,
     webAccessStatus,
     webAccessTraces,
+    pendingQuestions,
+    questionBlockingStream,
+    setPendingQuestions,
+    answerQuestion,
+    clearPendingQuestions,
+    setQuestionBlockingStream,
     sessionUsage,
     lastMessageUsage,
     contextBreakdown,
@@ -4502,6 +5708,7 @@ export function AIPanel() {
     refreshAvailableModels,
     availableModels,
     copilotModelsMetadata,
+    importConversationsFromFile,
     clearAgentTasks,
     updateSessionUsage,
     resetSessionUsage,
@@ -4531,9 +5738,11 @@ export function AIPanel() {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; name: string } | null>(null);
   const [allPendingOps, setAllPendingOps] = useState<PendingFileOperation[]>([]);
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
   const [showFileOps, setShowFileOps] = useState(false);
+  const [isFileOpsProcessing, setIsFileOpsProcessing] = useState(false);
   const [showProcessingIndicator, setShowProcessingIndicator] = useState(false);
   const [pendingResponse, setPendingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -4550,6 +5759,18 @@ export function AIPanel() {
       setSelectedSubagentProfileId(next);
     }
   }, [config.defaultSubagentProfileId, subagentProfiles, selectedSubagentProfileId]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPreviewImage(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [previewImage]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { deleteConversation, importConversationsFromPath } = useAIStore();
@@ -4677,6 +5898,27 @@ export function AIPanel() {
     lastPendingOpsCountRef.current = nextCount;
   }, [allPendingOps.length]);
 
+  // Listen for file-op-applied events from AIDiffEditor (when user clicks Overwrite/Apply)
+  useEffect(() => {
+    const handleFileOpApplied = (e: Event) => {
+      const customEvent = e as CustomEvent<{ filePath: string; operationType: string }>;
+      const { filePath } = customEvent.detail;
+      
+      setAllPendingOps(prev => prev.map(op => {
+        // Match by normalized path
+        const opPath = canonicalizeOperationPath(op.operation.path, currentWorkspace?.rootPath);
+        const eventPath = canonicalizeOperationPath(filePath, currentWorkspace?.rootPath);
+        if (opPath === eventPath) {
+          return { ...op, applied: true, requiresOverwrite: false, wasSkipped: false };
+        }
+        return op;
+      }));
+    };
+    
+    window.addEventListener('file-op-applied', handleFileOpApplied);
+    return () => window.removeEventListener('file-op-applied', handleFileOpApplied);
+  }, [currentWorkspace?.rootPath]);
+
   useEffect(() => {
     if (!aiAutoApplyFileOps) return;
     if (!autoApplyArmedRef.current) return;
@@ -4742,13 +5984,16 @@ export function AIPanel() {
       };
 
       try {
-        const status = await git.status(currentWorkspace.rootPath);
-        statusPaths = [
-          ...status.staged.map((entry) => entry.path),
-          ...status.unstaged.map((entry) => entry.path),
-          ...status.untracked.map((entry) => entry.path),
-        ];
-        hasStatusPaths = statusPaths.length > 0;
+        const isRepo = await git.isGitRepo(currentWorkspace.rootPath);
+        if (isRepo) {
+          const status = await git.status(currentWorkspace.rootPath);
+          statusPaths = [
+            ...status.staged.map((entry) => entry.path),
+            ...status.unstaged.map((entry) => entry.path),
+            ...status.untracked.map((entry) => entry.path),
+          ];
+          hasStatusPaths = statusPaths.length > 0;
+        }
       } catch (error) {
         console.warn('Failed to check git status for file ops:', error);
       }
@@ -4884,6 +6129,7 @@ export function AIPanel() {
 
   useEffect(() => {
     setShowFileOps(false);
+    setAllPendingOps([]);
     autoScrollLockRef.current = true;
     scheduleScrollToBottom('auto');
   }, [activeConversation?.id, scheduleScrollToBottom]);
@@ -4925,6 +6171,48 @@ export function AIPanel() {
     window.addEventListener('resize', handleWindowResize);
     return () => window.removeEventListener('resize', handleWindowResize);
   }, [resizeTextarea]);
+
+  // Listen for prefill-ai-input events from MonacoEditor/CodeBlock (line number context menu)
+  useEffect(() => {
+    const handlePrefillInput = (e: Event) => {
+      const customEvent = e as CustomEvent<{
+        action: 'review' | 'ask' | 'research';
+        lineNumber: number;
+        lineContent: string;
+        filename?: string;
+        language?: string;
+        startNewConversation?: boolean;
+      }>;
+      const { action, lineNumber, lineContent, filename, language, startNewConversation } = customEvent.detail;
+      
+      // Create new conversation if requested
+      if (startNewConversation) {
+        createConversation();
+      }
+      
+      // Build a clean, user-friendly prompt for the input
+      const actionLabel = action === 'review' ? 'Review' : action === 'ask' ? 'Question about' : 'Research';
+      const fileInfo = filename ? ` (${filename}${language ? `, ${language}` : ''})` : '';
+      const codeBlock = `\`\`\`${language || ''}\n${lineContent}\n\`\`\``;
+      
+      // Pre-fill with a clean format - user can add their context
+      const prefillText = `${actionLabel} line ${lineNumber}${fileInfo}:\n\n${codeBlock}\n\n`;
+      
+      setInput(prefillText);
+      setTimeout(() => {
+        resizeTextarea();
+        // Focus the textarea and move cursor to end
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          textareaRef.current.selectionStart = textareaRef.current.value.length;
+          textareaRef.current.selectionEnd = textareaRef.current.value.length;
+        }
+      }, 100);
+    };
+    
+    window.addEventListener('prefill-ai-input', handlePrefillInput);
+    return () => window.removeEventListener('prefill-ai-input', handlePrefillInput);
+  }, [createConversation, resizeTextarea]);
 
   useEffect(() => {
     if (config.provider === 'ollama' || config.provider === 'copilot') {
@@ -5280,31 +6568,59 @@ export function AIPanel() {
   };
 
   useEffect(() => {
+    let mounted = true;
     let unlistenDrop: (() => void) | null = null;
     let unlistenHover: (() => void) | null = null;
     let unlistenCancel: (() => void) | null = null;
 
     const setup = async () => {
       console.log('[AIPanel] Setting up Tauri native file drop listeners');
-      unlistenDrop = await appEvents.onFileDrop(async (paths) => {
-        console.log('[AIPanel] Tauri file-drop event received, paths:', paths);
-        setIsDragging(false);
-        await handleFilePathUpload(paths);
-      });
-      unlistenHover = await appEvents.onFileDropHover((paths) => {
-        console.log('[AIPanel] Tauri file-drop-hover event, paths:', paths);
-        setIsDragging(true);
-      });
-      unlistenCancel = await appEvents.onFileDropCancel(() => {
-        console.log('[AIPanel] Tauri file-drop-cancelled event');
-        setIsDragging(false);
-      });
-      console.log('[AIPanel] Tauri native file drop listeners set up');
+      try {
+        const dropUnsub = await appEvents.onFileDrop(async (paths) => {
+          console.log('[AIPanel] Tauri file-drop event received, paths:', paths);
+          if (!mounted) {
+            console.log('[AIPanel] Component unmounted, ignoring drop event');
+            return;
+          }
+          setIsDragging(false);
+          await handleFilePathUpload(paths);
+        });
+        if (mounted) {
+          unlistenDrop = dropUnsub;
+        } else {
+          dropUnsub();
+        }
+
+        const hoverUnsub = await appEvents.onFileDropHover((paths) => {
+          console.log('[AIPanel] Tauri file-drop-hover event, paths:', paths);
+          if (mounted) setIsDragging(true);
+        });
+        if (mounted) {
+          unlistenHover = hoverUnsub;
+        } else {
+          hoverUnsub();
+        }
+
+        const cancelUnsub = await appEvents.onFileDropCancel(() => {
+          console.log('[AIPanel] Tauri file-drop-cancelled event');
+          if (mounted) setIsDragging(false);
+        });
+        if (mounted) {
+          unlistenCancel = cancelUnsub;
+        } else {
+          cancelUnsub();
+        }
+
+        console.log('[AIPanel] Tauri native file drop listeners set up successfully');
+      } catch (error) {
+        console.error('[AIPanel] Failed to set up Tauri file drop listeners:', error);
+      }
     };
 
     setup();
 
     return () => {
+      mounted = false;
       unlistenDrop?.();
       unlistenHover?.();
       unlistenCancel?.();
@@ -5346,11 +6662,12 @@ export function AIPanel() {
   };
 
   const normalizeOperationPath = (opPath: string, workspaceRoot: string) => {
-    const invalidReason = getInvalidPathReason(opPath, workspaceRoot);
+    const cleaned = sanitizeOperationPath(opPath);
+    const invalidReason = getInvalidPathReason(cleaned, workspaceRoot);
     if (invalidReason) {
       return { normalizedOpPath: '', fullPath: '', error: invalidReason };
     }
-    const normalizedOpPath = normalizeRepoRelativePath(workspaceRoot, opPath);
+    const normalizedOpPath = normalizeRepoRelativePath(workspaceRoot, cleaned);
     const rootNormalized = workspaceRoot.replace(/\/+$/, '');
     const fullPath = `${rootNormalized}/${normalizedOpPath}`.replace(/\/+/g, '/');
     if (!fullPath.startsWith(`${rootNormalized}/`) && fullPath !== rootNormalized) {
@@ -5392,9 +6709,10 @@ export function AIPanel() {
     }
   };
 
-  const handleKeepAllOperations = async (options?: { skipReview?: boolean }) => {
+  const handleKeepAllOperations = async (options?: { skipReview?: boolean; openFilesAfterApply?: boolean }) => {
     const { currentWorkspace } = useWorkspaceStore.getState();
     const { openFile } = useEditorStore.getState();
+    const openFilesAfterApply = options?.openFilesAfterApply ?? false;
     
     if (!currentWorkspace) {
       console.error('No workspace open');
@@ -5409,10 +6727,11 @@ export function AIPanel() {
       return;
     }
 
+    setIsFileOpsProcessing(true);
     await useAIStore.getState().withWorkspaceWriteLock('fileOps.applyAll', async () => {
       let successCount = 0;
       let skippedCount = 0;
-      let overwriteRequiredCount = 0;
+      const overwriteRequiredPaths = new Set<string>();
       let invalidCount = 0;
       const updatedOps = [...allPendingOps];
 
@@ -5483,7 +6802,7 @@ export function AIPanel() {
                 requiresOverwrite: true,
               };
               skippedCount++;
-              overwriteRequiredCount++;
+              overwriteRequiredPaths.add(normalizedOpPath);
               continue;
             }
             
@@ -5508,7 +6827,9 @@ export function AIPanel() {
             }
             // Save to local history
             await history.save(item.operation.path, item.operation.content || '').catch(console.error);
-            await openFile(fullPath);
+            if (openFilesAfterApply) {
+              await openFile(fullPath);
+            }
             updatedOps[i] = {
               ...updatedOps[i],
               applied: true,
@@ -5549,7 +6870,9 @@ export function AIPanel() {
             await fs.writeFile(fullPath, updatedContent);
             // Save to local history
             await history.save(item.operation.path, updatedContent).catch(console.error);
-            await openFile(fullPath);
+            if (openFilesAfterApply) {
+              await openFile(fullPath);
+            }
             updatedOps[i] = {
               ...updatedOps[i],
               applied: true,
@@ -5605,10 +6928,10 @@ export function AIPanel() {
       );
       markFileOperationsAsKept(operationIds);
 
-      if (overwriteRequiredCount > 0) {
+      if (overwriteRequiredPaths.size > 0) {
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: {
-            message: `${overwriteRequiredCount} file(s) require overwrite. Review the AI diff to apply.`,
+            message: `${overwriteRequiredPaths.size} file(s) require overwrite. Review the AI diff to apply.`,
             type: 'info'
           }
         }));
@@ -5625,15 +6948,23 @@ export function AIPanel() {
 
       if (successCount > 0) {
         console.log(`[FileOps] SUCCESS: Applied ${successCount} file(s) to: ${currentWorkspace.rootPath}`);
+        // Ensure Explorer reflects new/updated files even if FS watch misses the burst.
+        window.dispatchEvent(new CustomEvent('workspace-refresh', { detail: { reason: 'file-ops' } }));
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: { message: `Applied ${successCount} file(s) to ${currentWorkspace.rootPath}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`, type: 'success' }
         }));
-      } else if (skippedCount > 0) {
+      } else if (skippedCount > 0 && overwriteRequiredPaths.size === 0 && invalidCount === 0) {
+        // Only show "all applied" if everything was genuinely already applied (not skipped for other reasons)
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: { message: 'All operations already applied', type: 'info' }
         }));
+      } else if (skippedCount > 0 && overwriteRequiredPaths.size === 0 && invalidCount > 0) {
+        // Some operations were invalid, already notified above
+      } else if (skippedCount > 0 && overwriteRequiredPaths.size > 0) {
+        // Some operations require overwrite, already notified above
       }
     });
+    setIsFileOpsProcessing(false);
   };
 
   // Auto-apply file operations when streaming ends
@@ -5668,8 +6999,10 @@ export function AIPanel() {
   };
 
   const handleUndoAllOperations = () => {
+    setIsFileOpsProcessing(true);
     void (async () => {
       const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      const { clearAllAIState } = useEditorStore.getState();
       let undoneCount = 0;
       const undonePaths = new Set<string>();
       const workspaceRoot = useWorkspaceStore.getState().currentWorkspace?.rootPath;
@@ -5679,12 +7012,15 @@ export function AIPanel() {
 
       if (workspaceRoot) {
         try {
-          const status = await git.status(workspaceRoot);
-          statusPaths = [
-            ...status.staged.map((entry) => entry.path),
-            ...status.unstaged.map((entry) => entry.path),
-            ...status.untracked.map((entry) => entry.path),
-          ];
+          const isRepo = await git.isGitRepo(workspaceRoot);
+          if (isRepo) {
+            const status = await git.status(workspaceRoot);
+            statusPaths = [
+              ...status.staged.map((entry) => entry.path),
+              ...status.unstaged.map((entry) => entry.path),
+              ...status.untracked.map((entry) => entry.path),
+            ];
+          }
         } catch (error) {
           console.warn('Failed to load git status for undo:', error);
         }
@@ -5722,15 +7058,20 @@ export function AIPanel() {
       }
 
       setAllPendingOps([]);
+      clearAllAIState();
+      window.dispatchEvent(new CustomEvent('file-ops-cleared'));
       window.dispatchEvent(new CustomEvent('show-notification', {
         detail: { message: undoneCount > 0 ? `Undid ${undoneCount} file(s)` : 'Removed all file operations', type: 'info' }
       }));
+      setIsFileOpsProcessing(false);
     })();
   };
 
   const handleSoftUndoAllOperations = () => {
+    setIsFileOpsProcessing(true);
     void (async () => {
       const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      const { clearAllAIState } = useEditorStore.getState();
       let undoneCount = 0;
 
       for (const item of allPendingOps) {
@@ -5752,14 +7093,18 @@ export function AIPanel() {
       }
 
       setAllPendingOps([]);
+      clearAllAIState();
+      window.dispatchEvent(new CustomEvent('file-ops-cleared'));
       window.dispatchEvent(new CustomEvent('show-notification', {
         detail: { message: undoneCount > 0 ? `Soft-undoed ${undoneCount} file(s)` : 'Removed all file operations', type: 'info' }
       }));
+      setIsFileOpsProcessing(false);
     })();
   };
 
   const handleDismissFileOperations = () => {
     const { unmarkFileOperationsAsKept } = useAIStore.getState();
+    const { clearAllAIState } = useEditorStore.getState();
     const operationIds = allPendingOps.map(item =>
       `${item.messageId}:${item.operation.type}:${item.operation.path}`
     );
@@ -5768,6 +7113,8 @@ export function AIPanel() {
     }
     setAllPendingOps([]);
     setShowFileOps(false);
+    clearAllAIState();
+    window.dispatchEvent(new CustomEvent('file-ops-cleared'));
     window.dispatchEvent(new CustomEvent('show-notification', {
       detail: { message: 'Dismissed file operations', type: 'info' }
     }));
@@ -5974,6 +7321,19 @@ export function AIPanel() {
     if (!currentWorkspace) return;
     if (item.applied) {
       const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, item.operation.path);
+      const isRepo = await git.isGitRepo(currentWorkspace.rootPath).catch(() => false);
+      if (!isRepo) {
+        const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
+        openAIDiff(
+          item.operation.path,
+          diffPayload.oldContent,
+          diffPayload.newContent,
+          diffPayload.operationType,
+          diffPayload.requiresOverwrite,
+          item.applied
+        );
+        return;
+      }
       try {
         const status = await git.status(currentWorkspace.rootPath);
         const normalizedTarget = normalizeRepoRelativePath(currentWorkspace.rootPath, relativePath);
@@ -5991,8 +7351,16 @@ export function AIPanel() {
           || getDiffStatusFromOperation(item.operation);
         openDiff(currentWorkspace.rootPath, normalizedTarget, Boolean(stagedEntry), diffStatus);
       } catch (error) {
-        const status = getDiffStatusFromOperation(item.operation);
-        openDiff(currentWorkspace.rootPath, relativePath, false, status);
+        // If status lookup failed (e.g. repo mis-detected), fall back to a disk-based AI diff.
+        const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
+        openAIDiff(
+          item.operation.path,
+          diffPayload.oldContent,
+          diffPayload.newContent,
+          diffPayload.operationType,
+          diffPayload.requiresOverwrite,
+          item.applied
+        );
       }
       return;
     }
@@ -6013,9 +7381,10 @@ export function AIPanel() {
     if (allPendingOps.length === 0) return;
     const grouped = new Map<string, PendingFileOperation[]>();
     allPendingOps.forEach((item) => {
-      const list = grouped.get(item.operation.path) || [];
+      const key = canonicalizeOperationPath(item.operation.path, currentWorkspace.rootPath);
+      const list = grouped.get(key) || [];
       list.push(item);
-      grouped.set(item.operation.path, list);
+      grouped.set(key, list);
     });
 
     for (const items of grouped.values()) {
@@ -6030,7 +7399,10 @@ export function AIPanel() {
   const handleViewFileOperation = async (path: string) => {
     if (!currentWorkspace) return;
     setShowEditorPanel(true);
-    const matches = allPendingOps.filter((op) => op.operation.path === path);
+    const targetKey = canonicalizeOperationPath(path, currentWorkspace.rootPath);
+    const matches = allPendingOps.filter((op) =>
+      canonicalizeOperationPath(op.operation.path, currentWorkspace.rootPath) === targetKey
+    );
     if (matches.length > 0) {
       const item = matches.find((entry) => entry.applied) || matches[0];
       await openAIOperationPreview(item);
@@ -6038,7 +7410,16 @@ export function AIPanel() {
       return;
     }
     const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, path);
-    openDiff(currentWorkspace.rootPath, relativePath, false);
+    const isRepo = await git.isGitRepo(currentWorkspace.rootPath).catch(() => false);
+    if (isRepo) {
+      openDiff(currentWorkspace.rootPath, relativePath, false);
+    } else {
+      const { openFile } = useEditorStore.getState();
+      const { fullPath, error } = normalizeOperationPath(path, currentWorkspace.rootPath);
+      if (!error && fullPath) {
+        await openFile(fullPath);
+      }
+    }
     setHasReviewedPendingOps(true);
   };
 
@@ -6132,6 +7513,58 @@ export function AIPanel() {
       setTimeout(() => setImportStatus(null), 3000);
     } catch (error) {
       setImportStatus('Failed to import');
+      setTimeout(() => setImportStatus(null), 3000);
+    }
+  };
+
+  const handleImportFromFile = async () => {
+    try {
+      const selected = await dialog.openFile();
+      if (!selected) return;
+
+      setImportStatus('Importing file...');
+      const result = await importConversationsFromFile(selected);
+
+      if (result.error) {
+        setImportStatus(`Error: ${result.error}`);
+      } else if (result.imported > 0) {
+        setImportStatus(`Imported ${result.imported} conversation${result.imported > 1 ? 's' : ''}`);
+      } else {
+        setImportStatus('No conversations to import');
+      }
+
+      setTimeout(() => setImportStatus(null), 3000);
+    } catch {
+      setImportStatus('Failed to import file');
+      setTimeout(() => setImportStatus(null), 3000);
+    }
+  };
+
+  const handleExportActiveConversation = async () => {
+    try {
+      if (!activeConversation) return;
+
+      const safeName = (activeConversation.title || 'chat')
+        .trim()
+        .replace(/[^\w.-]+/g, '_')
+        .slice(0, 80) || 'chat';
+
+      const target = await dialog.saveFile(`${safeName}.json`);
+      if (!target) return;
+
+      setImportStatus('Exporting...');
+
+      const payload = {
+        schema: 'opencodebrew.chat.export.v1',
+        exportedAt: new Date().toISOString(),
+        conversation: activeConversation,
+      };
+
+      await fs.writeFile(target, JSON.stringify(payload, null, 2));
+      setImportStatus('Exported chat');
+      setTimeout(() => setImportStatus(null), 3000);
+    } catch {
+      setImportStatus('Failed to export');
       setTimeout(() => setImportStatus(null), 3000);
     }
   };
@@ -6483,12 +7916,54 @@ export function AIPanel() {
                 plainTextTitle={isCodeReviewPrompt ? 'Review Input' : (isStreamingAssistant ? 'Streaming' : undefined)}
                 plainTextDefaultExpanded={isStreamingAssistant}
                   plainTextKind={isCodeReviewPrompt ? 'diff' : 'text'}
+                onImagePreview={(src, name) => setPreviewImage({ src, name })}
                 onOperationsChange={async (ops) => {
                   const { isFileOperationKept } = useAIStore.getState();
+
+                  const workspaceRoot = currentWorkspace?.rootPath;
+                  const preparedOps = (() => {
+                    const result: FileOperation[] = [];
+                    const lastIdxByKey = new Map<string, number>();
+                    const seenEditSignatures = new Set<string>();
+
+                    for (const op of ops) {
+                      const cleanedPath = sanitizeOperationPath(op.path);
+                      const opCleaned: FileOperation = { ...op, path: cleanedPath };
+                      const canonicalKey = workspaceRoot
+                        ? canonicalizeOperationPath(cleanedPath, workspaceRoot)
+                        : cleanedPath;
+
+                      if (opCleaned.type === 'create' || opCleaned.type === 'delete') {
+                        // Keep only the last create/delete per file within a single message.
+                        const key = `${opCleaned.type}:${canonicalKey}`;
+                        const existingIdx = lastIdxByKey.get(key);
+                        if (existingIdx !== undefined) {
+                          result[existingIdx] = opCleaned;
+                        } else {
+                          lastIdxByKey.set(key, result.length);
+                          result.push(opCleaned);
+                        }
+                        continue;
+                      }
+
+                      if (opCleaned.type === 'edit') {
+                        // Drop exact duplicates; keep distinct edits (order can matter).
+                        const sig = `edit:${canonicalKey}:${opCleaned.oldContent || ''}=>${opCleaned.newContent || ''}:${opCleaned.insertLine ?? ''}`;
+                        if (seenEditSignatures.has(sig)) continue;
+                        seenEditSignatures.add(sig);
+                        result.push(opCleaned);
+                        continue;
+                      }
+
+                      result.push(opCleaned);
+                    }
+
+                    return result;
+                  })();
                   
                   // Check if operations are kept or if files already exist
                   const opsWithStatus: PendingFileOperation[] = await Promise.all(
-                    ops.map(async (op) => {
+                    preparedOps.map(async (op) => {
                       const operationId = `${message.id}:${op.type}:${op.path}`;
                       
                       // First check if operation is marked as kept in history
@@ -6738,9 +8213,11 @@ export function AIPanel() {
       {showFileOps && (
         <FileOperationsBar
           operations={allPendingOps}
+          workspaceRoot={currentWorkspace?.rootPath}
           expanded={fileOpsExpanded}
           onToggleExpanded={() => setFileOpsExpanded(!fileOpsExpanded)}
-          onKeepAll={handleKeepAllOperations}
+          // Keep All should apply changes without opening a review tab per file.
+          onKeepAll={() => { void handleKeepAllOperations({ skipReview: true, openFilesAfterApply: false }); }}
           onUndoAll={handleUndoAllOperations}
           onSoftUndoAll={handleSoftUndoAllOperations}
           onDismiss={handleDismissFileOperations}
@@ -6749,6 +8226,7 @@ export function AIPanel() {
           onViewFile={handleViewFileOperation}
           onAcceptFile={handleAcceptFileOperation}
           onUndoFile={handleUndoFileOperation}
+          isProcessing={isFileOpsProcessing}
         />
       )}
 
@@ -6784,7 +8262,11 @@ export function AIPanel() {
               {attachments.map((attachment) => (
                 <div key={attachment.id} className={styles.attachmentItem}>
                   {attachment.type === 'image' ? (
-                    <div className={styles.attachmentPreview}>
+                    <div 
+                      className={styles.attachmentPreview}
+                      onClick={() => attachment.data && setPreviewImage({ src: attachment.data, name: attachment.name })}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <img src={attachment.data} alt={attachment.name} className={styles.attachmentImage} />
                       <div className={styles.attachmentOverlay}>
                         <ImageIcon size={16} />
@@ -6956,13 +8438,30 @@ export function AIPanel() {
             <div className={styles.historyHeader}>
               <h3>Chat History</h3>
               <div className={styles.historyActions}>
+                <button
+                  className={styles.importBtn}
+                  onClick={handleImportFromFile}
+                  title="Import chat from file"
+                >
+                  <Upload size={14} />
+                  <span>Import File</span>
+                </button>
                 <button 
                   className={styles.importBtn}
                   onClick={handleImportFromProject}
                   title="Import from another project"
                 >
                   <FolderOpen size={14} />
-                  <span>Import</span>
+                  <span>Import Project</span>
+                </button>
+                <button
+                  className={styles.importBtn}
+                  onClick={handleExportActiveConversation}
+                  title={activeConversation ? 'Export current chat to file' : 'Export current chat (open a chat first)'}
+                  disabled={!activeConversation}
+                >
+                  <Download size={14} />
+                  <span>Export</span>
                 </button>
                 <button 
                   className={styles.closeHistoryBtn}
@@ -7023,6 +8522,32 @@ export function AIPanel() {
             <div className={styles.dropMessage}>
               <Paperclip size={32} />
               <p>Drop files here to attach</p>
+            </div>
+          </div>
+        )}
+
+        {previewImage && (
+          <div 
+            className={styles.imagePreviewOverlay}
+            onClick={() => setPreviewImage(null)}
+          >
+            <div className={styles.imagePreviewContent} onClick={(e) => e.stopPropagation()}>
+              <div className={styles.imagePreviewHeader}>
+                <span className={styles.imagePreviewName}>{previewImage.name}</span>
+                <button 
+                  className={styles.imagePreviewClose}
+                  onClick={() => setPreviewImage(null)}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className={styles.imagePreviewBody}>
+                <img 
+                  src={previewImage.src} 
+                  alt={previewImage.name}
+                  className={styles.imagePreviewImage}
+                />
+              </div>
             </div>
           </div>
         )}

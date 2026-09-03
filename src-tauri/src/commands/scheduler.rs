@@ -2175,71 +2175,244 @@ async fn execute_ai_prompt_with_tools(
     system_prompt: Option<&str>,
     model_settings: Option<&ModelSettings>,
 ) -> Result<String, String> {
-    const MAX_TOOL_ITERATIONS: usize = 5;
+    const MAX_TOOL_ITERATIONS: usize = 2;  // Only allow 2 iterations to prevent timeouts
     
+    // Store the original prompt to preserve task context across iterations
+    let original_prompt = prompt.to_string();
     let mut current_prompt = prompt.to_string();
     let mut iteration = 0;
     let final_response;
     
+    // Track all collected tool results across iterations for fallback
+    let mut all_collected_results: Vec<String> = Vec::new();
+    
+    println!("╔══════════════════════════════════════════════════════════════════════════════");
+    println!("║ [scheduler::tools] STARTING execute_ai_prompt_with_tools");
+    println!("║ Original prompt ({} chars):", original_prompt.len());
+    println!("║ {}", &original_prompt[..std::cmp::min(500, original_prompt.len())].replace('\n', "\n║ "));
+    if original_prompt.len() > 500 {
+        println!("║ ... [truncated]");
+    }
+    println!("╚══════════════════════════════════════════════════════════════════════════════");
+    
     loop {
         iteration += 1;
-        println!("[scheduler::tools] Iteration {}/{}: Getting AI response for prompt ({} chars)...", 
-            iteration, MAX_TOOL_ITERATIONS, current_prompt.len());
+        println!("\n┌────────────────────────────────────────────────────────────────────────────");
+        println!("│ [scheduler::tools] ITERATION {}/{}", iteration, MAX_TOOL_ITERATIONS);
+        println!("│ Current prompt length: {} chars", current_prompt.len());
+        println!("└────────────────────────────────────────────────────────────────────────────");
         
         // Get AI response
         let response = execute_ai_prompt(app, &current_prompt, system_prompt, model_settings).await?;
         
-        println!("[scheduler::tools] AI response ({} chars): {}", 
-            response.len(), 
-            &response[..std::cmp::min(300, response.len())]);
+        println!("\n┌────────────────────────────────────────────────────────────────────────────");
+        println!("│ [scheduler::tools] AI RESPONSE (iteration {})", iteration);
+        println!("│ Response length: {} chars", response.len());
+        println!("│ First 800 chars:");
+        println!("│ {}", &response[..std::cmp::min(800, response.len())].replace('\n', "\n│ "));
+        if response.len() > 800 {
+            println!("│ ... [truncated, {} more chars]", response.len() - 800);
+        }
+        println!("└────────────────────────────────────────────────────────────────────────────");
         
         // Check if response contains tool calls
-        let has_tools = response.contains("<search_web") 
-            || response.contains("<fetch_url")
-            || response.contains("<get_stock_quote")
-            || response.contains("<get_market_movers");
+        let has_search_web = response.contains("<search_web");
+        let has_fetch_url = response.contains("<fetch_url");
+        let has_stock_quote = response.contains("<get_stock_quote");
+        let has_market_movers = response.contains("<get_market_movers");
+        let has_tools = has_search_web || has_fetch_url || has_stock_quote || has_market_movers;
+        
+        println!("│ Tool detection: search_web={}, fetch_url={}, stock_quote={}, market_movers={}", 
+            has_search_web, has_fetch_url, has_stock_quote, has_market_movers);
         
         if !has_tools || iteration >= MAX_TOOL_ITERATIONS {
             if iteration >= MAX_TOOL_ITERATIONS && has_tools {
-                println!("[scheduler::tools] Max iterations reached, returning response with unexecuted tools");
+                println!("│ ⚠️  Max iterations reached, stripping unexecuted tool tags from response");
+                // Strip tool tags from the response since we're not executing them
+                let cleaned = response
+                    .lines()
+                    .filter(|line| {
+                        !line.trim().starts_with("<search_web")
+                        && !line.trim().starts_with("<fetch_url")
+                        && !line.trim().starts_with("<get_stock_quote")
+                        && !line.trim().starts_with("<get_market_movers")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                final_response = if cleaned.trim().is_empty() || cleaned.trim() == "No results found." {
+                    // If response is useless, return the actual collected data
+                    if !all_collected_results.is_empty() {
+                        println!("│ 📊 Using collected tool results as output ({} results)", all_collected_results.len());
+                        all_collected_results.join("\n\n---\n\n")
+                    } else {
+                        "No data could be collected from searches.".to_string()
+                    }
+                } else {
+                    cleaned
+                };
             } else {
-                println!("[scheduler::tools] No tool calls detected, returning final response");
+                // Check if response is useless (like "No results found") but we have data
+                let is_useless = response.trim() == "No results found." 
+                    || response.trim() == "No results found"
+                    || response.trim().len() < 30;
+                    
+                if is_useless && !all_collected_results.is_empty() {
+                    println!("│ ⚠️ AI response unhelpful, using collected tool results instead");
+                    final_response = all_collected_results.join("\n\n---\n\n");
+                } else {
+                    println!("│ ✓ No tool calls detected, returning final response");
+                    final_response = response;
+                }
             }
-            final_response = response;
             break;
         }
         
-        println!("[scheduler::tools] AI response contains tool calls, executing and continuing...");
+        println!("│ 🔧 AI response contains tool calls, executing...");
         
         // Execute tools and get results
         let (_response_with_markers, tool_results) = execute_tools_in_response_with_results(&response).await;
         
+        println!("\n┌────────────────────────────────────────────────────────────────────────────");
+        println!("│ [scheduler::tools] TOOL RESULTS COLLECTED: {} results", tool_results.len());
+        for (i, result) in tool_results.iter().enumerate() {
+            println!("│ Result {} ({} chars):", i + 1, result.len());
+            println!("│ {}", &result[..std::cmp::min(500, result.len())].replace('\n', "\n│ "));
+            if result.len() > 500 {
+                println!("│ ... [truncated]");
+            }
+            println!("│ ----");
+        }
+        println!("└────────────────────────────────────────────────────────────────────────────");
+        
         if tool_results.is_empty() {
-            println!("[scheduler::tools] No tool results collected, returning response as-is");
+            println!("│ ⚠️  No tool results collected, returning AI response as-is");
             final_response = response;
             break;
         }
         
-        // Build continuation prompt with tool results
+        // Accumulate tool results for potential fallback
+        all_collected_results.extend(tool_results.clone());
+        
+        // Build continuation prompt with tool results, PRESERVING original task context
         let tool_results_text = tool_results.join("\n\n");
-        current_prompt = format!(
-            r#"Here are the ACTUAL results from the tools you requested:
+        
+        // Extract just the output format requirements from original prompt
+        // Remove tool tags AND the instructions about outputting them
+        let task_context = original_prompt
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.starts_with("<search_web") 
+                && !trimmed.starts_with("<fetch_url")
+                && !trimmed.starts_with("<get_stock_quote")
+                && !trimmed.starts_with("<get_market_movers")
+                && !trimmed.contains("OUTPUT THESE SEARCH TAGS")
+                && !trimmed.contains("copy them exactly")
+                && !trimmed.contains("output the <search_web>")
+                && !trimmed.starts_with("## STEP 1:")
+                && !trimmed.starts_with("The system will execute these searches")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("\n\n\n", "\n\n"); // Clean up multiple blank lines
+        
+        println!("\n┌────────────────────────────────────────────────────────────────────────────");
+        println!("│ [scheduler::tools] TASK CONTEXT (after stripping tool-related instructions):");
+        println!("│ {}", task_context.replace('\n', "\n│ "));
+        println!("└────────────────────────────────────────────────────────────────────────────");
+        
+        // Build a clear continuation prompt focused on using the search results
+        // Check if NEXT iteration would be final - if so, send final prompt now
+        let is_final = (iteration + 1) >= MAX_TOOL_ITERATIONS;
+        
+        println!("[scheduler::tools] Building continuation prompt - iteration={}, max={}, is_final={}", 
+            iteration, MAX_TOOL_ITERATIONS, is_final);
+        
+        current_prompt = if is_final {
+            // FINAL ITERATION - Force output, no tool calls
+            format!(
+                r#"FINAL - EXTRACT AND LIST ALL PRICES NOW
+
+NO MORE TOOL CALLS. Parse the data below and list every price found.
+
+📊 DATA:
+{}
+
+---
+
+📋 TASK: {}
+
+EXTRACT EVERY PRICE - look for patterns like:
+- "at $4.429" or "$4.872" → extract the price
+- "lowest-priced...at Costco Clarkston at $4.429" → Costco Clarkston - $4.429
+- "averages $4.872" → State Average - $4.872
+
+**Output as list:**
+- Station Name - $X.XX - Location
+
+DO NOT say "prices not found". Every "$X.XX" in the data above is a real price - LIST IT."#,
+                tool_results_text,
+                task_context.lines().find(|l| !l.trim().is_empty()).unwrap_or("complete the task")
+            )
+        } else {
+            // First iteration - allow tool calls
+            format!(
+                r#"📊 DATA COLLECTED (Iteration {}/{}):
 
 {}
 
-🚨 CRITICAL RULES:
-1. ONLY use data that appears EXACTLY in the results above
-2. DO NOT invent, estimate, or make up ANY numbers, prices, or facts
-3. If the data you need is not in these results, say "Data not available" - do NOT fabricate it
-4. Every stock price, percentage, and statistic in your response MUST come from above
-5. Do NOT use <fetch_url> to fetch stock/market data websites - they often require JavaScript and will fail
+---
 
-Now provide your response using ONLY the real data above."#,
-            tool_results_text
-        );
+📋 YOUR TASK:
+Using the data above, {}
+
+**Requirements:**
+{}
+
+**Output Format:**
+{}
+
+---
+
+INSTRUCTIONS:
+1. If you need more specific data, you may use <fetch_url url="..."> to get page content
+2. Extract prices, station names, and addresses from the data
+3. If you have enough data, produce your final formatted response
+4. Do NOT make up data - only use what appears in the results
+
+You may request ONE more URL fetch if needed, or produce your final response:"#,
+                iteration, MAX_TOOL_ITERATIONS,
+                tool_results_text,
+                task_context.lines().find(|l| !l.trim().is_empty()).unwrap_or("complete the task"),
+                task_context.lines()
+                    .skip_while(|l| !l.contains("Requirements:") && !l.contains("- Fuel type") && !l.contains("- Preferred"))
+                    .take_while(|l| !l.contains("Output Format") && !l.contains("Example:"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                task_context.lines()
+                    .skip_while(|l| !l.contains("Output Format") && !l.contains("Example:"))
+                    .take_while(|l| !l.contains("IMPORTANT:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
         
-        println!("[scheduler::tools] Built continuation prompt with {} tool results", tool_results.len());
+        println!("\n┌────────────────────────────────────────────────────────────────────────────");
+        println!("│ [scheduler::tools] CONTINUATION PROMPT ({} chars):", current_prompt.len());
+        println!("│ {}", &current_prompt[..std::cmp::min(1000, current_prompt.len())].replace('\n', "\n│ "));
+        if current_prompt.len() > 1000 {
+            println!("│ ... [truncated, {} more chars]", current_prompt.len() - 1000);
+        }
+        println!("└────────────────────────────────────────────────────────────────────────────");
     }
+    
+    println!("\n╔══════════════════════════════════════════════════════════════════════════════");
+    println!("║ [scheduler::tools] FINAL RESPONSE ({} chars):", final_response.len());
+    println!("║ {}", &final_response[..std::cmp::min(500, final_response.len())].replace('\n', "\n║ "));
+    if final_response.len() > 500 {
+        println!("║ ... [truncated]");
+    }
+    println!("╚══════════════════════════════════════════════════════════════════════════════");
     
     // Validate response for fake data against live market data
     println!("[scheduler::tools] Validating AI response against live market data...");
@@ -2256,18 +2429,45 @@ async fn execute_tools_in_response_with_results(response: &str) -> (String, Vec<
     let mut result = response.to_string();
     let mut tool_results = Vec::new();
     
-    println!("[scheduler::tools] Processing AI response ({} chars) for tool calls...", response.len());
+    println!("\n┌────────────────────────────────────────────────────────────────────────────");
+    println!("│ [scheduler::tools] PARSING TOOL CALLS from AI response ({} chars)", response.len());
+    println!("└────────────────────────────────────────────────────────────────────────────");
     
     // Parse search_web calls - flexible patterns for different AI output formats
     let search_re = Regex::new(r#"<search_web\s+query\s*=\s*["']([^"']+)["']\s*/?>"#).unwrap();
-    for cap in search_re.captures_iter(response) {
+    let search_matches: Vec<_> = search_re.captures_iter(response).collect();
+    
+    println!("│ Found {} search_web tags in response", search_matches.len());
+    
+    // Also check for alternate patterns the AI might use
+    if search_matches.is_empty() {
+        // Check if response contains search_web but in different format
+        if response.contains("search_web") {
+            println!("│ ⚠️  Response contains 'search_web' but regex didn't match!");
+            println!("│ Looking for patterns in response...");
+            for line in response.lines() {
+                if line.contains("search_web") {
+                    println!("│   Line with search_web: {}", line);
+                }
+            }
+        }
+    }
+    
+    for cap in search_matches {
         let query = &cap[1];
         let full_match = cap.get(0).unwrap().as_str();
         
-        println!("[scheduler::tools] Executing search_web: query=\"{}\"", query);
+        println!("│ ");
+        println!("│ 🔍 EXECUTING search_web:");
+        println!("│    Query: \"{}\"", query);
+        println!("│    Matched tag: {}", full_match);
+        
         match web::search_web(query.to_string(), Some(5)).await {
             Ok(results) => {
-                println!("[scheduler::tools] search_web returned {} results", results.len());
+                println!("│    ✓ Got {} results from search_web", results.len());
+                for (i, r) in results.iter().enumerate() {
+                    println!("│      [{}] {} - {}", i+1, r.title, &r.snippet[..std::cmp::min(100, r.snippet.len())]);
+                }
                 let formatted = results.iter()
                     .map(|r| format!("- **{}**\n  {}\n  URL: {}", r.title, r.snippet, r.url))
                     .collect::<Vec<_>>()
@@ -2276,7 +2476,7 @@ async fn execute_tools_in_response_with_results(response: &str) -> (String, Vec<
                 result = result.replace(full_match, &format!("[Searched: \"{}\"]", query));
             }
             Err(e) => {
-                println!("[scheduler::tools] search_web failed: {}", e);
+                println!("│    ✗ search_web FAILED: {}", e);
                 tool_results.push(format!("[Search failed for \"{}\"]: {}", query, e));
                 result = result.replace(full_match, &format!("[Search failed: {}]", e));
             }

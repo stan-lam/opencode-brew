@@ -2,11 +2,13 @@ import { AlertCircle, AlertTriangle, Info, ChevronDown, ChevronRight, File } fro
 import { useState } from 'react';
 import { useProblemsStore, Problem } from '../../store/problemsStore';
 import { useEditorStore } from '../../store/editorStore';
+import { useSettingsStore } from '../../store/settingsStore';
 import styles from './ProblemsPanel.module.css';
 
 export function ProblemsPanel() {
   const { problems } = useProblemsStore();
   const { openFile } = useEditorStore();
+  const settings = useSettingsStore();
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
 
   const groupedProblems = problems.reduce((acc, problem) => {
@@ -49,7 +51,15 @@ export function ProblemsPanel() {
   };
 
   return (
-    <div className={styles.problemsPanel}>
+    <div 
+      className={styles.problemsPanel}
+      style={{
+        backgroundColor: settings.terminalBackground,
+        color: settings.terminalForeground,
+        fontFamily: settings.terminalFontFamily,
+        fontSize: settings.terminalFontSize,
+      }}
+    >
       <div className={styles.summary}>
         <span className={styles.summaryItem}>
           <AlertCircle size={14} className={styles.errorIcon} />

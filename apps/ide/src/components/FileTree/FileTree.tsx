@@ -471,6 +471,22 @@ export function FileTree() {
 
   // Set up file system watching
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Allow other panels (e.g. AI FileOps) to request a refresh.
+  useEffect(() => {
+    const handler = () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = setTimeout(() => {
+        loadWorkspace();
+      }, 150);
+    };
+    window.addEventListener('workspace-refresh', handler as EventListener);
+    return () => {
+      window.removeEventListener('workspace-refresh', handler as EventListener);
+    };
+  }, [loadWorkspace]);
   
   useEffect(() => {
     if (!currentWorkspace?.rootPath) return;

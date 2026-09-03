@@ -2540,6 +2540,14 @@ pub async fn list_copilot_vision_models(
 
 /// Determine which endpoint to use for a model
 async fn get_model_endpoint(model: &str) -> &'static str {
+    let model_lower = model.to_lowercase();
+    
+    // Known models that require /responses endpoint (Codex models use Responses API)
+    let responses_models = [
+        "codex", "gpt-5.3-codex", "gpt-5.4-codex", "gpt-5.5-codex",
+        "o1-pro", "o3-pro", // reasoning models often use responses
+    ];
+    
     let endpoints_cache = MODEL_ENDPOINTS.read().await;
     if let Some(endpoints) = endpoints_cache.get(model) {
         // Check supported endpoints in priority order:
@@ -2556,9 +2564,13 @@ async fn get_model_endpoint(model: &str) -> &'static str {
             "/chat/completions" // fallback
         }
     } else {
-        // For unknown models, check if it's a Claude model
-        if model.to_lowercase().contains("claude") {
+        // For unknown models, check model name patterns
+        if model_lower.contains("claude") {
             "/v1/messages"
+        } else if responses_models.iter().any(|rm| model_lower.contains(rm)) {
+            // Codex and certain reasoning models use /responses endpoint
+            println!("[ai.rs] get_model_endpoint: {} detected as /responses model (not in cache)", model);
+            "/responses"
         } else {
             "/chat/completions" // default for GPT models
         }

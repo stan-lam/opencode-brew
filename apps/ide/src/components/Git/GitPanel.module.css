@@ -17,6 +17,8 @@
 .branchSelectorWrapper {
   flex: 1 1 160px;
   min-width: 140px;
+  display: flex;
+  align-items: center;
 }
 
 .branchSelector {
@@ -34,6 +36,23 @@
 
 .branchSelector:hover {
   background-color: var(--bg-hover);
+}
+
+.newBranchQuickBtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  margin-left: 4px;
+}
+
+.newBranchQuickBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--accent-green);
 }
 
 .actions {
@@ -440,6 +459,36 @@
 .newBranchInput button:disabled {
   background-color: var(--bg-tertiary);
   color: var(--text-muted);
+}
+
+.cancelBranchBtn {
+  background-color: var(--bg-tertiary) !important;
+  color: var(--text-muted) !important;
+}
+
+.cancelBranchBtn:hover {
+  background-color: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+.createBranchItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: var(--font-size-sm);
+  color: var(--accent-green);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color);
+  transition: background-color var(--transition-fast);
+}
+
+.createBranchItem:hover {
+  background-color: var(--bg-hover);
+}
+
+.createBranchItem svg {
+  color: var(--accent-green);
 }
 
 .branchList {

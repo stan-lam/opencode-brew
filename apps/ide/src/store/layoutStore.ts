@@ -8,7 +8,8 @@ export type SidePanelTab =
   | 'codeReview'
   | 'test'
   | 'history'
-  | 'settings';
+  | 'settings'
+  | 'plans';
 
 export type BottomPanelTab = 'terminal' | 'problems' | 'output' | 'cli';
 

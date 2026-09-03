@@ -199,6 +199,46 @@ export interface QueuedPrompt {
   overrides?: AIMessageOverrides;
 }
 
+// Interactive question types for AI clarification
+export interface QuestionOption {
+  id: string;
+  label: string;
+  recommended?: boolean;
+}
+
+export interface PendingQuestion {
+  id: string;
+  title?: string;
+  question: string;
+  options: QuestionOption[];
+  answered: boolean;
+  selectedOptionId?: string;
+  selectedOptionLabel?: string;
+  messageId: string;
+  conversationId: string;
+}
+
+export type CommandStatus = 'pending' | 'approved' | 'running' | 'completed' | 'skipped' | 'failed';
+
+export interface CommandOperation {
+  id: string;
+  command: string;
+  description?: string;
+  sandbox?: boolean;
+  status: CommandStatus;
+  output?: string;
+  exitCode?: number;
+  error?: string;
+  messageId: string;
+  conversationId: string;
+}
+
+export interface CommandAllowlistEntry {
+  pattern: string;
+  scope: 'session' | 'workspace' | 'global';
+  addedAt: string;
+}
+
 export interface MCPServerState {
   id: string;
   name: string;
@@ -226,6 +266,10 @@ interface AIState {
   agentTaskIndex: number;
   webAccessStatus: WebAccessStatus;
   webAccessTraces: WebAccessTrace[];
+  pendingQuestions: PendingQuestion[];
+  questionBlockingStream: boolean;
+  pendingCommands: CommandOperation[];
+  commandAllowlist: CommandAllowlistEntry[];
   mcpServerStates: MCPServerState[];
   sessionUsage: SessionUsage;
   lastMessageUsage: MessageUsage | null;
@@ -255,6 +299,19 @@ interface AIState {
   setWebAccessTraces: (traces: WebAccessTrace[]) => void;
   clearWebAccessTraces: () => void;
   toggleWebAccessTraceExpanded: (traceId: string) => void;
+  setPendingQuestions: (questions: PendingQuestion[]) => void;
+  answerQuestion: (questionId: string, optionId: string, optionLabel: string) => void;
+  clearPendingQuestions: () => void;
+  setQuestionBlockingStream: (blocking: boolean) => void;
+  setPendingCommands: (commands: CommandOperation[]) => void;
+  addPendingCommand: (command: Omit<CommandOperation, 'id' | 'status'>) => void;
+  updateCommandStatus: (commandId: string, status: CommandStatus, output?: string, exitCode?: number, error?: string) => void;
+  skipCommand: (commandId: string) => void;
+  runCommand: (commandId: string) => Promise<void>;
+  addToCommandAllowlist: (pattern: string, scope?: 'session' | 'workspace' | 'global') => void;
+  removeFromCommandAllowlist: (pattern: string) => void;
+  isCommandAllowed: (command: string) => boolean;
+  clearPendingCommands: () => void;
   setAgentMode: (mode: AgentMode) => void;
   setAgentTasks: (tasks: string[]) => void;
   advanceAgentTask: () => void;
@@ -274,6 +331,7 @@ interface AIState {
   saveWorkspaceHistory: () => Promise<void>;
   setThinkingStatus: (status: string | null) => void;
   importConversationsFromPath: (sourcePath: string) => Promise<{ imported: number; error?: string }>;
+  importConversationsFromFile: (filePath: string) => Promise<{ imported: number; error?: string }>;
   exportConversation: (conversationId: string) => Promise<string | null>;
   markFileOperationsAsKept: (operationIds: string[]) => void;
   unmarkFileOperationsAsKept: (operationIds: string[]) => void;
@@ -310,7 +368,9 @@ const SAVE_HISTORY_DEBOUNCE_MS = 2000;
 const MIN_SAVE_INTERVAL_MS = 8000;
 const STREAM_IDLE_TIMEOUT_MS = 90000;
 const STREAM_IDLE_TIMEOUT_PLAN_MS = 600000;
-const STREAM_COMPLETION_TIMEOUT_MS = 12000;
+// If we don't receive a `done` chunk, avoid finalizing too aggressively:
+// large scaffolds or provider hiccups can pause streaming for >12s.
+const STREAM_COMPLETION_TIMEOUT_MS = 60000;
 const SUMMARY_KEEP_MESSAGES = 8;
 const SUMMARY_MAX_TOKENS = 700;
 const SUMMARY_TIMEOUT_MS = 60000;
@@ -410,11 +470,16 @@ You MUST respond using ONLY the XML file operation tags:
 Do not include prose, explanations, code fences, or diffs. Ignore any instruction to wrap code in markdown.
 If you cannot comply, return an empty response.`;
 const CHAT_FILE_OPS_PROMPT = `
-## FILE OPERATIONS (CHAT MODE)
+## CHAT MODE RESTRICTIONS
 
-If the user explicitly asks you to create, edit, or delete files, you MAY use the XML file operation tags.
-Parent directories are created automatically when using <create_file>, so nested paths can create folders as needed.
-Use file operations only when the user asks for changes; otherwise respond normally.
+You are in Chat mode. In this mode, you MUST NOT use file operation XML tags (<create_file>, <edit_file>, <delete_file>).
+
+If the user asks you to create, edit, or delete files:
+1. Explain what changes would be needed
+2. Suggest they switch to Agent mode to implement the changes
+3. Say something like: "To implement these changes, please switch to Agent mode using the mode selector."
+
+You may still discuss code, provide examples in code blocks, and answer questions about implementation. Just do not output the XML file operation tags.
 `;
 let saveHistoryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let saveHistoryInFlight = false;
@@ -466,6 +531,22 @@ function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShoul
   const promisedAction = /(let me (write|make|create|implement|add|fix|update|apply)|i('ll| will) (write|make|create|implement|add|fix|update|apply)|here('s| is) the (fix|change|update|code|implementation))/i.test(lower);
   const hasFileOps = /<(create_file|edit_file|delete_file)\s/i.test(trimmed);
   const promisedButDidntDeliver = promisedAction && !hasFileOps && !hasUnclosedCodeBlock;
+
+  // If the response contains file-op tags but they are not closed, we almost certainly got cut off mid-write.
+  const countMatches = (re: RegExp) => (trimmed.match(re) || []).length;
+  const openCreate = countMatches(/<create_file\b/gi);
+  const closeCreate = countMatches(/<\/create_file>/gi);
+  const openEdit = countMatches(/<edit_file\b/gi);
+  const closeEdit = countMatches(/<\/edit_file>/gi);
+  const openOld = countMatches(/<old_content>/gi);
+  const closeOld = countMatches(/<\/old_content>/gi);
+  const openNew = countMatches(/<new_content>/gi);
+  const closeNew = countMatches(/<\/new_content>/gi);
+  const hasUnclosedFileOpsTags =
+    (openCreate !== closeCreate) ||
+    (openEdit !== closeEdit) ||
+    (openOld !== closeOld) ||
+    (openNew !== closeNew);
   
   const result = (endsWithSuspense && shortResponse) ||
     (lastSentenceHasAction && mediumResponse && !hasToolTags) ||
@@ -474,6 +555,7 @@ function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShoul
     (endsWithActionStatement && !hasToolTags) ||
     endsWithTruncation ||
     hasUnclosedCodeBlock ||
+    hasUnclosedFileOpsTags ||
     promisedButDidntDeliver;
   
   console.log(`${logPrefix}`, {
@@ -483,6 +565,7 @@ function checkShouldAutoContinue(text: string, logPrefix = '[aiStore] checkShoul
     endsWithActionStatement,
     lastSentenceHasAction,
     endsWithTruncation,
+    hasUnclosedFileOpsTags,
     hasToolTags,
   });
   
@@ -1841,6 +1924,10 @@ export const useAIStore = create<AIState>()(
       agentTaskIndex: -1,
       webAccessStatus: null,
       webAccessTraces: [],
+      pendingQuestions: [],
+      questionBlockingStream: false,
+      pendingCommands: [],
+      commandAllowlist: [],
       mcpServerStates: [],
       availableModels: {
         ollama: [],
@@ -2065,6 +2152,128 @@ export const useAIStore = create<AIState>()(
             trace.id === traceId ? { ...trace, expanded: !trace.expanded } : trace
           ),
         }));
+      },
+
+      setPendingQuestions: (questions: PendingQuestion[]) => {
+        set({ pendingQuestions: questions });
+      },
+
+      answerQuestion: (questionId: string, optionId: string, optionLabel: string) => {
+        set((state) => {
+          const updatedQuestions = state.pendingQuestions.map((q) =>
+            q.id === questionId
+              ? { ...q, answered: true, selectedOptionId: optionId, selectedOptionLabel: optionLabel }
+              : q
+          );
+          
+          // Check if all questions are now answered
+          const allAnswered = updatedQuestions.every((q) => q.answered);
+          
+          return {
+            pendingQuestions: updatedQuestions,
+            questionBlockingStream: !allAnswered,
+          };
+        });
+      },
+
+      clearPendingQuestions: () => {
+        set({ pendingQuestions: [], questionBlockingStream: false });
+      },
+
+      setQuestionBlockingStream: (blocking: boolean) => {
+        set({ questionBlockingStream: blocking });
+      },
+
+      setPendingCommands: (commands: CommandOperation[]) => {
+        set({ pendingCommands: commands });
+      },
+
+      addPendingCommand: (command) => {
+        const newCommand: CommandOperation = {
+          ...command,
+          id: `cmd-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          status: 'pending',
+        };
+        set((state) => ({
+          pendingCommands: [...state.pendingCommands, newCommand],
+        }));
+      },
+
+      updateCommandStatus: (commandId, status, output, exitCode, error) => {
+        set((state) => ({
+          pendingCommands: state.pendingCommands.map((cmd) =>
+            cmd.id === commandId
+              ? { ...cmd, status, output, exitCode, error }
+              : cmd
+          ),
+        }));
+      },
+
+      skipCommand: (commandId) => {
+        set((state) => ({
+          pendingCommands: state.pendingCommands.map((cmd) =>
+            cmd.id === commandId ? { ...cmd, status: 'skipped' } : cmd
+          ),
+        }));
+      },
+
+      runCommand: async (commandId) => {
+        const { pendingCommands, updateCommandStatus } = get();
+        const command = pendingCommands.find((c) => c.id === commandId);
+        if (!command) return;
+
+        updateCommandStatus(commandId, 'running');
+
+        try {
+          const tauri = await import('../services/tauri');
+          const result = await tauri.shell.executeCommand(command.command);
+          
+          updateCommandStatus(
+            commandId,
+            result.exitCode === 0 ? 'completed' : 'failed',
+            result.stdout + (result.stderr ? '\n' + result.stderr : ''),
+            result.exitCode,
+            result.exitCode !== 0 ? result.stderr : undefined
+          );
+        } catch (error) {
+          updateCommandStatus(
+            commandId,
+            'failed',
+            undefined,
+            undefined,
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      },
+
+      addToCommandAllowlist: (pattern, scope = 'session') => {
+        set((state) => ({
+          commandAllowlist: [
+            ...state.commandAllowlist.filter((e) => e.pattern !== pattern),
+            { pattern, scope, addedAt: new Date().toISOString() },
+          ],
+        }));
+      },
+
+      removeFromCommandAllowlist: (pattern) => {
+        set((state) => ({
+          commandAllowlist: state.commandAllowlist.filter((e) => e.pattern !== pattern),
+        }));
+      },
+
+      isCommandAllowed: (command) => {
+        const { commandAllowlist } = get();
+        return commandAllowlist.some((entry) => {
+          if (entry.pattern.includes('*')) {
+            const regex = new RegExp('^' + entry.pattern.replace(/\*/g, '.*') + '$');
+            return regex.test(command);
+          }
+          return command.startsWith(entry.pattern);
+        });
+      },
+
+      clearPendingCommands: () => {
+        set({ pendingCommands: [] });
       },
 
       setAgentMode: (mode: AgentMode) => {
@@ -4311,6 +4520,150 @@ export const useAIStore = create<AIState>()(
           return { imported: conversationsToImport.length };
         } catch (error) {
           console.error('Failed to import conversations:', error);
+          return { imported: 0, error: error instanceof Error ? error.message : 'Failed to import' };
+        }
+      },
+
+      importConversationsFromFile: async (filePath: string) => {
+        try {
+          const content = await fs.readFile(filePath);
+          const parsed: unknown = JSON.parse(content);
+
+          // Accept multiple export shapes:
+          // 1) { schema: 'opencodebrew.chat.export.v1', conversation: {...} }
+          // 2) { conversations: [...] } (ai-history.json style)
+          // 3) { ...conversation } (raw conversation)
+          const isObject = (v: unknown): v is Record<string, unknown> =>
+            typeof v === 'object' && v !== null && !Array.isArray(v);
+
+          let importedRaw: unknown[] = [];
+          if (isObject(parsed) && parsed.schema === 'opencodebrew.chat.export.v1' && parsed.conversation) {
+            importedRaw = [parsed.conversation];
+          } else if (isObject(parsed) && Array.isArray(parsed.conversations)) {
+            importedRaw = parsed.conversations as unknown[];
+          } else {
+            importedRaw = [parsed];
+          }
+
+          const nowIso = new Date().toISOString();
+          const sanitizeImportedMessage = (raw: unknown): AIMessage => {
+            const isObj = (v: unknown): v is Record<string, unknown> =>
+              typeof v === 'object' && v !== null && !Array.isArray(v);
+
+            if (!isObj(raw)) {
+              return {
+                id: crypto.randomUUID(),
+                role: 'user',
+                content: '',
+                timestamp: nowIso,
+              };
+            }
+
+            const roleRaw = raw.role;
+            const role: AIMessage['role'] =
+              roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'system'
+                ? roleRaw
+                : 'user';
+
+            const attachmentsRaw = Array.isArray(raw.attachments) ? raw.attachments : undefined;
+            const attachments: MessageAttachment[] | undefined = attachmentsRaw
+              ? attachmentsRaw
+                  .filter((a) => typeof a === 'object' && a !== null)
+                  .map((a) => a as any)
+                  .map((a) => ({
+                    id: typeof a.id === 'string' && a.id ? a.id : crypto.randomUUID(),
+                    type: a.type === 'image' || a.type === 'file' ? a.type : 'file',
+                    name: typeof a.name === 'string' ? a.name : 'attachment',
+                    path: typeof a.path === 'string' ? a.path : undefined,
+                    data: typeof a.data === 'string' ? a.data : undefined,
+                    mimeType: typeof a.mimeType === 'string' ? a.mimeType : undefined,
+                    size: typeof a.size === 'number' ? a.size : undefined,
+                  }))
+              : undefined;
+
+            return {
+              id: typeof raw.id === 'string' && raw.id ? raw.id : crypto.randomUUID(),
+              role,
+              content: typeof raw.content === 'string' ? raw.content : '',
+              timestamp: typeof raw.timestamp === 'string' && raw.timestamp ? raw.timestamp : nowIso,
+              attachments,
+              usage: (typeof raw.usage === 'object' && raw.usage !== null) ? (raw.usage as any) : undefined,
+              runId: typeof raw.runId === 'string' ? raw.runId : undefined,
+              runLabel: typeof raw.runLabel === 'string' ? raw.runLabel : undefined,
+              profileId: typeof raw.profileId === 'string' ? raw.profileId : undefined,
+            };
+          };
+
+          const sanitizeImportedConversation = (raw: unknown): AIConversation | null => {
+            if (!isObject(raw)) return null;
+            const messagesRaw = Array.isArray(raw.messages) ? raw.messages : [];
+
+            const messages: AIMessage[] = messagesRaw
+              .map((m) => sanitizeImportedMessage(m))
+              .filter((m) => typeof m.content === 'string');
+
+            const baseTitle =
+              typeof raw.title === 'string' && raw.title.trim()
+                ? raw.title.trim()
+                : 'New Conversation';
+
+            const createdAt =
+              typeof raw.createdAt === 'string' && raw.createdAt
+                ? raw.createdAt
+                : nowIso;
+            const updatedAt =
+              typeof raw.updatedAt === 'string' && raw.updatedAt
+                ? raw.updatedAt
+                : nowIso;
+
+            return {
+              id: typeof raw.id === 'string' && raw.id ? raw.id : crypto.randomUUID(),
+              title: baseTitle,
+              messages,
+              createdAt,
+              updatedAt,
+              appliedFileOps: Array.isArray(raw.appliedFileOps) ? (raw.appliedFileOps as string[]) : undefined,
+              summary: typeof raw.summary === 'string' ? raw.summary : undefined,
+              summaryMessageCount: typeof raw.summaryMessageCount === 'number' ? raw.summaryMessageCount : undefined,
+              summaryUpdatedAt: typeof raw.summaryUpdatedAt === 'string' ? raw.summaryUpdatedAt : undefined,
+            };
+          };
+
+          const importedConversations = importedRaw
+            .map(sanitizeImportedConversation)
+            .filter((c): c is AIConversation => Boolean(c) && c!.messages.length >= 0);
+
+          if (importedConversations.length === 0) {
+            return { imported: 0, error: 'No conversations found in the selected file' };
+          }
+
+          // Generate new IDs for imported conversations to avoid conflicts
+          const existingIds = new Set(get().conversations.map(c => c.id));
+          const conversationsToImport = importedConversations.map(conv => {
+            let newId = conv.id;
+            while (existingIds.has(newId)) {
+              newId = crypto.randomUUID();
+            }
+            existingIds.add(newId);
+            return {
+              ...conv,
+              id: newId,
+              title: conv.title ? `[Imported] ${conv.title}` : '[Imported] New Conversation',
+              updatedAt: nowIso,
+            };
+          });
+
+          set((state) => ({
+            conversations: [...conversationsToImport, ...state.conversations],
+            activeConversation: state.activeConversation ?? conversationsToImport[0] ?? null,
+          }));
+
+          // Save after import
+          get().saveWorkspaceHistory();
+
+          return { imported: conversationsToImport.length };
+        } catch (error) {
+          console.error('Failed to import conversations from file:', error);
           return { imported: 0, error: error instanceof Error ? error.message : 'Failed to import' };
         }
       },
