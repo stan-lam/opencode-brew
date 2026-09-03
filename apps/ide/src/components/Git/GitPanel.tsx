@@ -563,34 +563,61 @@ export function GitPanel() {
             <span>{currentBranch || 'main'}</span>
             <ChevronDown size={14} />
           </button>
+          <button
+            className={styles.newBranchQuickBtn}
+            onClick={() => {
+              setShowBranchDropdown(true);
+              setShowNewBranchInput(true);
+            }}
+            title="Create New Branch"
+          >
+            <Plus size={14} />
+          </button>
           {showBranchDropdown && (
             <div className={styles.branchDropdown}>
               <div className={styles.branchDropdownHeader}>
                 <span>Branches</span>
-                <button 
-                  className={styles.newBranchBtn}
-                  onClick={() => setShowNewBranchInput(!showNewBranchInput)}
-                  title="New Branch"
-                >
-                  <Plus size={14} />
-                </button>
               </div>
               {showNewBranchInput && (
                 <div className={styles.newBranchInput}>
                   <input
                     type="text"
-                    placeholder="Branch name..."
+                    placeholder="New branch name..."
                     value={newBranchName}
                     onChange={(e) => setNewBranchName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleCreateBranch()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleCreateBranch();
+                      if (e.key === 'Escape') {
+                        setShowNewBranchInput(false);
+                        setNewBranchName('');
+                      }
+                    }}
                     autoFocus
                   />
                   <button onClick={handleCreateBranch} disabled={!newBranchName.trim()}>
                     <Check size={14} />
                   </button>
+                  <button 
+                    onClick={() => {
+                      setShowNewBranchInput(false);
+                      setNewBranchName('');
+                    }}
+                    className={styles.cancelBranchBtn}
+                  >
+                    <X size={14} />
+                  </button>
                 </div>
               )}
               <div className={styles.branchList}>
+                {!showNewBranchInput && (
+                  <div
+                    className={styles.createBranchItem}
+                    onClick={() => setShowNewBranchInput(true)}
+                  >
+                    <Plus size={14} />
+                    <span>Create new branch...</span>
+                  </div>
+                )}
                 {branches.map((branch) => (
                   <div
                     key={branch}

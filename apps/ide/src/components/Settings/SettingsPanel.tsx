@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2, ShieldCheck, HelpCircle } from 'lucide-react';
-import { useSettingsStore, Settings as SettingsType } from '../../store/settingsStore';
+import { Settings, Palette, Keyboard, Code, Bot, GitBranch, Puzzle, BarChart3, Trash2, Loader2, ShieldCheck, HelpCircle, Terminal, Save, Plus } from 'lucide-react';
+import { useSettingsStore, Settings as SettingsType, TERMINAL_THEME_PRESETS } from '../../store/settingsStore';
 import { shell } from '../../services/tauri';
 import styles from './SettingsPanel.module.css';
 
-type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'security' | 'plugins' | 'usage';
+type SettingsCategory = 'general' | 'appearance' | 'editor' | 'keybindings' | 'ai' | 'git' | 'security' | 'plugins' | 'terminal' | 'usage';
 
 interface UsageStats {
   model: string;
@@ -33,7 +33,7 @@ interface SettingItem {
   id: keyof SettingsType;
   label: string;
   description: string;
-  type: 'toggle' | 'select' | 'input' | 'number' | 'password';
+  type: 'toggle' | 'select' | 'input' | 'number' | 'password' | 'color';
   options?: { value: string; label: string }[];
 }
 
@@ -46,6 +46,7 @@ const categories = [
   { id: 'git', label: 'Git', icon: GitBranch },
   { id: 'security', label: 'Security', icon: ShieldCheck },
   { id: 'plugins', label: 'Plugins', icon: Puzzle },
+  { id: 'terminal', label: 'Terminal', icon: Terminal },
   { id: 'usage', label: 'Usage', icon: BarChart3 },
 ] as const;
 
@@ -108,6 +109,7 @@ const settingsConfig: Record<SettingsCategory, SettingItem[]> = {
   plugins: [
     { id: 'autoUpdatePlugins', label: 'Auto Update', description: 'Automatically update plugins', type: 'toggle' },
   ],
+  terminal: [], // Terminal has custom UI below
   usage: [],
 };
 
@@ -300,6 +302,8 @@ export function SettingsPanel() {
               </div>
             )}
           </div>
+        ) : activeCategory === 'terminal' ? (
+          <TerminalSettings />
         ) : (
           <div className={styles.settingsList}>
             {settingsConfig[activeCategory].map((setting) => {
@@ -378,12 +382,317 @@ export function SettingsPanel() {
                         placeholder="••••••••"
                       />
                     )}
+                    {setting.type === 'color' && (
+                      <div className={styles.colorInput}>
+                        <input
+                          type="color"
+                          value={value as string}
+                          onChange={(e) => updateSetting(setting.id, e.target.value as any)}
+                        />
+                        <input
+                          type="text"
+                          value={value as string}
+                          onChange={(e) => updateSetting(setting.id, e.target.value as any)}
+                          placeholder="#000000"
+                          className={styles.colorText}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               );
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Terminal Settings Component
+function TerminalSettings() {
+  const settings = useSettingsStore();
+  const { 
+    updateSetting, 
+    applyTerminalPreset, 
+    saveCustomTerminalTheme, 
+    deleteCustomTerminalTheme,
+    customTerminalThemes 
+  } = settings;
+  const [newThemeName, setNewThemeName] = useState('');
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+
+  const allThemes = [
+    ...Object.entries(TERMINAL_THEME_PRESETS).map(([id, preset]) => ({ id, name: preset.name, isCustom: false })),
+    ...customTerminalThemes.map(t => ({ id: t.id, name: t.name, isCustom: true })),
+  ];
+
+  const handleSaveTheme = () => {
+    if (newThemeName.trim()) {
+      saveCustomTerminalTheme(newThemeName.trim());
+      setNewThemeName('');
+      setShowSaveDialog(false);
+    }
+  };
+
+  return (
+    <div className={styles.terminalSettings}>
+      <p className={styles.terminalDesc}>
+        Configure terminal appearance for Terminal, CLI, and Output panels.
+      </p>
+
+      {/* Theme Preset Selector */}
+      <div className={styles.terminalSection}>
+        <h3>Theme Preset</h3>
+        <div className={styles.themeSelector}>
+          <select
+            value={settings.terminalThemePreset}
+            onChange={(e) => applyTerminalPreset(e.target.value)}
+          >
+            <optgroup label="Built-in Themes">
+              {Object.entries(TERMINAL_THEME_PRESETS).map(([id, preset]) => (
+                <option key={id} value={id}>{preset.name}</option>
+              ))}
+            </optgroup>
+            {customTerminalThemes.length > 0 && (
+              <optgroup label="Custom Themes">
+                {customTerminalThemes.map(theme => (
+                  <option key={theme.id} value={theme.id}>{theme.name}</option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          
+          {/* Save as custom theme */}
+          {!showSaveDialog ? (
+            <button 
+              className={styles.saveThemeBtn}
+              onClick={() => setShowSaveDialog(true)}
+              title="Save current colors as custom theme"
+            >
+              <Plus size={14} />
+              Save Theme
+            </button>
+          ) : (
+            <div className={styles.saveThemeDialog}>
+              <input
+                type="text"
+                placeholder="Theme name..."
+                value={newThemeName}
+                onChange={(e) => setNewThemeName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveTheme()}
+              />
+              <button onClick={handleSaveTheme} disabled={!newThemeName.trim()}>
+                <Save size={14} />
+              </button>
+              <button onClick={() => { setShowSaveDialog(false); setNewThemeName(''); }}>
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Delete custom theme button */}
+        {settings.terminalThemePreset.startsWith('custom-') && (
+          <button
+            className={styles.deleteThemeBtn}
+            onClick={() => deleteCustomTerminalTheme(settings.terminalThemePreset)}
+          >
+            <Trash2 size={14} />
+            Delete "{customTerminalThemes.find(t => t.id === settings.terminalThemePreset)?.name}"
+          </button>
+        )}
+      </div>
+
+      {/* Font Settings */}
+      <div className={styles.terminalSection}>
+        <h3>Font</h3>
+        <div className={styles.terminalGrid}>
+          <div className={styles.terminalField}>
+            <label>Size</label>
+            <input
+              type="number"
+              value={settings.terminalFontSize}
+              onChange={(e) => updateSetting('terminalFontSize', parseInt(e.target.value) || 13)}
+              min={8}
+              max={32}
+            />
+          </div>
+          <div className={styles.terminalField}>
+            <label>Line Height</label>
+            <input
+              type="number"
+              value={settings.terminalLineHeight}
+              onChange={(e) => updateSetting('terminalLineHeight', parseFloat(e.target.value) || 1.2)}
+              min={1}
+              max={2}
+              step={0.1}
+            />
+          </div>
+          <div className={styles.terminalField}>
+            <label>Scrollback</label>
+            <input
+              type="number"
+              value={settings.terminalScrollback}
+              onChange={(e) => updateSetting('terminalScrollback', parseInt(e.target.value) || 1000)}
+              min={100}
+              max={100000}
+              step={1000}
+            />
+          </div>
+        </div>
+        <div className={styles.terminalField} style={{ marginTop: 12 }}>
+          <label>Font Family</label>
+          <input
+            type="text"
+            value={settings.terminalFontFamily}
+            onChange={(e) => updateSetting('terminalFontFamily', e.target.value)}
+            style={{ width: '100%' }}
+          />
+        </div>
+      </div>
+
+      {/* Cursor Settings */}
+      <div className={styles.terminalSection}>
+        <h3>Cursor</h3>
+        <div className={styles.terminalGrid}>
+          <div className={styles.terminalField}>
+            <label>Style</label>
+            <select
+              value={settings.terminalCursorStyle}
+              onChange={(e) => updateSetting('terminalCursorStyle', e.target.value as any)}
+            >
+              <option value="block">Block</option>
+              <option value="bar">Bar</option>
+              <option value="underline">Underline</option>
+            </select>
+          </div>
+          <div className={styles.terminalField}>
+            <label>Blink</label>
+            <button
+              className={`${styles.toggle} ${settings.terminalCursorBlink ? styles.on : ''}`}
+              onClick={() => updateSetting('terminalCursorBlink', !settings.terminalCursorBlink)}
+            >
+              <span className={styles.toggleThumb} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Color Settings */}
+      <div className={styles.terminalSection}>
+        <h3>Colors</h3>
+        <div className={styles.terminalColorGrid}>
+          <div className={styles.terminalColorField}>
+            <label>Background</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalBackground} onChange={(e) => updateSetting('terminalBackground', e.target.value)} />
+              <input type="text" value={settings.terminalBackground} onChange={(e) => updateSetting('terminalBackground', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Foreground</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalForeground} onChange={(e) => updateSetting('terminalForeground', e.target.value)} />
+              <input type="text" value={settings.terminalForeground} onChange={(e) => updateSetting('terminalForeground', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Cursor</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalCursor} onChange={(e) => updateSetting('terminalCursor', e.target.value)} />
+              <input type="text" value={settings.terminalCursor} onChange={(e) => updateSetting('terminalCursor', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Selection</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalSelectionBackground} onChange={(e) => updateSetting('terminalSelectionBackground', e.target.value)} />
+              <input type="text" value={settings.terminalSelectionBackground} onChange={(e) => updateSetting('terminalSelectionBackground', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+        </div>
+
+        <h4 style={{ marginTop: 16, marginBottom: 8, fontSize: 12, color: 'var(--text-muted)' }}>ANSI Colors</h4>
+        <div className={styles.terminalColorGrid}>
+          <div className={styles.terminalColorField}>
+            <label>Black</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalBlack} onChange={(e) => updateSetting('terminalBlack', e.target.value)} />
+              <input type="text" value={settings.terminalBlack} onChange={(e) => updateSetting('terminalBlack', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Red</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalRed} onChange={(e) => updateSetting('terminalRed', e.target.value)} />
+              <input type="text" value={settings.terminalRed} onChange={(e) => updateSetting('terminalRed', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Green</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalGreen} onChange={(e) => updateSetting('terminalGreen', e.target.value)} />
+              <input type="text" value={settings.terminalGreen} onChange={(e) => updateSetting('terminalGreen', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Yellow</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalYellow} onChange={(e) => updateSetting('terminalYellow', e.target.value)} />
+              <input type="text" value={settings.terminalYellow} onChange={(e) => updateSetting('terminalYellow', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Blue</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalBlue} onChange={(e) => updateSetting('terminalBlue', e.target.value)} />
+              <input type="text" value={settings.terminalBlue} onChange={(e) => updateSetting('terminalBlue', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Magenta</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalMagenta} onChange={(e) => updateSetting('terminalMagenta', e.target.value)} />
+              <input type="text" value={settings.terminalMagenta} onChange={(e) => updateSetting('terminalMagenta', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>Cyan</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalCyan} onChange={(e) => updateSetting('terminalCyan', e.target.value)} />
+              <input type="text" value={settings.terminalCyan} onChange={(e) => updateSetting('terminalCyan', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+          <div className={styles.terminalColorField}>
+            <label>White</label>
+            <div className={styles.colorInput}>
+              <input type="color" value={settings.terminalWhite} onChange={(e) => updateSetting('terminalWhite', e.target.value)} />
+              <input type="text" value={settings.terminalWhite} onChange={(e) => updateSetting('terminalWhite', e.target.value)} className={styles.colorText} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Preview */}
+      <div className={styles.terminalSection}>
+        <h3>Preview</h3>
+        <div 
+          className={styles.terminalPreview}
+          style={{ 
+            backgroundColor: settings.terminalBackground,
+            color: settings.terminalForeground,
+            fontFamily: settings.terminalFontFamily,
+            fontSize: settings.terminalFontSize,
+            lineHeight: settings.terminalLineHeight,
+          }}
+        >
+          <div><span style={{ color: settings.terminalGreen }}>user@host</span>:<span style={{ color: settings.terminalBlue }}>~</span>$ ls -la</div>
+          <div>drwxr-xr-x  5 user staff  160 Sep  3 09:00 <span style={{ color: settings.terminalBlue }}>src</span></div>
+          <div>-rw-r--r--  1 user staff 1024 Sep  3 09:00 package.json</div>
+          <div><span style={{ color: settings.terminalRed }}>error:</span> <span style={{ color: settings.terminalYellow }}>warning:</span> <span style={{ color: settings.terminalMagenta }}>info</span></div>
+          <div><span style={{ color: settings.terminalGreen }}>user@host</span>:<span style={{ color: settings.terminalBlue }}>~</span>$ <span style={{ backgroundColor: settings.terminalCursor, color: settings.terminalBackground }}>_</span></div>
+        </div>
       </div>
     </div>
   );

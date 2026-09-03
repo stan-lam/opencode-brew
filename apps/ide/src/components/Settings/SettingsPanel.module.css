@@ -155,6 +155,38 @@
   transform: translateX(18px);
 }
 
+/* Color Input Styles */
+.colorInput {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.colorInput input[type="color"] {
+  width: 36px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: transparent;
+}
+
+.colorInput input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.colorInput input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
+.colorText {
+  width: 80px !important;
+  font-family: monospace;
+  font-size: var(--font-size-xs) !important;
+}
+
 /* Usage Section Styles */
 .usageContent {
   display: flex;
@@ -356,4 +388,179 @@
   .usageSummary {
     grid-template-columns: repeat(2, 1fr);
   }
+}
+
+/* Terminal Settings Styles */
+.terminalSettings {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.terminalDesc {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  margin: 0 0 8px 0;
+}
+
+.terminalSection {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+
+.terminalSection h3 {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.themeSelector {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.themeSelector select {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 12px;
+  font-size: var(--font-size-sm);
+}
+
+.saveThemeBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: var(--font-size-xs);
+  background: var(--accent-blue);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.saveThemeBtn:hover {
+  background: var(--accent-blue-hover, #0066cc);
+}
+
+.saveThemeDialog {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.saveThemeDialog input {
+  padding: 6px 10px;
+  font-size: var(--font-size-sm);
+  width: 150px;
+}
+
+.saveThemeDialog button {
+  padding: 6px 10px;
+  font-size: var(--font-size-xs);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.saveThemeDialog button:first-of-type {
+  background: var(--accent-blue);
+  color: white;
+  border-color: var(--accent-blue);
+}
+
+.saveThemeDialog button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.deleteThemeBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 6px 10px;
+  font-size: var(--font-size-xs);
+  background: transparent;
+  color: var(--text-danger, #f14c4c);
+  border: 1px solid var(--text-danger, #f14c4c);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.deleteThemeBtn:hover {
+  background: var(--text-danger, #f14c4c);
+  color: white;
+}
+
+.terminalGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.terminalField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.terminalField label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.terminalField input,
+.terminalField select {
+  padding: 6px 8px;
+  font-size: var(--font-size-sm);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+.terminalField input[type="number"] {
+  width: 80px;
+}
+
+.terminalColorGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.terminalColorField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.terminalColorField label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.terminalPreview {
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  font-family: monospace;
+  overflow-x: auto;
+}
+
+.terminalPreview div {
+  white-space: pre;
 }

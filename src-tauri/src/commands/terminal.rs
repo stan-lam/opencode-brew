@@ -30,6 +30,7 @@ pub async fn create_terminal(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
+    println!("[PTY] Create terminal: terminal_id={}, rows={}, cols={}", terminal_id, rows, cols);
     let pty_system = native_pty_system();
     let window_label = window.label().to_string();
     let app = window.app_handle().clone();
@@ -118,6 +119,7 @@ pub async fn write_terminal(terminal_id: String, data: String) -> Result<(), Str
 
 #[command]
 pub async fn resize_terminal(terminal_id: String, rows: u16, cols: u16) -> Result<(), String> {
+    println!("[PTY] Resize request: terminal_id={}, rows={}, cols={}", terminal_id, rows, cols);
     let terminals = TERMINALS.lock().unwrap();
     
     if let Some(instance) = terminals.get(&terminal_id) {
@@ -127,8 +129,10 @@ pub async fn resize_terminal(terminal_id: String, rows: u16, cols: u16) -> Resul
             pixel_width: 0,
             pixel_height: 0,
         }).map_err(|e| format!("Failed to resize terminal: {}", e))?;
+        println!("[PTY] Resize successful");
         Ok(())
     } else {
+        println!("[PTY] Terminal not found: {}", terminal_id);
         Err(format!("Terminal not found: {}", terminal_id))
     }
 }

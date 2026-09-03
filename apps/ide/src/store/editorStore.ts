@@ -61,7 +61,7 @@ type DiffFileStatus = 'modified' | 'added' | 'deleted' | 'untracked' | 'renamed'
 interface EditorState {
   openFiles: OpenFile[];
   activeFile: OpenFile | null;
-  openFile: (path: string) => Promise<void>;
+  openFile: (path: string, forceReload?: boolean) => Promise<void>;
   openDiff: (repoPath: string, filePath: string, staged: boolean, status?: DiffFileStatus) => void;
   openHistoryDiff: (filePath: string, fileName: string, historyId: number, timestamp: string, oldContent: string, newContent: string) => void;
   openAIDiff: (
@@ -74,6 +74,7 @@ interface EditorState {
   ) => void;
   openFileWithAIEdit: (filePath: string, oldContent: string, newContent: string, operationType: 'create' | 'edit' | 'delete', insertLine?: number) => Promise<void>;
   clearAIEdit: (path: string) => void;
+  clearAllAIState: () => void;
   applyAIEdit: (path: string) => void;
   closeFile: (path: string) => void;
   closeAllFiles: () => void;
@@ -129,11 +130,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   openFiles: [],
   activeFile: null,
 
-  openFile: async (path: string) => {
+  openFile: async (path: string, forceReload?: boolean) => {
     const { openFiles } = get();
     const existingFile = openFiles.find((f) => f.path === path && f.type !== 'diff');
 
-    if (existingFile) {
+    if (existingFile && !forceReload) {
       set({ activeFile: existingFile });
       updateWindowTitle(existingFile.name);
       return;
@@ -142,6 +143,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     try {
       const content = await fs.readFile(path);
       const name = path.split('/').pop() || path;
+      
+      if (existingFile && forceReload) {
+        // Update existing file with fresh content from disk
+        set((state) => ({
+          openFiles: state.openFiles.map((f) =>
+            f.path === path ? { ...f, content, isDirty: false } : f
+          ),
+          activeFile: { ...existingFile, content, isDirty: false },
+        }));
+        updateWindowTitle(existingFile.name);
+        return;
+      }
+
       const newFile: OpenFile = {
         path,
         name,
@@ -246,14 +260,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     isApplied?: boolean
   ) => {
     const { openFiles } = get();
-    const diffId = `ai:${Date.now()}:${filePath}`;
-    const existingDiff = openFiles.find((f) => f.path === diffId);
+    
+    // Check if an AI diff for this file is already open (by filePath, not by diffId)
+    const existingDiff = openFiles.find(
+      (f) => f.type === 'ai-diff' && f.aiDiffInfo?.filePath === filePath
+    );
 
     if (existingDiff) {
-      set({ activeFile: existingDiff });
+      // Update the existing diff with new content and set as active
+      set((state) => ({
+        openFiles: state.openFiles.map((f) =>
+          f.path === existingDiff.path
+            ? {
+                ...f,
+                aiDiffInfo: {
+                  ...f.aiDiffInfo!,
+                  oldContent,
+                  newContent,
+                  operationType,
+                  requiresOverwrite,
+                  isApplied,
+                },
+              }
+            : f
+        ),
+        activeFile: {
+          ...existingDiff,
+          aiDiffInfo: {
+            ...existingDiff.aiDiffInfo!,
+            oldContent,
+            newContent,
+            operationType,
+            requiresOverwrite,
+            isApplied,
+          },
+        },
+      }));
       return;
     }
 
+    const diffId = `ai:${Date.now()}:${filePath}`;
     const fileName = filePath.split('/').pop() || filePath;
     const opLabel = operationType === 'create' ? 'New' : operationType === 'edit' ? 'Edit' : 'Delete';
     const newDiff: OpenFile = {
@@ -332,6 +378,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ? { ...state.activeFile, pendingAIEdit: undefined }
         : state.activeFile,
     }));
+  },
+
+  clearAllAIState: () => {
+    const state = get();
+    // Close all AI diff tabs and clear pending AI edits on all files
+    const newOpenFiles = state.openFiles
+      .filter((f) => f.type !== 'ai-diff')
+      .map((f) => ({ ...f, pendingAIEdit: undefined }));
+    
+    let newActiveFile = state.activeFile;
+    if (state.activeFile?.type === 'ai-diff') {
+      // Find the first non-AI-diff file to make active
+      newActiveFile = newOpenFiles[0] || null;
+    } else if (state.activeFile) {
+      newActiveFile = { ...state.activeFile, pendingAIEdit: undefined };
+    }
+    
+    set({
+      openFiles: newOpenFiles,
+      activeFile: newActiveFile,
+    });
   },
 
   applyAIEdit: (path: string) => {

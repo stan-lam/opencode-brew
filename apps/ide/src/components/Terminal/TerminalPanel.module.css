@@ -2,7 +2,7 @@
   height: 100%;
   display: flex;
   flex-direction: column;
-  background-color: var(--bg-primary);
+  /* Background handled by xterm theme */
 }
 
 .tabBar {
@@ -81,11 +81,26 @@
 
 .terminalContainer {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
   position: relative;
 }
 
 .terminalContainer > div {
+  height: 100% !important;
+  width: 100% !important;
+}
+
+/* Ensure xterm viewport fills container */
+.terminalContainer :global(.xterm) {
   height: 100%;
   width: 100%;
+}
+
+.terminalContainer :global(.xterm-viewport) {
+  overflow-y: auto !important;
+}
+
+.terminalContainer :global(.xterm-screen) {
+  height: 100%;
 }

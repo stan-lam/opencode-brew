@@ -470,11 +470,16 @@ You MUST respond using ONLY the XML file operation tags:
 Do not include prose, explanations, code fences, or diffs. Ignore any instruction to wrap code in markdown.
 If you cannot comply, return an empty response.`;
 const CHAT_FILE_OPS_PROMPT = `
-## FILE OPERATIONS (CHAT MODE)
+## CHAT MODE RESTRICTIONS
 
-If the user explicitly asks you to create, edit, or delete files, you MAY use the XML file operation tags.
-Parent directories are created automatically when using <create_file>, so nested paths can create folders as needed.
-Use file operations only when the user asks for changes; otherwise respond normally.
+You are in Chat mode. In this mode, you MUST NOT use file operation XML tags (<create_file>, <edit_file>, <delete_file>).
+
+If the user asks you to create, edit, or delete files:
+1. Explain what changes would be needed
+2. Suggest they switch to Agent mode to implement the changes
+3. Say something like: "To implement these changes, please switch to Agent mode using the mode selector."
+
+You may still discuss code, provide examples in code blocks, and answer questions about implementation. Just do not output the XML file operation tags.
 `;
 let saveHistoryDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let saveHistoryInFlight = false;

@@ -2,7 +2,7 @@
   height: 100%;
   display: flex;
   flex-direction: column;
-  background-color: var(--bg-primary);
+  /* Background handled by inline styles from terminal settings */
 }
 
 .tabBar {
@@ -242,22 +242,36 @@
 .terminalWrapper {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  background-color: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
   position: relative;
+  overflow: hidden;
 }
 
 .terminalContainer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
 }
 
 .terminalContainer > div {
+  height: 100% !important;
+  width: 100% !important;
+}
+
+/* Ensure xterm viewport fills container */
+.terminalContainer :global(.xterm) {
   height: 100%;
   width: 100%;
+}
+
+.terminalContainer :global(.xterm-viewport) {
+  overflow-y: auto !important;
+}
+
+.terminalContainer :global(.xterm-screen) {
+  height: 100%;
 }
 
 .placeholder {

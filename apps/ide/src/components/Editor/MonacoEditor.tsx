@@ -1,9 +1,11 @@
-import { useRef, useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 import Editor, { OnMount, OnChange } from '@monaco-editor/react';
 import { useEditorStore } from '../../store/editorStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import { useProblemsStore, Problem } from '../../store/problemsStore';
+import { useAIStore } from '../../store/aiStore';
 import { AIEditOverlay } from './AIEditOverlay';
+import { ContextMenu, ContextMenuItem, ContextMenuPosition } from '../FileTree/ContextMenu';
 import styles from './MonacoEditor.module.css';
 
 interface MonacoEditorProps {
@@ -23,11 +25,108 @@ export function MonacoEditor({ path, content, language, onScroll }: MonacoEditor
   const { updateFileContent, saveFile, setCursorPosition, activeFile } = useEditorStore();
   const pendingAIEdit = activeFile?.path === path ? activeFile?.pendingAIEdit : undefined;
   const { theme, fontSize } = useSettingsStore();
+  const { activeConversation } = useAIStore();
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const decorationsRef = useRef<string[]>([]);
   const matchesRef = useRef<Array<{ startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }>>([]);
   const currentMatchRef = useRef<number>(0);
+  
+  // Context menu state for line number right-click
+  const [lineContextMenu, setLineContextMenu] = useState<{
+    position: ContextMenuPosition;
+    lineNumber: number;
+    lineContent: string;
+  } | null>(null);
+  
+  // Ref to hold the latest setLineContextMenu for use in event handlers
+  const setLineContextMenuRef = useRef(setLineContextMenu);
+  useEffect(() => {
+    setLineContextMenuRef.current = setLineContextMenu;
+  }, [setLineContextMenu]);
+  
+  // Close context menu
+  const closeLineContextMenu = useCallback(() => {
+    setLineContextMenu(null);
+  }, []);
+  
+  // Handle AI action from context menu - dispatch event to prefill AI input
+  const handleAIAction = useCallback((
+    action: 'review' | 'ask' | 'research',
+    startNewConversation: boolean
+  ) => {
+    if (!lineContextMenu) return;
+    
+    const filename = path.split('/').pop() || path;
+    
+    // Dispatch event to prefill the AI input instead of sending directly
+    window.dispatchEvent(new CustomEvent('prefill-ai-input', {
+      detail: {
+        action,
+        lineNumber: lineContextMenu.lineNumber,
+        lineContent: lineContextMenu.lineContent,
+        filename,
+        language,
+        startNewConversation,
+      }
+    }));
+    
+    closeLineContextMenu();
+  }, [lineContextMenu, path, language, closeLineContextMenu]);
+  
+  // Build context menu items for line number right-click
+  const buildLineContextMenuItems = useCallback((): ContextMenuItem[] => {
+    const hasActiveConversation = !!activeConversation;
+    const items: ContextMenuItem[] = [];
+    
+    // Review section
+    items.push({
+      id: 'review-new',
+      label: '🔍 Review (New Chat)',
+      action: () => handleAIAction('review', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'review-continue',
+        label: '🔍 Review (Continue)',
+        action: () => handleAIAction('review', false),
+      });
+    }
+    
+    items.push({ id: 'divider-1', divider: true });
+    
+    // Ask section
+    items.push({
+      id: 'ask-new',
+      label: '💬 Ask AI (New Chat)',
+      action: () => handleAIAction('ask', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'ask-continue',
+        label: '💬 Ask AI (Continue)',
+        action: () => handleAIAction('ask', false),
+      });
+    }
+    
+    items.push({ id: 'divider-2', divider: true });
+    
+    // Research section
+    items.push({
+      id: 'research-new',
+      label: '📚 Research (New Chat)',
+      action: () => handleAIAction('research', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'research-continue',
+        label: '📚 Research (Continue)',
+        action: () => handleAIAction('research', false),
+      });
+    }
+    
+    return items;
+  }, [activeConversation, handleAIAction]);
 
   const performSearch = useCallback((query: string, options: SearchOptions) => {
     const editor = editorRef.current;
@@ -513,6 +612,72 @@ export function MonacoEditor({ path, content, language, onScroll }: MonacoEditor
     });
     monaco.editor.setTheme('opencodebrew-dark');
 
+    // Add context menu listener for line number gutter
+    // MouseTargetType.GUTTER_LINE_NUMBERS = 3
+    const GUTTER_LINE_NUMBERS = monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS;
+    
+    // Use onContextMenu which fires on right-click
+    editor.onContextMenu((e: any) => {
+      // Check if the context menu is on the line number gutter
+      if (e.target.type === GUTTER_LINE_NUMBERS) {
+        // Prevent the default Monaco context menu
+        e.event.preventDefault();
+        e.event.stopPropagation();
+        
+        const lineNumber = e.target.position?.lineNumber;
+        if (lineNumber) {
+          const model = editor.getModel();
+          const lineContent = model?.getLineContent(lineNumber) || '';
+          
+          // Use ref to get the latest setter
+          setLineContextMenuRef.current({
+            position: { x: e.event.posx, y: e.event.posy },
+            lineNumber,
+            lineContent,
+          });
+        }
+      }
+    });
+    
+    // Also add a DOM-level event listener as fallback for line numbers
+    const editorDomNode = editor.getDomNode();
+    if (editorDomNode) {
+      editorDomNode.addEventListener('contextmenu', (e: MouseEvent) => {
+        const target = e.target as HTMLElement;
+        
+        // Monaco uses various class names for line numbers
+        // Check for common Monaco line number selectors
+        const isLineNumber = 
+          target.classList.contains('line-numbers') ||
+          target.classList.contains('cldr') || // Monaco line number class
+          target.closest('.line-numbers') !== null ||
+          target.closest('.margin-view-overlays') !== null ||
+          target.closest('[class*="line-numbers"]') !== null;
+        
+        if (isLineNumber) {
+          // Try to get line number from the click position
+          const position = editor.getTargetAtClientPoint(e.clientX, e.clientY);
+          
+          if (position && position.position) {
+            const lineNumber = position.position.lineNumber;
+            
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const model = editor.getModel();
+            const lineContent = model?.getLineContent(lineNumber) || '';
+            
+            // Use ref to get the latest setter
+            setLineContextMenuRef.current({
+              position: { x: e.clientX, y: e.clientY },
+              lineNumber,
+              lineContent,
+            });
+          }
+        }
+      }, true); // Use capture phase
+    }
+
     editor.focus();
   };
 
@@ -596,6 +761,15 @@ export function MonacoEditor({ path, content, language, onScroll }: MonacoEditor
         }}
         theme={theme === 'light' ? 'light' : 'vs-dark'}
       />
+      
+      {/* Line number context menu for AI actions */}
+      {lineContextMenu && (
+        <ContextMenu
+          position={lineContextMenu.position}
+          onClose={closeLineContextMenu}
+          items={buildLineContextMenuItems()}
+        />
+      )}
     </div>
   );
 }

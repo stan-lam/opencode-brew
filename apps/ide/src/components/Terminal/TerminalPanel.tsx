@@ -3,55 +3,34 @@ import { Plus, X } from 'lucide-react';
 import { terminal as terminalService, TerminalOutput } from '../../services/tauri';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useSettingsStore } from '../../store/settingsStore';
+import { useLayoutStore } from '../../store/layoutStore';
 import styles from './TerminalPanel.module.css';
 
-const darkTheme = {
-  background: '#1e1e1e',
-  foreground: '#cccccc',
-  cursor: '#aeafad',
-  cursorAccent: '#1e1e1e',
-  selectionBackground: '#264f78',
-  black: '#1e1e1e',
-  red: '#f14c4c',
-  green: '#4ec9b0',
-  yellow: '#dcdcaa',
-  blue: '#569cd6',
-  magenta: '#c586c0',
-  cyan: '#4ec9b0',
-  white: '#cccccc',
+// Build terminal theme from settings
+const buildTerminalTheme = (settings: ReturnType<typeof useSettingsStore.getState>) => ({
+  background: settings.terminalBackground,
+  foreground: settings.terminalForeground,
+  cursor: settings.terminalCursor,
+  cursorAccent: settings.terminalBackground,
+  selectionBackground: settings.terminalSelectionBackground,
+  black: settings.terminalBlack,
+  red: settings.terminalRed,
+  green: settings.terminalGreen,
+  yellow: settings.terminalYellow,
+  blue: settings.terminalBlue,
+  magenta: settings.terminalMagenta,
+  cyan: settings.terminalCyan,
+  white: settings.terminalWhite,
+  // Bright colors (slightly lighter versions)
   brightBlack: '#6d6d6d',
-  brightRed: '#f14c4c',
-  brightGreen: '#4ec9b0',
-  brightYellow: '#dcdcaa',
-  brightBlue: '#569cd6',
-  brightMagenta: '#c586c0',
-  brightCyan: '#4ec9b0',
+  brightRed: settings.terminalRed,
+  brightGreen: settings.terminalGreen,
+  brightYellow: settings.terminalYellow,
+  brightBlue: settings.terminalBlue,
+  brightMagenta: settings.terminalMagenta,
+  brightCyan: settings.terminalCyan,
   brightWhite: '#ffffff',
-};
-
-const lightTheme = {
-  background: '#ffffff',
-  foreground: '#1e1e1e',
-  cursor: '#1e1e1e',
-  cursorAccent: '#ffffff',
-  selectionBackground: '#add6ff',
-  black: '#1e1e1e',
-  red: '#cd3131',
-  green: '#107c41',
-  yellow: '#795e26',
-  blue: '#0066bf',
-  magenta: '#af00db',
-  cyan: '#107c41',
-  white: '#cccccc',
-  brightBlack: '#616161',
-  brightRed: '#cd3131',
-  brightGreen: '#107c41',
-  brightYellow: '#795e26',
-  brightBlue: '#0066bf',
-  brightMagenta: '#af00db',
-  brightCyan: '#107c41',
-  brightWhite: '#1e1e1e',
-};
+});
 
 interface TerminalTab {
   id: string;
@@ -70,8 +49,44 @@ export function TerminalPanel() {
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
   const [activeTerminal, setActiveTerminal] = useState<string | null>(null);
   const { currentWorkspace } = useWorkspaceStore();
-  const { theme } = useSettingsStore();
-  const terminalTheme = theme === 'light' ? lightTheme : darkTheme;
+  const settings = useSettingsStore();
+  const { activeBottomTab } = useLayoutStore();
+  const terminalTheme = buildTerminalTheme(settings);
+  const wasHiddenRef = useRef(activeBottomTab !== 'terminal');
+
+  // Re-fit terminals when Terminal tab becomes visible after being hidden
+  useEffect(() => {
+    const isVisible = activeBottomTab === 'terminal';
+    const wasHidden = wasHiddenRef.current;
+    wasHiddenRef.current = !isVisible;
+
+    if (isVisible && wasHidden) {
+      // Multiple attempts to ensure terminal renders correctly after tab switch
+      const fitTerminals = () => {
+        terminalsMapRef.current.forEach((instance, terminalId) => {
+          if (instance.fitAddon && instance.terminal) {
+            instance.fitAddon.fit();
+            // Force complete redraw
+            const { rows, cols } = instance.terminal;
+            instance.terminal.refresh(0, rows - 1);
+            terminalService.resize(terminalId, rows, cols).catch(console.error);
+          }
+        });
+      };
+
+      // Try multiple times with increasing delays
+      const t1 = setTimeout(fitTerminals, 0);
+      const t2 = setTimeout(fitTerminals, 100);
+      const t3 = setTimeout(fitTerminals, 200);
+      
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
+    }
+  }, [activeBottomTab]);
+
 
   const createTerminalInstance = useCallback(async (id: string) => {
     // Wait for terminal ref to be ready (max 2 seconds)
@@ -92,14 +107,15 @@ export function TerminalPanel() {
       
       await import('@xterm/xterm/css/xterm.css');
 
-      const currentTheme = useSettingsStore.getState().theme === 'light' ? lightTheme : darkTheme;
+      const currentSettings = useSettingsStore.getState();
+      const currentTheme = buildTerminalTheme(currentSettings);
       const term = new Terminal({
         theme: currentTheme,
-        fontFamily: "'SF Mono', 'Fira Code', 'JetBrains Mono', Menlo, Monaco, monospace",
-        fontSize: 13,
+        fontFamily: currentSettings.terminalFontFamily,
+        fontSize: currentSettings.terminalFontSize,
         lineHeight: 1.2,
-        cursorBlink: true,
-        cursorStyle: 'bar',
+        cursorBlink: currentSettings.terminalCursorBlink,
+        cursorStyle: currentSettings.terminalCursorStyle,
         convertEol: true,
       });
 
@@ -210,12 +226,24 @@ export function TerminalPanel() {
     };
   }, [destroyTerminalInstance]);
 
-  // Update terminal theme when settings change
+  // Update terminal settings when they change
   useEffect(() => {
     terminalsMapRef.current.forEach((instance) => {
       instance.terminal.options.theme = terminalTheme;
+      instance.terminal.options.fontSize = settings.terminalFontSize;
+      instance.terminal.options.fontFamily = settings.terminalFontFamily;
+      instance.terminal.options.cursorStyle = settings.terminalCursorStyle;
+      instance.terminal.options.cursorBlink = settings.terminalCursorBlink;
+      // Refit after font changes
+      instance.fitAddon.fit();
     });
-  }, [terminalTheme]);
+  }, [
+    terminalTheme, 
+    settings.terminalFontSize, 
+    settings.terminalFontFamily,
+    settings.terminalCursorStyle,
+    settings.terminalCursorBlink
+  ]);
 
   // Store pending commands to run after terminal is created
   const pendingCommandsRef = useRef<Map<string, { command: string; cwd?: string }>>(new Map());
@@ -284,7 +312,10 @@ export function TerminalPanel() {
   };
 
   return (
-    <div className={styles.terminalPanel}>
+    <div 
+      className={styles.terminalPanel}
+      style={{ backgroundColor: settings.terminalBackground }}
+    >
       <div className={styles.tabBar}>
         <div className={styles.tabs}>
           {terminals.map((term) => (

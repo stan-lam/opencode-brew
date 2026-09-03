@@ -3,55 +3,33 @@ import { Play, Square, RefreshCw, CheckCircle, XCircle, Loader2, Plus, X } from 
 import { terminal as terminalService, TerminalOutput } from '../../services/tauri';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useSettingsStore } from '../../store/settingsStore';
+import { useLayoutStore } from '../../store/layoutStore';
 import styles from './CLIPanel.module.css';
 
-const darkTheme = {
-  background: '#1e1e1e',
-  foreground: '#cccccc',
-  cursor: '#aeafad',
-  cursorAccent: '#1e1e1e',
-  selectionBackground: '#264f78',
-  black: '#1e1e1e',
-  red: '#f14c4c',
-  green: '#4ec9b0',
-  yellow: '#dcdcaa',
-  blue: '#569cd6',
-  magenta: '#c586c0',
-  cyan: '#4ec9b0',
-  white: '#cccccc',
+// Build terminal theme from settings
+const buildTerminalTheme = (settings: ReturnType<typeof useSettingsStore.getState>) => ({
+  background: settings.terminalBackground,
+  foreground: settings.terminalForeground,
+  cursor: settings.terminalCursor,
+  cursorAccent: settings.terminalBackground,
+  selectionBackground: settings.terminalSelectionBackground,
+  black: settings.terminalBlack,
+  red: settings.terminalRed,
+  green: settings.terminalGreen,
+  yellow: settings.terminalYellow,
+  blue: settings.terminalBlue,
+  magenta: settings.terminalMagenta,
+  cyan: settings.terminalCyan,
+  white: settings.terminalWhite,
   brightBlack: '#6d6d6d',
-  brightRed: '#f14c4c',
-  brightGreen: '#4ec9b0',
-  brightYellow: '#dcdcaa',
-  brightBlue: '#569cd6',
-  brightMagenta: '#c586c0',
-  brightCyan: '#4ec9b0',
+  brightRed: settings.terminalRed,
+  brightGreen: settings.terminalGreen,
+  brightYellow: settings.terminalYellow,
+  brightBlue: settings.terminalBlue,
+  brightMagenta: settings.terminalMagenta,
+  brightCyan: settings.terminalCyan,
   brightWhite: '#ffffff',
-};
-
-const lightTheme = {
-  background: '#ffffff',
-  foreground: '#1e1e1e',
-  cursor: '#1e1e1e',
-  cursorAccent: '#ffffff',
-  selectionBackground: '#add6ff',
-  black: '#1e1e1e',
-  red: '#cd3131',
-  green: '#107c41',
-  yellow: '#795e26',
-  blue: '#0066bf',
-  magenta: '#af00db',
-  cyan: '#107c41',
-  white: '#cccccc',
-  brightBlack: '#616161',
-  brightRed: '#cd3131',
-  brightGreen: '#107c41',
-  brightYellow: '#795e26',
-  brightBlue: '#0066bf',
-  brightMagenta: '#af00db',
-  brightCyan: '#107c41',
-  brightWhite: '#1e1e1e',
-};
+});
 
 type CLITool = 'claude-code' | 'opencode' | 'custom';
 type CLIStatus = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
@@ -95,14 +73,55 @@ const CLI_PRESETS: Record<CLITool, CLIConfig> = {
 
 export function CLIPanel() {
   const terminalRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const terminalsMapRef = useRef<Map<string, { terminal: any; fitAddon: any; unlisten?: () => void }>>(new Map());
   
   const [cliTabs, setCliTabs] = useState<CLITab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>('');
   
   const { currentWorkspace } = useWorkspaceStore();
-  const { theme } = useSettingsStore();
-  const terminalTheme = theme === 'light' ? lightTheme : darkTheme;
+  const settings = useSettingsStore();
+  const { activeBottomTab } = useLayoutStore();
+  const terminalTheme = buildTerminalTheme(settings);
+  const wasHiddenRef = useRef(activeBottomTab !== 'cli');
+
+  // Re-fit terminals when CLI tab becomes visible after being hidden
+  useEffect(() => {
+    const isVisible = activeBottomTab === 'cli';
+    const wasHidden = wasHiddenRef.current;
+    wasHiddenRef.current = !isVisible;
+
+    if (isVisible && wasHidden) {
+      // Multiple attempts to ensure terminal renders correctly after tab switch
+      const fitTerminals = (final: boolean = false) => {
+        terminalsMapRef.current.forEach((instance, terminalId) => {
+          if (instance.fitAddon && instance.terminal) {
+            instance.fitAddon.fit();
+            const { rows, cols } = instance.terminal;
+            console.log('[CLI] Tab switch fit:', { rows, cols, final });
+            // Force complete redraw
+            instance.terminal.refresh(0, rows - 1);
+            // Only send resize on final attempt to avoid rapid resizes
+            if (final) {
+              terminalService.resize(terminalId, rows, cols).catch(console.error);
+            }
+          }
+        });
+      };
+
+      // Try multiple times with increasing delays
+      // First two are for visual refresh, last one sends resize to PTY
+      const t1 = setTimeout(() => fitTerminals(false), 0);
+      const t2 = setTimeout(() => fitTerminals(false), 100);
+      const t3 = setTimeout(() => fitTerminals(true), 250);
+      
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
+    }
+  }, [activeBottomTab]);
 
   // Get active tab
   const activeTab = cliTabs.find(t => t.id === activeTabId);
@@ -135,12 +154,25 @@ export function CLIPanel() {
     };
   }, []);
 
-  // Update terminal theme when settings change
+  // Update terminal settings when they change
   useEffect(() => {
     terminalsMapRef.current.forEach((instance) => {
       instance.terminal.options.theme = terminalTheme;
+      instance.terminal.options.fontSize = settings.terminalFontSize;
+      instance.terminal.options.fontFamily = settings.terminalFontFamily;
+      instance.terminal.options.lineHeight = settings.terminalLineHeight;
+      instance.terminal.options.cursorStyle = settings.terminalCursorStyle;
+      instance.terminal.options.cursorBlink = settings.terminalCursorBlink;
+      instance.fitAddon.fit();
     });
-  }, [terminalTheme]);
+  }, [
+    terminalTheme,
+    settings.terminalFontSize,
+    settings.terminalFontFamily,
+    settings.terminalLineHeight,
+    settings.terminalCursorStyle,
+    settings.terminalCursorBlink
+  ]);
 
   // Update tab state helper
   const updateTabState = (tabId: string, updates: Partial<CLITab>) => {
@@ -225,22 +257,74 @@ export function CLIPanel() {
       const { FitAddon } = await import('@xterm/addon-fit');
       await import('@xterm/xterm/css/xterm.css');
 
-      const currentTheme = useSettingsStore.getState().theme === 'light' ? lightTheme : darkTheme;
+      const currentSettings = useSettingsStore.getState();
+      const currentTheme = buildTerminalTheme(currentSettings);
       const term = new Terminal({
         theme: currentTheme,
-        fontFamily: "'SF Mono', 'Fira Code', 'JetBrains Mono', Menlo, Monaco, monospace",
-        fontSize: 13,
-        lineHeight: 1.2,
-        cursorBlink: true,
-        cursorStyle: 'bar',
+        fontFamily: currentSettings.terminalFontFamily,
+        fontSize: currentSettings.terminalFontSize,
+        lineHeight: currentSettings.terminalLineHeight,
+        cursorBlink: currentSettings.terminalCursorBlink,
+        cursorStyle: currentSettings.terminalCursorStyle,
         convertEol: true,
-        scrollback: 10000,
+        scrollback: currentSettings.terminalScrollback,
       });
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(terminalRef.current);
-      fitAddon.fit();
+      
+      // Wait for container to have stable dimensions
+      // This is crucial because flex layout may not be complete immediately
+      const waitForStableDimensions = (): Promise<{ cols: number; rows: number }> => {
+        return new Promise((resolve) => {
+          let lastWidth = 0;
+          let lastHeight = 0;
+          let stableCount = 0;
+          
+          const checkDimensions = () => {
+            const rect = terminalRef.current?.getBoundingClientRect();
+            if (!rect) {
+              setTimeout(checkDimensions, 50);
+              return;
+            }
+            
+            console.log('[CLI] Checking dimensions:', { width: rect.width, height: rect.height, lastWidth, lastHeight });
+            
+            if (rect.width === lastWidth && rect.height === lastHeight && rect.width > 100) {
+              stableCount++;
+              if (stableCount >= 2) {
+                // Dimensions are stable, fit and return
+                fitAddon.fit();
+                console.log('[CLI] Stable dimensions:', { cols: term.cols, rows: term.rows, width: rect.width, height: rect.height });
+                resolve({ cols: term.cols, rows: term.rows });
+                return;
+              }
+            } else {
+              stableCount = 0;
+            }
+            
+            lastWidth = rect.width;
+            lastHeight = rect.height;
+            
+            // Keep checking
+            setTimeout(checkDimensions, 50);
+          };
+          
+          // Start checking after a small delay
+          setTimeout(checkDimensions, 50);
+          
+          // Fallback: resolve after 500ms regardless
+          setTimeout(() => {
+            fitAddon.fit();
+            console.log('[CLI] Fallback dimensions:', { cols: term.cols, rows: term.rows });
+            resolve({ cols: term.cols, rows: term.rows });
+          }, 500);
+        });
+      };
+      
+      const { cols: initialCols, rows: initialRows } = await waitForStableDimensions();
+      console.log('[CLI] Final dimensions for PTY:', { cols: initialCols, rows: initialRows });
 
       // Show startup message
       term.writeln('\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
@@ -260,22 +344,48 @@ export function CLIPanel() {
         term.write(output.data);
       });
 
-      // Create the PTY backend
+      // Create the PTY backend with the stable dimensions we calculated above
       const cwd = currentWorkspace?.rootPath;
-      const { rows, cols } = term;
-      await terminalService.create(terminalId, cwd, rows, cols);
+      console.log('[CLI] Creating PTY with stable dimensions:', {
+        rows: initialRows, cols: initialCols, terminalId
+      });
+      await terminalService.create(terminalId, cwd, initialRows, initialCols);
 
       // Store the instance
       terminalsMapRef.current.set(terminalId, { terminal: term, fitAddon, unlisten });
 
-      // Handle resize
+      // Handle resize with debouncing to avoid issues during resize drag
+      // Ink-based TUIs like Claude Code have issues with xterm.js reflow
+      let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+      let lastSentCols = initialCols;
+      let lastSentRows = initialRows;
+      
       const resizeObserver = new ResizeObserver(() => {
-        const instance = terminalsMapRef.current.get(terminalId);
-        if (instance) {
-          instance.fitAddon.fit();
-          const { rows, cols } = instance.terminal;
-          terminalService.resize(terminalId, rows, cols).catch(console.error);
+        // Debounce resize - wait for user to stop resizing
+        if (resizeTimeout) {
+          clearTimeout(resizeTimeout);
         }
+        
+        resizeTimeout = setTimeout(() => {
+          const instance = terminalsMapRef.current.get(terminalId);
+          if (instance) {
+            instance.fitAddon.fit();
+            const { rows, cols } = instance.terminal;
+
+            // Only send resize if dimensions actually changed
+            if (cols !== lastSentCols || rows !== lastSentRows) {
+              console.log('[CLI] Resize:', { 
+                rows, cols, 
+                prevRows: lastSentRows, prevCols: lastSentCols 
+              });
+              lastSentCols = cols;
+              lastSentRows = rows;
+              
+              // Send resize to PTY - Claude Code will handle SIGWINCH and redraw
+              terminalService.resize(terminalId, rows, cols).catch(console.error);
+            }
+          }
+        }, 200); // Wait 200ms after resize stops to allow xterm reflow to complete
       });
       resizeObserver.observe(terminalRef.current);
 
@@ -285,6 +395,24 @@ export function CLIPanel() {
 
       updateTabState(tabId, { status: 'running' });
       term.focus();
+      
+      // After CLI tool starts, send resize events to ensure it has correct dimensions
+      // (some CLI tools query size on startup before SIGWINCH handler is registered)
+      const sendResize = (delay: number) => {
+        setTimeout(() => {
+          const instance = terminalsMapRef.current.get(terminalId);
+          if (instance) {
+            instance.fitAddon.fit();
+            const { rows, cols } = instance.terminal;
+            console.log(`[CLI] Resize after ${delay}ms:`, { rows, cols });
+            terminalService.resize(terminalId, rows, cols).catch(console.error);
+          }
+        }, delay);
+      };
+      // Send multiple resize events to ensure CLI tool picks up correct size
+      sendResize(500);
+      sendResize(1000);
+      sendResize(2000);
 
     } catch (error) {
       console.error('Failed to start CLI:', error);
@@ -373,11 +501,21 @@ export function CLIPanel() {
   };
 
   if (!activeTab) {
-    return <div className={styles.cliPanel}>Loading...</div>;
+    return (
+      <div 
+        className={styles.cliPanel}
+        style={{ backgroundColor: settings.terminalBackground }}
+      >
+        Loading...
+      </div>
+    );
   }
 
   return (
-    <div className={styles.cliPanel}>
+    <div 
+      className={styles.cliPanel}
+      style={{ backgroundColor: settings.terminalBackground }}
+    >
       <div className={styles.tabBar}>
         <div className={styles.tabs}>
           {cliTabs.map((tab) => (
@@ -477,7 +615,7 @@ export function CLIPanel() {
         </div>
       </div>
 
-      <div className={styles.terminalWrapper} onClick={focusTerminal}>
+      <div ref={wrapperRef} className={styles.terminalWrapper} onClick={focusTerminal}>
         <div 
           ref={terminalRef} 
           className={styles.terminalContainer}

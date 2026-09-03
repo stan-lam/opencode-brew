@@ -2,6 +2,7 @@
   height: 100%;
   display: flex;
   flex-direction: column;
+  /* Background set by inline styles from terminal settings */
 }
 
 .header {
@@ -56,18 +57,17 @@
   flex: 1;
   overflow-y: auto;
   padding: 8px;
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-sm);
+  /* Font settings now come from inline styles via terminal settings */
 }
 
 .empty {
-  color: var(--text-muted);
+  opacity: 0.6;
   padding: 8px;
 }
 
 .line {
   padding: 2px 0;
-  color: var(--text-secondary);
+  /* Color inherits from parent container */
   white-space: pre-wrap;
   word-break: break-all;
 }

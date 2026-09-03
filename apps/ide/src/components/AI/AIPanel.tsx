@@ -44,6 +44,7 @@ import { useLayoutStore } from '../../store/layoutStore';
 import { useEditorStore } from '../../store/editorStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import styles from './AIPanel.module.css';
+import { ContextMenu, ContextMenuItem, ContextMenuPosition } from '../FileTree/ContextMenu';
 import mermaid from 'mermaid';
 
 // Initialize mermaid with dark theme
@@ -175,6 +176,111 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
   const lineCount = lines.length;
   const shouldCollapse = lineCount > 15;
   const COLLAPSED_MAX_LINES = 120;
+  
+  // Context menu state for line number right-click
+  const [lineContextMenu, setLineContextMenu] = useState<{
+    position: ContextMenuPosition;
+    lineNumber: number;
+    lineContent: string;
+  } | null>(null);
+  
+  const { activeConversation } = useAIStore();
+  
+  // Handle right-click on line number
+  const handleLineContextMenu = useCallback((
+    e: React.MouseEvent,
+    lineNumber: number,
+    lineContent: string
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setLineContextMenu({
+      position: { x: e.clientX, y: e.clientY },
+      lineNumber,
+      lineContent,
+    });
+  }, []);
+  
+  // Close context menu
+  const closeLineContextMenu = useCallback(() => {
+    setLineContextMenu(null);
+  }, []);
+  
+  // Handle AI action from context menu - dispatch event to prefill AI input
+  const handleAIAction = useCallback((
+    action: 'review' | 'ask' | 'research',
+    startNewConversation: boolean
+  ) => {
+    if (!lineContextMenu) return;
+    
+    // Dispatch event to prefill the AI input instead of sending directly
+    window.dispatchEvent(new CustomEvent('prefill-ai-input', {
+      detail: {
+        action,
+        lineNumber: lineContextMenu.lineNumber,
+        lineContent: lineContextMenu.lineContent,
+        filename,
+        language,
+        startNewConversation,
+      }
+    }));
+    
+    closeLineContextMenu();
+  }, [lineContextMenu, filename, language, closeLineContextMenu]);
+  
+  // Build context menu items for line number right-click
+  const buildLineContextMenuItems = useCallback((): ContextMenuItem[] => {
+    const hasActiveConversation = !!activeConversation;
+    const items: ContextMenuItem[] = [];
+    
+    // Review section
+    items.push({
+      id: 'review-new',
+      label: '🔍 Review (New Chat)',
+      action: () => handleAIAction('review', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'review-continue',
+        label: '🔍 Review (Continue)',
+        action: () => handleAIAction('review', false),
+      });
+    }
+    
+    items.push({ id: 'divider-1', divider: true });
+    
+    // Ask section
+    items.push({
+      id: 'ask-new',
+      label: '💬 Ask AI (New Chat)',
+      action: () => handleAIAction('ask', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'ask-continue',
+        label: '💬 Ask AI (Continue)',
+        action: () => handleAIAction('ask', false),
+      });
+    }
+    
+    items.push({ id: 'divider-2', divider: true });
+    
+    // Research section
+    items.push({
+      id: 'research-new',
+      label: '📚 Research (New Chat)',
+      action: () => handleAIAction('research', true),
+    });
+    if (hasActiveConversation) {
+      items.push({
+        id: 'research-continue',
+        label: '📚 Research (Continue)',
+        action: () => handleAIAction('research', false),
+      });
+    }
+    
+    return items;
+  }, [activeConversation, handleAIAction]);
   
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -400,7 +506,13 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
 
       return (
         <div key={lineIdx} className={`${styles.codeLine} ${diffClass}`}>
-          <span className={styles.lineNumber}>{lineNumber}</span>
+          <span 
+            className={`${styles.lineNumber} ${styles.lineNumberClickable}`}
+            onContextMenu={(e) => handleLineContextMenu(e, lineNumber, lineContent)}
+            title="Right-click for AI options"
+          >
+            {lineNumber}
+          </span>
           {isDiff && <span className={styles.diffMarker}>{isDiffAdd ? '+' : isDiffRemove ? '-' : ' '}</span>}
           <span className={styles.lineContent}>{highlightedContent}</span>
         </div>
@@ -462,6 +574,15 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
             <code className={styles.asciiArtText}>{asciiContent}</code>
           </pre>
         </div>
+        
+        {/* Line number context menu for AI actions */}
+        {lineContextMenu && (
+          <ContextMenu
+            position={lineContextMenu.position}
+            onClose={closeLineContextMenu}
+            items={buildLineContextMenuItems()}
+          />
+        )}
       </div>
     );
   }
@@ -526,6 +647,15 @@ function CodeBlock({ code, language, filename, isDiff }: CodeBlockProps) {
           <code>{highlightCode(code, language)}</code>
         </pre>
       </div>
+      
+      {/* Line number context menu for AI actions */}
+      {lineContextMenu && (
+        <ContextMenu
+          position={lineContextMenu.position}
+          onClose={closeLineContextMenu}
+          items={buildLineContextMenuItems()}
+        />
+      )}
     </div>
   );
 }
@@ -754,8 +884,11 @@ const buildAIOperationDiffFromDisk = async (
 
   const baseContent = previousContent ?? diskContent ?? opOld;
   if (baseContent) {
-    const { updatedContent } = applyEditOperation(baseContent, operation);
-    return { oldContent: baseContent, newContent: updatedContent, operationType, requiresOverwrite: false };
+    const { updatedContent, changed } = applyEditOperation(baseContent, operation);
+    if (changed) {
+      return { oldContent: baseContent, newContent: updatedContent, operationType, requiresOverwrite: false };
+    }
+    // Apply simulation failed (content mismatch), fall back to operation's proposed diff
   }
 
   return { oldContent: opOld, newContent: opNew, operationType, requiresOverwrite: false };
@@ -1329,8 +1462,11 @@ function parsePlanComponents(content: string): {
   }
 
   // Parse <checklist> tags (support any attributes, extract title if present)
+  // First, parse complete checklist tags
   const checklistRegex = /<checklist([^>]*)>([\s\S]*?)<\/checklist>/g;
+  const completedChecklistPositions = new Set<number>();
   while ((match = checklistRegex.exec(content)) !== null) {
+    completedChecklistPositions.add(match.index);
     const attrs = match[1];
     const titleMatch = attrs.match(/title="([^"]+)"/i);
     const title = titleMatch ? titleMatch[1] : 'Checklist';
@@ -1341,6 +1477,29 @@ function parsePlanComponents(content: string): {
       .map(l => l.replace(/^-\s*(?:\[[ xX>-]\]\s*)?/, '').trim())
       .filter(l => l.length > 0);
     checklists.push({ title, items });
+  }
+  
+  // Then, parse incomplete checklist tags (streaming support)
+  // Only match if there's no closing tag and at least one list item
+  const incompleteChecklistRegex = /<checklist([^>]*)>([\s\S]*)$/g;
+  while ((match = incompleteChecklistRegex.exec(content)) !== null) {
+    // Skip if this position was already matched as a complete checklist
+    if (completedChecklistPositions.has(match.index)) continue;
+    // Only process if content doesn't contain a closing tag (truly incomplete)
+    if (match[2].includes('</checklist>')) continue;
+    
+    const attrs = match[1];
+    const titleMatch = attrs.match(/title="([^"]+)"/i);
+    const title = titleMatch ? titleMatch[1] : 'Checklist';
+    const items = match[2].split('\n')
+      .map(l => l.trim())
+      .filter(l => l.startsWith('-'))
+      .map(l => l.replace(/^-\s*(?:\[[ xX>-]\]\s*)?/, '').trim())
+      .filter(l => l.length > 0);
+    // Only add if we have at least one item
+    if (items.length > 0) {
+      checklists.push({ title, items });
+    }
   }
 
   // Parse <decision> tags
@@ -1845,9 +2004,6 @@ function ChecklistView({ checklist, onImplementInAgent }: {
   const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
   const remainingCount = Math.max(0, totalCount - completedCount);
 
-  const toggleItem = (idx: number) => {
-    setChecked(prev => prev.map((v, i) => (i === idx ? !v : v)));
-  };
 
   return (
     <div className={styles.checklistContainer}>
@@ -1890,14 +2046,8 @@ function ChecklistView({ checklist, onImplementInAgent }: {
           <li
             key={idx}
             className={`${styles.checklistItem} ${checked[idx] ? styles.checklistItemDone : ''}`}
-            onClick={() => toggleItem(idx)}
           >
-            <input
-              type="checkbox"
-              checked={checked[idx]}
-              onChange={() => {}}
-              className={styles.checklistCheckbox}
-            />
+            <span className={checked[idx] ? styles.checklistCircleDone : styles.checklistCircle} />
             <div className={styles.checklistItemText}>
               <MarkdownRenderer content={item} />
             </div>
@@ -2391,10 +2541,58 @@ function ActionableTasksSuggestion({ tasks, onSwitchToAgent }: { tasks: string[]
   );
 }
 
+// ─── Switch to Agent Mode Prompt (shown when AI suggests switching to Agent mode) ─────
+function SwitchToAgentPrompt({
+  onSwitchToAgent
+}: {
+  onSwitchToAgent: () => void;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+
+  if (dismissed) return null;
+
+  return (
+    <div className={styles.switchToAgentPrompt}>
+      <div className={styles.suggestionHeader}>
+        <div className={styles.suggestionIcon}>⚡</div>
+        <div className={styles.suggestionTitle}>Switch to Agent Mode for Implementation</div>
+        <button
+          className={styles.suggestionDismiss}
+          onClick={() => setDismissed(true)}
+          title="Dismiss"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      <div className={styles.suggestionContent}>
+        <p className={styles.suggestionText}>
+          The AI recommends switching to <strong>Agent Mode</strong> to implement these changes.
+          Agent Mode can create, edit, and delete files in your workspace.
+        </p>
+        <div className={styles.suggestionActions}>
+          <button
+            className={styles.suggestionPrimaryBtn}
+            onClick={onSwitchToAgent}
+          >
+            <TerminalIcon size={14} />
+            Switch to Agent Mode
+          </button>
+          <button
+            className={styles.suggestionSecondaryBtn}
+            onClick={() => setDismissed(true)}
+          >
+            Stay in Current Mode
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Implementation Offer Prompt (shown in Chat mode when AI offers to implement) ─────
-function ImplementationOfferPrompt({ 
-  onSwitchToAgent 
-}: { 
+function ImplementationOfferPrompt({
+  onSwitchToAgent
+}: {
   onSwitchToAgent: () => void;
 }) {
   const [dismissed, setDismissed] = useState(false);
@@ -2406,7 +2604,7 @@ function ImplementationOfferPrompt({
       <div className={styles.suggestionHeader}>
         <div className={styles.suggestionIcon}>🚀</div>
         <div className={styles.suggestionTitle}>Ready to implement?</div>
-        <button 
+        <button
           className={styles.suggestionDismiss}
           onClick={() => setDismissed(true)}
           title="Dismiss"
@@ -2419,7 +2617,7 @@ function ImplementationOfferPrompt({
           Switch to <strong>Agent Mode</strong> to let the AI create and edit files in your workspace.
         </p>
         <div className={styles.suggestionActions}>
-          <button 
+          <button
             className={styles.suggestionPrimaryBtn}
             onClick={onSwitchToAgent}
           >
@@ -2780,6 +2978,7 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
   const [actionableTasks, setActionableTasks] = useState<string[]>([]);
   const [codeBlockTasks, setCodeBlockTasks] = useState<string[]>([]);
   const [hasImplementationOffer, setHasImplementationOffer] = useState(false);
+  const [hasSwitchToAgentSuggestion, setHasSwitchToAgentSuggestion] = useState(false);
   const [localQuestions, setLocalQuestions] = useState<PendingQuestion[]>([]);
   const [workspaceOps, setWorkspaceOps] = useState<WorkspaceOperation[]>([]);
   const [workspaceCreating, setWorkspaceCreating] = useState<string | null>(null);
@@ -2972,11 +3171,23 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
     });
   }, [setAgentMode, sendMessage, setAgentTasks, queuePrompt]);
 
+  // Listen for file operations cleared event (from Undo All / Dismiss)
+  useEffect(() => {
+    const handleFileOpsCleared = () => {
+      setPendingOps([]);
+      if (onOperationsChange) {
+        onOperationsChange([]);
+      }
+    };
+    window.addEventListener('file-ops-cleared', handleFileOpsCleared);
+    return () => window.removeEventListener('file-ops-cleared', handleFileOpsCleared);
+  }, [onOperationsChange]);
+
   // Parse file operations and plan components from assistant messages
   useEffect(() => {
     if (!isUser && message.content) {
-      // Only parse file operations if NOT in plan mode
-      if (agentMode !== 'plan') {
+      // Only parse file operations in Agent mode - skip for Chat and Plan modes
+      if (agentMode === 'agent') {
         const ops = parseFileOperations(message.content, currentWorkspace?.rootPath);
         setPendingOps(ops);
         // Notify parent of operations
@@ -2984,7 +3195,7 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           onOperationsChange(ops);
         }
       } else {
-        setPendingOps([]); // Clear any file operations in plan mode
+        setPendingOps([]); // Clear any file operations in non-agent modes
         if (onOperationsChange) {
           onOperationsChange([]);
         }
@@ -3124,7 +3335,7 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
         setCodeBlockTasks(detectedCodeBlocks);
         setHasImplementationOffer(false);
       } else if (agentMode === 'chat') {
-        // Detect when AI offers to implement in Chat mode
+        // Detect when AI offers to implement in Chat mode or generates file operation blocks
         const implementationOfferPatterns = [
           /would you like me to (?:create|implement|write|build|generate|make|add)/i,
           /shall i (?:create|implement|write|build|generate|make|add)/i,
@@ -3135,14 +3346,40 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
           /want me to (?:go ahead|proceed) (?:and|with) (?:creat|implement|writ|build)/i,
           /\?[\s\S]{0,50}(?:create|implement|write|build|add) (?:this|that|the|it)/i,
         ];
+        // Also detect file operation XML blocks that shouldn't be in Chat mode
+        const fileOperationPatterns = [
+          /<create_file\s+path=/i,
+          /<edit_file\s+path=/i,
+          /<delete_file\s+path=/i,
+          /<file_operation\s+/i,
+        ];
         const hasOffer = implementationOfferPatterns.some(p => p.test(message.content));
-        setHasImplementationOffer(hasOffer);
+        const hasFileOps = fileOperationPatterns.some(p => p.test(message.content));
+        setHasImplementationOffer(hasOffer || hasFileOps);
         setActionableTasks([]);
         setCodeBlockTasks([]);
       } else {
         setActionableTasks([]);
         setCodeBlockTasks([]);
         setHasImplementationOffer(false);
+      }
+      
+      // Detect when AI suggests switching to Agent mode (applies to all non-agent modes)
+      if (agentMode !== 'agent') {
+        const switchToAgentPatterns = [
+          /switch(?:ing)?\s+to\s+agent\s+mode/i,
+          /please\s+switch\s+to\s+agent\s+mode/i,
+          /use\s+(?:the\s+)?agent\s+mode/i,
+          /to\s+implement\s+(?:these\s+)?changes?,?\s+(?:please\s+)?switch/i,
+          /in\s+agent\s+mode,?\s+(?:i\s+can|you\s+can|the\s+ai\s+can)/i,
+          /agent\s+mode\s+(?:is\s+required|will\s+allow|enables?|can)/i,
+          /(?:need|require)s?\s+agent\s+mode/i,
+          /mode\s+selector.*agent/i,
+        ];
+        const hasSwitchSuggestion = switchToAgentPatterns.some(p => p.test(message.content));
+        setHasSwitchToAgentSuggestion(hasSwitchSuggestion);
+      } else {
+        setHasSwitchToAgentSuggestion(false);
       }
     }
   }, [message.content, isUser, agentMode]);
@@ -3567,6 +3804,11 @@ function MessageBubble({ message, onOperationsChange, renderAsPlainText, plainTe
       )}
       {!isUser && agentMode === 'chat' && hasImplementationOffer && (
         <ImplementationOfferPrompt 
+          onSwitchToAgent={() => setAgentMode('agent')} 
+        />
+      )}
+      {!isUser && agentMode !== 'agent' && hasSwitchToAgentSuggestion && !hasImplementationOffer && (
+        <SwitchToAgentPrompt 
           onSwitchToAgent={() => setAgentMode('agent')} 
         />
       )}
@@ -5142,7 +5384,8 @@ function FileOperationsBar({
   onDismiss,
   onViewFile,
   onAcceptFile,
-  onUndoFile
+  onUndoFile,
+  isProcessing = false,
 }: { 
   operations: PendingFileOperation[];
   workspaceRoot?: string;
@@ -5157,6 +5400,7 @@ function FileOperationsBar({
   onViewFile: (path: string) => void;
   onAcceptFile: (index: number) => void;
   onUndoFile: (index: number) => void;
+  isProcessing?: boolean;
 }) {
   if (operations.length === 0) return null;
 
@@ -5164,6 +5408,12 @@ function FileOperationsBar({
   const groupedOps = groupOperationsByFile(operations, workspaceRoot);
   const fileCount = groupedOps.length;
   const appliedFileCount = groupedOps.filter(g => g.allApplied).length;
+  
+  // Count operations that can actually be auto-applied (not already applied, not requiring overwrite, not invalid)
+  const canAutoApplyCount = operations.filter(op => 
+    !op.applied && !op.requiresOverwrite && !op.operation.invalidReason
+  ).length;
+  
   const pendingCount = fileCount - appliedFileCount;
 
   // If all operations are applied, show a dismiss option instead of hiding completely
@@ -5253,6 +5503,8 @@ function FileOperationsBar({
 
   // Show batch actions only if there are pending operations
   const showBatchActions = pendingCount > 0;
+  // Disable Keep All if there's nothing that can be auto-applied
+  const canKeepAll = canAutoApplyCount > 0;
 
   return (
     <div className={styles.fileOpsBar}>
@@ -5270,6 +5522,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onDismiss(); }}
               title="Dismiss file operations"
+              disabled={isProcessing}
             >
               Dismiss
             </button>
@@ -5277,6 +5530,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
               title="Undo All"
+              disabled={isProcessing}
             >
               Undo All
             </button>
@@ -5284,6 +5538,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
               title="Soft undo (restore pre-apply content only)"
+              disabled={isProcessing}
             >
               Soft Undo
             </button>
@@ -5291,6 +5546,7 @@ function FileOperationsBar({
               className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
               onClick={(e) => { e.stopPropagation(); onViewAll(); }}
               title="View All Changes"
+              disabled={isProcessing}
             >
               View All
             </button>
@@ -5301,6 +5557,7 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
               title="Undo All"
+              disabled={isProcessing}
             >
               Undo All
             </button>
@@ -5308,13 +5565,15 @@ function FileOperationsBar({
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
               title="Soft undo (restore pre-apply content only)"
+              disabled={isProcessing}
             >
               Soft Undo
             </button>
             <button 
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onKeepAll(); }}
-              title="Keep All"
+              title={canKeepAll ? "Keep All" : "No operations can be auto-applied"}
+              disabled={isProcessing || !canKeepAll}
             >
               Keep All
             </button>
@@ -5322,6 +5581,7 @@ function FileOperationsBar({
               className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
               onClick={(e) => { e.stopPropagation(); onViewAll(); }}
               title="View All Changes"
+              disabled={isProcessing}
             >
               View All
             </button>
@@ -5365,6 +5625,7 @@ function FileOperationsBar({
                         });
                       }}
                       title="Accept"
+                      disabled={isProcessing}
                     >
                       ✓
                     </button>
@@ -5380,6 +5641,7 @@ function FileOperationsBar({
                         });
                       }}
                       title="Reject"
+                      disabled={isProcessing}
                     >
                       ✕
                     </button>
@@ -5397,6 +5659,7 @@ function FileOperationsBar({
                       });
                     }}
                     title="Undo"
+                    disabled={isProcessing}
                   >
                     ✕
                   </button>
@@ -5479,6 +5742,7 @@ export function AIPanel() {
   const [allPendingOps, setAllPendingOps] = useState<PendingFileOperation[]>([]);
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
   const [showFileOps, setShowFileOps] = useState(false);
+  const [isFileOpsProcessing, setIsFileOpsProcessing] = useState(false);
   const [showProcessingIndicator, setShowProcessingIndicator] = useState(false);
   const [pendingResponse, setPendingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -5633,6 +5897,27 @@ export function AIPanel() {
     }
     lastPendingOpsCountRef.current = nextCount;
   }, [allPendingOps.length]);
+
+  // Listen for file-op-applied events from AIDiffEditor (when user clicks Overwrite/Apply)
+  useEffect(() => {
+    const handleFileOpApplied = (e: Event) => {
+      const customEvent = e as CustomEvent<{ filePath: string; operationType: string }>;
+      const { filePath } = customEvent.detail;
+      
+      setAllPendingOps(prev => prev.map(op => {
+        // Match by normalized path
+        const opPath = canonicalizeOperationPath(op.operation.path, currentWorkspace?.rootPath);
+        const eventPath = canonicalizeOperationPath(filePath, currentWorkspace?.rootPath);
+        if (opPath === eventPath) {
+          return { ...op, applied: true, requiresOverwrite: false, wasSkipped: false };
+        }
+        return op;
+      }));
+    };
+    
+    window.addEventListener('file-op-applied', handleFileOpApplied);
+    return () => window.removeEventListener('file-op-applied', handleFileOpApplied);
+  }, [currentWorkspace?.rootPath]);
 
   useEffect(() => {
     if (!aiAutoApplyFileOps) return;
@@ -5844,6 +6129,7 @@ export function AIPanel() {
 
   useEffect(() => {
     setShowFileOps(false);
+    setAllPendingOps([]);
     autoScrollLockRef.current = true;
     scheduleScrollToBottom('auto');
   }, [activeConversation?.id, scheduleScrollToBottom]);
@@ -5885,6 +6171,48 @@ export function AIPanel() {
     window.addEventListener('resize', handleWindowResize);
     return () => window.removeEventListener('resize', handleWindowResize);
   }, [resizeTextarea]);
+
+  // Listen for prefill-ai-input events from MonacoEditor/CodeBlock (line number context menu)
+  useEffect(() => {
+    const handlePrefillInput = (e: Event) => {
+      const customEvent = e as CustomEvent<{
+        action: 'review' | 'ask' | 'research';
+        lineNumber: number;
+        lineContent: string;
+        filename?: string;
+        language?: string;
+        startNewConversation?: boolean;
+      }>;
+      const { action, lineNumber, lineContent, filename, language, startNewConversation } = customEvent.detail;
+      
+      // Create new conversation if requested
+      if (startNewConversation) {
+        createConversation();
+      }
+      
+      // Build a clean, user-friendly prompt for the input
+      const actionLabel = action === 'review' ? 'Review' : action === 'ask' ? 'Question about' : 'Research';
+      const fileInfo = filename ? ` (${filename}${language ? `, ${language}` : ''})` : '';
+      const codeBlock = `\`\`\`${language || ''}\n${lineContent}\n\`\`\``;
+      
+      // Pre-fill with a clean format - user can add their context
+      const prefillText = `${actionLabel} line ${lineNumber}${fileInfo}:\n\n${codeBlock}\n\n`;
+      
+      setInput(prefillText);
+      setTimeout(() => {
+        resizeTextarea();
+        // Focus the textarea and move cursor to end
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          textareaRef.current.selectionStart = textareaRef.current.value.length;
+          textareaRef.current.selectionEnd = textareaRef.current.value.length;
+        }
+      }, 100);
+    };
+    
+    window.addEventListener('prefill-ai-input', handlePrefillInput);
+    return () => window.removeEventListener('prefill-ai-input', handlePrefillInput);
+  }, [createConversation, resizeTextarea]);
 
   useEffect(() => {
     if (config.provider === 'ollama' || config.provider === 'copilot') {
@@ -6399,10 +6727,11 @@ export function AIPanel() {
       return;
     }
 
+    setIsFileOpsProcessing(true);
     await useAIStore.getState().withWorkspaceWriteLock('fileOps.applyAll', async () => {
       let successCount = 0;
       let skippedCount = 0;
-      let overwriteRequiredCount = 0;
+      const overwriteRequiredPaths = new Set<string>();
       let invalidCount = 0;
       const updatedOps = [...allPendingOps];
 
@@ -6473,7 +6802,7 @@ export function AIPanel() {
                 requiresOverwrite: true,
               };
               skippedCount++;
-              overwriteRequiredCount++;
+              overwriteRequiredPaths.add(normalizedOpPath);
               continue;
             }
             
@@ -6599,10 +6928,10 @@ export function AIPanel() {
       );
       markFileOperationsAsKept(operationIds);
 
-      if (overwriteRequiredCount > 0) {
+      if (overwriteRequiredPaths.size > 0) {
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: {
-            message: `${overwriteRequiredCount} file(s) require overwrite. Review the AI diff to apply.`,
+            message: `${overwriteRequiredPaths.size} file(s) require overwrite. Review the AI diff to apply.`,
             type: 'info'
           }
         }));
@@ -6624,12 +6953,18 @@ export function AIPanel() {
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: { message: `Applied ${successCount} file(s) to ${currentWorkspace.rootPath}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`, type: 'success' }
         }));
-      } else if (skippedCount > 0) {
+      } else if (skippedCount > 0 && overwriteRequiredPaths.size === 0 && invalidCount === 0) {
+        // Only show "all applied" if everything was genuinely already applied (not skipped for other reasons)
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: { message: 'All operations already applied', type: 'info' }
         }));
+      } else if (skippedCount > 0 && overwriteRequiredPaths.size === 0 && invalidCount > 0) {
+        // Some operations were invalid, already notified above
+      } else if (skippedCount > 0 && overwriteRequiredPaths.size > 0) {
+        // Some operations require overwrite, already notified above
       }
     });
+    setIsFileOpsProcessing(false);
   };
 
   // Auto-apply file operations when streaming ends
@@ -6664,8 +6999,10 @@ export function AIPanel() {
   };
 
   const handleUndoAllOperations = () => {
+    setIsFileOpsProcessing(true);
     void (async () => {
       const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      const { clearAllAIState } = useEditorStore.getState();
       let undoneCount = 0;
       const undonePaths = new Set<string>();
       const workspaceRoot = useWorkspaceStore.getState().currentWorkspace?.rootPath;
@@ -6721,15 +7058,20 @@ export function AIPanel() {
       }
 
       setAllPendingOps([]);
+      clearAllAIState();
+      window.dispatchEvent(new CustomEvent('file-ops-cleared'));
       window.dispatchEvent(new CustomEvent('show-notification', {
         detail: { message: undoneCount > 0 ? `Undid ${undoneCount} file(s)` : 'Removed all file operations', type: 'info' }
       }));
+      setIsFileOpsProcessing(false);
     })();
   };
 
   const handleSoftUndoAllOperations = () => {
+    setIsFileOpsProcessing(true);
     void (async () => {
       const { unmarkFileOperationsAsKept } = useAIStore.getState();
+      const { clearAllAIState } = useEditorStore.getState();
       let undoneCount = 0;
 
       for (const item of allPendingOps) {
@@ -6751,14 +7093,18 @@ export function AIPanel() {
       }
 
       setAllPendingOps([]);
+      clearAllAIState();
+      window.dispatchEvent(new CustomEvent('file-ops-cleared'));
       window.dispatchEvent(new CustomEvent('show-notification', {
         detail: { message: undoneCount > 0 ? `Soft-undoed ${undoneCount} file(s)` : 'Removed all file operations', type: 'info' }
       }));
+      setIsFileOpsProcessing(false);
     })();
   };
 
   const handleDismissFileOperations = () => {
     const { unmarkFileOperationsAsKept } = useAIStore.getState();
+    const { clearAllAIState } = useEditorStore.getState();
     const operationIds = allPendingOps.map(item =>
       `${item.messageId}:${item.operation.type}:${item.operation.path}`
     );
@@ -6767,6 +7113,8 @@ export function AIPanel() {
     }
     setAllPendingOps([]);
     setShowFileOps(false);
+    clearAllAIState();
+    window.dispatchEvent(new CustomEvent('file-ops-cleared'));
     window.dispatchEvent(new CustomEvent('show-notification', {
       detail: { message: 'Dismissed file operations', type: 'info' }
     }));
@@ -7878,6 +8226,7 @@ export function AIPanel() {
           onViewFile={handleViewFileOperation}
           onAcceptFile={handleAcceptFileOperation}
           onUndoFile={handleUndoFileOperation}
+          isProcessing={isFileOpsProcessing}
         />
       )}
 
