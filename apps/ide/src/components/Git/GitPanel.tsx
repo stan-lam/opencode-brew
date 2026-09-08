@@ -16,8 +16,10 @@ import {
   RotateCcw,
   History,
   Archive,
+  Search,
+  Cloud,
 } from 'lucide-react';
-import { useGitStore, GitFile } from '../../store/gitStore';
+import { useGitStore, GitFile, BranchInfo } from '../../store/gitStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useEditorStore } from '../../store/editorStore';
 import { useLayoutStore } from '../../store/layoutStore';
@@ -109,6 +111,8 @@ export function GitPanel() {
     isRepo,
     currentBranch,
     branches,
+    allBranches,
+    isFetchingBranches,
     stagedFiles,
     unstagedFiles,
     commitHistory,
@@ -126,10 +130,13 @@ export function GitPanel() {
     unstageAll,
     commit,
     checkout,
+    checkoutRemoteBranch,
     createBranch,
     deleteBranch,
     discardChanges,
     fetchCommitHistory,
+    fetchAllBranches,
+    fetch: gitFetch,
     stash,
     stashPop,
     fetchStashes,
@@ -145,6 +152,7 @@ export function GitPanel() {
   const [showBranchDropdown, setShowBranchDropdown] = useState(false);
   const [showNewBranchInput, setShowNewBranchInput] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
+  const [branchSearchQuery, setBranchSearchQuery] = useState('');
   const [isInitializing, setIsInitializing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [reviewProvider, setReviewProvider] = useState<AIProvider>(aiConfig.provider);
@@ -152,12 +160,49 @@ export function GitPanel() {
   const [reviewUsePlanMode, setReviewUsePlanMode] = useState(true);
   const [isReviewing, setIsReviewing] = useState(false);
   const branchDropdownRef = useRef<HTMLDivElement>(null);
+  const branchSearchInputRef = useRef<HTMLInputElement>(null);
 
   const reviewModelOptions = useMemo(() => {
     const models = availableModels[reviewProvider] || [];
     const fallback = reviewProvider === aiConfig.provider && aiConfig.model ? [aiConfig.model] : [];
     return Array.from(new Set(models.length > 0 ? models : fallback));
   }, [availableModels, aiConfig.model, aiConfig.provider, reviewProvider]);
+
+  // Use allBranches if available, otherwise fall back to local branches array
+  const effectiveBranches = useMemo(() => {
+    if (allBranches.length > 0) {
+      return allBranches;
+    }
+    // Fallback to existing branches array (local only)
+    return branches.map(name => ({
+      name,
+      is_remote: false,
+      is_current: name === currentBranch,
+      remote_name: null,
+      upstream: null,
+    }));
+  }, [allBranches, branches, currentBranch]);
+
+  // Filter branches based on search query
+  const filteredBranches = useMemo(() => {
+    console.log('[GitPanel] effectiveBranches:', effectiveBranches);
+    if (!branchSearchQuery.trim()) {
+      return effectiveBranches;
+    }
+    const query = branchSearchQuery.toLowerCase();
+    return effectiveBranches.filter(branch => 
+      branch.name.toLowerCase().includes(query) ||
+      (branch.remote_name && branch.remote_name.toLowerCase().includes(query))
+    );
+  }, [effectiveBranches, branchSearchQuery]);
+
+  // Separate local and remote branches for display
+  const { localBranches, remoteBranches } = useMemo(() => {
+    const local = filteredBranches.filter(b => !b.is_remote);
+    const remote = filteredBranches.filter(b => b.is_remote);
+    console.log('[GitPanel] localBranches:', local.length, 'remoteBranches:', remote.length);
+    return { localBranches: local, remoteBranches: remote };
+  }, [filteredBranches]);
 
   useEffect(() => {
     if (reviewModelOptions.length === 0) {
@@ -219,11 +264,24 @@ export function GitPanel() {
     const handleClickOutside = (e: MouseEvent) => {
       if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
         setShowBranchDropdown(false);
+        setBranchSearchQuery('');
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Fetch all branches and focus search when dropdown opens
+  useEffect(() => {
+    if (showBranchDropdown) {
+      console.log('[GitPanel] Dropdown opened, fetching branches for workspace:', currentWorkspace?.rootPath);
+      fetchAllBranches();
+      // Focus search input after a short delay to ensure dropdown is rendered
+      setTimeout(() => {
+        branchSearchInputRef.current?.focus();
+      }, 50);
+    }
+  }, [showBranchDropdown, fetchAllBranches, currentWorkspace?.rootPath]);
 
   const handleInitRepo = async () => {
     setIsInitializing(true);
@@ -266,15 +324,41 @@ export function GitPanel() {
     window.dispatchEvent(new CustomEvent('show-notification', { detail: { message, type } }));
   };
 
-  const handleCheckout = async (branch: string) => {
+  const handleCheckout = async (branch: BranchInfo) => {
     try {
-      await checkout(branch);
+      if (branch.is_remote && branch.remote_name) {
+        await checkoutRemoteBranch(branch.name, branch.remote_name);
+        setStatusMessage(`Created and switched to ${branch.name}`);
+      } else {
+        await checkout(branch.name);
+        setStatusMessage(`Switched to ${branch.name}`);
+      }
       setShowBranchDropdown(false);
-      setStatusMessage(`Switched to ${branch}`);
+      setBranchSearchQuery('');
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (error) {
       setStatusMessage(`Checkout failed: ${error}`);
       setTimeout(() => setStatusMessage(null), 5000);
+    }
+  };
+
+  const [isFetchingRemote, setIsFetchingRemote] = useState(false);
+
+  const handleFetchRemotes = async () => {
+    setIsFetchingRemote(true);
+    try {
+      console.log('[GitPanel] Fetching from remote...');
+      await gitFetch();
+      console.log('[GitPanel] Fetch complete, refreshing branch list...');
+      await fetchAllBranches();
+      setStatusMessage('Fetched from remote');
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (error) {
+      console.error('[GitPanel] Fetch failed:', error);
+      setStatusMessage(`Fetch failed: ${error}`);
+      setTimeout(() => setStatusMessage(null), 5000);
+    } finally {
+      setIsFetchingRemote(false);
     }
   };
 
@@ -577,6 +661,56 @@ export function GitPanel() {
             <div className={styles.branchDropdown}>
               <div className={styles.branchDropdownHeader}>
                 <span>Branches</span>
+                <div className={styles.branchDropdownActions}>
+                  <button
+                    className={styles.fetchBranchesBtn}
+                    onClick={() => fetchAllBranches()}
+                    disabled={isFetchingBranches}
+                    title="Refresh branch list"
+                  >
+                    <RefreshCw size={12} className={isFetchingBranches ? styles.spinner : ''} />
+                  </button>
+                  <button
+                    className={styles.fetchRemoteBtn}
+                    onClick={handleFetchRemotes}
+                    disabled={isFetchingRemote || isLoading}
+                    title="Fetch from remote (updates remote branches)"
+                  >
+                    {isFetchingRemote ? (
+                      <RefreshCw size={12} className={styles.spinner} />
+                    ) : (
+                      <>
+                        <Cloud size={12} />
+                        <Download size={10} />
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+              <div className={styles.branchSearchWrapper}>
+                <Search size={14} className={styles.branchSearchIcon} />
+                <input
+                  ref={branchSearchInputRef}
+                  type="text"
+                  placeholder="Search branches..."
+                  value={branchSearchQuery}
+                  onChange={(e) => setBranchSearchQuery(e.target.value)}
+                  className={styles.branchSearchInput}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setShowBranchDropdown(false);
+                      setBranchSearchQuery('');
+                    }
+                  }}
+                />
+                {branchSearchQuery && (
+                  <button 
+                    className={styles.clearSearchBtn}
+                    onClick={() => setBranchSearchQuery('')}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
               </div>
               {showNewBranchInput && (
                 <div className={styles.newBranchInput}>
@@ -609,7 +743,7 @@ export function GitPanel() {
                 </div>
               )}
               <div className={styles.branchList}>
-                {!showNewBranchInput && (
+                {!showNewBranchInput && !branchSearchQuery && (
                   <div
                     className={styles.createBranchItem}
                     onClick={() => setShowNewBranchInput(true)}
@@ -618,25 +752,86 @@ export function GitPanel() {
                     <span>Create new branch...</span>
                   </div>
                 )}
-                {branches.map((branch) => (
-                  <div
-                    key={branch}
-                    className={`${styles.branchItem} ${branch === currentBranch ? styles.activeBranch : ''}`}
-                    onClick={() => branch !== currentBranch && handleCheckout(branch)}
-                  >
-                    <span>{branch}</span>
-                    {branch === currentBranch && <Check size={12} />}
-                    {branch !== currentBranch && (
-                      <button 
-                        className={styles.deleteBranchBtn}
-                        onClick={(e) => handleDeleteBranch(branch, e)}
-                        title="Delete branch"
-                      >
-                        <Trash2 size={12} />
-                      </button>
+                
+                {/* Local Branches */}
+                {localBranches.length > 0 && (
+                  <>
+                    {(remoteBranches.length > 0 || branchSearchQuery) && (
+                      <div className={styles.branchSectionLabel}>Local</div>
                     )}
+                    {localBranches.map((branch) => (
+                      <div
+                        key={`local-${branch.name}`}
+                        className={`${styles.branchItem} ${branch.is_current ? styles.activeBranch : ''}`}
+                        onClick={() => !branch.is_current && handleCheckout(branch)}
+                      >
+                        <span>{branch.name}</span>
+                        {branch.is_current && <Check size={12} />}
+                        {!branch.is_current && (
+                          <button 
+                            className={styles.deleteBranchBtn}
+                            onClick={(e) => handleDeleteBranch(branch.name, e)}
+                            title="Delete branch"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </>
+                )}
+                
+                {/* Remote Branches */}
+                {remoteBranches.length > 0 && (
+                  <>
+                    <div className={styles.branchSectionLabel}>
+                      <Cloud size={12} />
+                      Remote
+                    </div>
+                    {remoteBranches.map((branch) => {
+                      const hasLocal = branch.upstream === 'local';
+                      return (
+                        <div
+                          key={`remote-${branch.remote_name}-${branch.name}`}
+                          className={`${styles.branchItem} ${hasLocal ? styles.hasLocalBranch : ''}`}
+                          onClick={() => !hasLocal && handleCheckout(branch)}
+                          title={hasLocal 
+                            ? `${branch.remote_name}/${branch.name} (already have local branch)`
+                            : `Checkout ${branch.remote_name}/${branch.name} as local branch`
+                          }
+                        >
+                          <span className={styles.remoteBranchName}>
+                            <span className={styles.remotePrefix}>{branch.remote_name}/</span>
+                            {branch.name}
+                          </span>
+                          {hasLocal && <Check size={10} className={styles.hasLocalIcon} />}
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
+                {/* Loading state */}
+                {isFetchingBranches && effectiveBranches.length === 0 && (
+                  <div className={styles.noBranchesFound}>
+                    <RefreshCw size={14} className={styles.spinner} />
+                    Loading branches...
                   </div>
-                ))}
+                )}
+
+                {/* Empty state - no matching search */}
+                {filteredBranches.length === 0 && branchSearchQuery && !isFetchingBranches && (
+                  <div className={styles.noBranchesFound}>
+                    No branches matching "{branchSearchQuery}"
+                  </div>
+                )}
+
+                {/* Empty state - no branches at all */}
+                {effectiveBranches.length === 0 && !branchSearchQuery && !isFetchingBranches && (
+                  <div className={styles.noBranchesFound}>
+                    No branches found
+                  </div>
+                )}
               </div>
             </div>
           )}

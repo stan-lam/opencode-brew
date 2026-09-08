@@ -640,3 +640,152 @@
   font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
+
+/* Branch Search */
+.branchSearchWrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+  position: relative;
+}
+
+.branchSearchIcon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.branchSearchInput {
+  flex: 1;
+  padding: 4px 24px 4px 0;
+  font-size: var(--font-size-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.branchSearchInput::placeholder {
+  color: var(--text-muted);
+}
+
+.clearSearchBtn {
+  position: absolute;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.clearSearchBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.branchDropdownActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fetchBranchesBtn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.fetchBranchesBtn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.fetchBranchesBtn:disabled {
+  opacity: 0.5;
+}
+
+.fetchRemoteBtn {
+  height: 20px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  font-size: var(--font-size-xs);
+}
+
+.fetchRemoteBtn:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--accent-blue);
+}
+
+.fetchRemoteBtn:disabled {
+  opacity: 0.5;
+}
+
+.branchSectionLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background-color: var(--bg-tertiary);
+  border-top: 1px solid var(--border-color);
+}
+
+.branchSectionLabel:first-child {
+  border-top: none;
+}
+
+.remoteBranchName {
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+
+.remotePrefix {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.hasLocalBranch {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.hasLocalBranch:hover {
+  background-color: transparent;
+}
+
+.hasLocalIcon {
+  color: var(--accent-green);
+  margin-left: auto;
+}
+
+.noBranchesFound {
+  padding: 16px;
+  text-align: center;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}

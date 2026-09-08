@@ -113,16 +113,53 @@ export function TerminalPanel() {
         theme: currentTheme,
         fontFamily: currentSettings.terminalFontFamily,
         fontSize: currentSettings.terminalFontSize,
-        lineHeight: 1.2,
+        lineHeight: currentSettings.terminalLineHeight,
         cursorBlink: currentSettings.terminalCursorBlink,
         cursorStyle: currentSettings.terminalCursorStyle,
+        scrollback: currentSettings.terminalScrollback,
         convertEol: true,
       });
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(terminalRef.current);
-      fitAddon.fit();
+      
+      // Wait for font to load (document.fonts.ready)
+      await document.fonts.ready;
+      
+      // Wait for container and font to be ready, then calculate dimensions
+      const waitForStableDimensions = async (): Promise<{ cols: number; rows: number }> => {
+        // Multiple fit calls to ensure font metrics are calculated correctly
+        fitAddon.fit();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        fitAddon.fit();
+        
+        // Use xterm's calculated dimensions - fitAddon.fit() handles all the calculations
+        const { cols, rows } = term;
+        const rect = terminalRef.current?.getBoundingClientRect();
+        
+        console.log('[Terminal] Dimensions after fit:', { 
+          cols, rows, 
+          containerWidth: rect?.width, 
+          containerHeight: rect?.height 
+        });
+        
+        // Ensure valid dimensions (minimum 10x5)
+        const validCols = Math.max(cols, 10);
+        const validRows = Math.max(rows, 5);
+        
+        return { cols: validCols, rows: validRows };
+      };
+      
+      const { cols: initialCols, rows: initialRows } = await waitForStableDimensions();
+      
+      // Log actual dimensions for debugging
+      console.log('[Terminal] Creating PTY with dimensions:', { 
+        rows: initialRows, 
+        cols: initialCols,
+        containerWidth: terminalRef.current?.getBoundingClientRect().width,
+        containerHeight: terminalRef.current?.getBoundingClientRect().height
+      });
 
       // Handle user input
       term.onData((data: string) => {
@@ -138,20 +175,39 @@ export function TerminalPanel() {
       const pendingCommand = pendingCommandsRef.current.get(id);
       const cwd = pendingCommand?.cwd || currentWorkspace?.rootPath;
       
-      // Create the PTY backend
-      const { rows, cols } = term;
-      await terminalService.create(id, cwd, rows, cols);
+      // Create the PTY backend with stable dimensions
+      console.log('[Terminal] Calling PTY create with:', { rows: initialRows, cols: initialCols });
+      await terminalService.create(id, cwd, initialRows, initialCols);
+      
+      // Immediately resize to ensure PTY has correct dimensions
+      console.log('[Terminal] Calling PTY resize with:', { rows: initialRows, cols: initialCols });
+      await terminalService.resize(id, initialRows, initialCols);
 
       terminalsMapRef.current.set(id, { terminal: term, fitAddon, unlisten });
 
-      // Handle resize
+      // Handle resize with debouncing for TUI apps
+      let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+      let lastSentCols = initialCols;
+      let lastSentRows = initialRows;
+      
       const resizeObserver = new ResizeObserver(() => {
-        const instance = terminalsMapRef.current.get(id);
-        if (instance) {
-          instance.fitAddon.fit();
-          const { rows, cols } = instance.terminal;
-          terminalService.resize(id, rows, cols).catch(console.error);
-        }
+        if (resizeTimeout) clearTimeout(resizeTimeout);
+        
+        resizeTimeout = setTimeout(() => {
+          const instance = terminalsMapRef.current.get(id);
+          if (instance && terminalRef.current) {
+            instance.fitAddon.fit();
+            const { rows, cols } = instance.terminal;
+            const rect = terminalRef.current.getBoundingClientRect();
+            
+            if (cols !== lastSentCols || rows !== lastSentRows) {
+              console.log('[Terminal] Resize:', { rows, cols, width: rect.width, height: rect.height });
+              lastSentCols = cols;
+              lastSentRows = rows;
+              terminalService.resize(id, rows, cols).catch(console.error);
+            }
+          }
+        }, 150);
       });
       resizeObserver.observe(terminalRef.current);
 
@@ -166,8 +222,33 @@ export function TerminalPanel() {
           } catch (err) {
             console.error('Failed to run pending command:', err);
           }
-        }, 500); // Increased from 300ms to 500ms
+        }, 500);
       }
+      
+      // Send resize signals after startup for TUI apps like Claude Code
+      // This ensures they pick up correct dimensions after their SIGWINCH handler is registered
+      const sendPostStartResize = async (delay: number) => {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        const instance = terminalsMapRef.current.get(id);
+        if (instance && terminalRef.current) {
+          instance.fitAddon.fit();
+          
+          // Use xterm's calculated dimensions (fitAddon already accounts for everything)
+          const { rows, cols } = instance.terminal;
+          
+          // Ensure valid dimensions
+          if (cols > 0 && rows > 0) {
+            console.log(`[Terminal] Post-start resize at ${delay}ms:`, { rows, cols });
+            await terminalService.resize(id, rows, cols);
+          }
+        }
+      };
+      
+      // Send multiple resize signals to ensure Claude Code picks up correct size
+      sendPostStartResize(500);
+      sendPostStartResize(1500);
+      sendPostStartResize(3000);
+      sendPostStartResize(5000);
 
     } catch (error) {
       console.error('Failed to create terminal:', error);

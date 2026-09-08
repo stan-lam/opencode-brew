@@ -73,6 +73,14 @@ export interface GitCommitInfo {
   timestamp: string;
 }
 
+export interface BranchInfo {
+  name: string;
+  is_remote: boolean;
+  is_current: boolean;
+  remote_name: string | null;
+  upstream: string | null;
+}
+
 export interface DiffLine {
   line_type: string;
   old_lineno: number | null;
@@ -420,9 +428,19 @@ export const git = {
     return invoke('git_branches', { repoPath });
   },
   
+  allBranches: async (repoPath: string): Promise<BranchInfo[]> => {
+    const invoke = await getInvoke();
+    return invoke('git_all_branches', { repoPath });
+  },
+  
   checkout: async (repoPath: string, branchName: string): Promise<void> => {
     const invoke = await getInvoke();
     return invoke('git_checkout', { repoPath, branchName });
+  },
+  
+  checkoutRemoteBranch: async (repoPath: string, branchName: string, remoteName: string): Promise<void> => {
+    const invoke = await getInvoke();
+    return invoke('git_checkout_remote_branch', { repoPath, branchName, remoteName });
   },
   
   log: async (repoPath: string, limit?: number): Promise<GitCommitInfo[]> => {
@@ -705,6 +723,7 @@ export const ai = {
 // Terminal operations
 export const terminal = {
   create: async (terminalId: string, cwd?: string, rows = 24, cols = 80): Promise<void> => {
+    console.log('[tauri.terminal.create] Called with:', { terminalId, cwd, rows, cols });
     const invoke = await getInvoke();
     return invoke('create_terminal', { terminalId, cwd, rows, cols });
   },
@@ -715,6 +734,7 @@ export const terminal = {
   },
   
   resize: async (terminalId: string, rows: number, cols: number): Promise<void> => {
+    console.log('[tauri.terminal.resize] Called with:', { terminalId, rows, cols });
     const invoke = await getInvoke();
     return invoke('resize_terminal', { terminalId, rows, cols });
   },

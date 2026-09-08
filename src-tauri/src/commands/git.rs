@@ -246,6 +246,179 @@ pub async fn git_branches(repo_path: String) -> Result<Vec<String>, String> {
     Ok(branch_names)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_remote: bool,
+    pub is_current: bool,
+    pub remote_name: Option<String>,
+    pub upstream: Option<String>,
+}
+
+#[command]
+pub async fn git_all_branches(repo_path: String) -> Result<Vec<BranchInfo>, String> {
+    println!("[git_all_branches] Opening repo: {}", repo_path);
+    let repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    let mut all_branches = Vec::new();
+    
+    // Get current branch name
+    let current_branch = repo.head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from));
+    println!("[git_all_branches] Current branch: {:?}", current_branch);
+    
+    // Get local branches
+    println!("[git_all_branches] Fetching local branches...");
+    let local_branches = repo.branches(Some(BranchType::Local))
+        .map_err(|e| format!("Failed to get local branches: {}", e))?;
+    
+    for branch in local_branches.flatten() {
+        if let Some(name) = branch.0.name().ok().flatten() {
+            println!("[git_all_branches] Found local branch: {}", name);
+            let upstream = branch.0.upstream()
+                .ok()
+                .and_then(|u| u.name().ok().flatten().map(String::from));
+            
+            all_branches.push(BranchInfo {
+                name: name.to_string(),
+                is_remote: false,
+                is_current: current_branch.as_ref() == Some(&name.to_string()),
+                remote_name: None,
+                upstream,
+            });
+        }
+    }
+    println!("[git_all_branches] Found {} local branches", all_branches.len());
+    
+    // Get remote branches
+    println!("[git_all_branches] Fetching remote branches...");
+    let remote_branches_result = repo.branches(Some(BranchType::Remote));
+    
+    match remote_branches_result {
+        Ok(remote_branches) => {
+            // Collect local branch names for reference
+            let local_branch_names: std::collections::HashSet<String> = all_branches
+                .iter()
+                .filter(|b| !b.is_remote)
+                .map(|b| b.name.clone())
+                .collect();
+            println!("[git_all_branches] Local branch names: {:?}", local_branch_names);
+            
+            let mut remote_count = 0;
+            let mut error_count = 0;
+            for branch_result in remote_branches {
+                match branch_result {
+                    Ok((branch, _branch_type)) => {
+                        match branch.name() {
+                            Ok(Some(full_name)) => {
+                                println!("[git_all_branches] Found remote branch: {}", full_name);
+                                remote_count += 1;
+                                
+                                // Skip HEAD references like "origin/HEAD"
+                                if full_name.ends_with("/HEAD") {
+                                    println!("[git_all_branches] Skipping HEAD reference");
+                                    continue;
+                                }
+                                
+                                // Parse remote name and branch name (e.g., "origin/main" -> remote: "origin", name: "main")
+                                let parts: Vec<&str> = full_name.splitn(2, '/').collect();
+                                if parts.len() == 2 {
+                                    let remote = parts[0].to_string();
+                                    let branch_name = parts[1].to_string();
+                                    
+                                    // Check if there's already a local branch with this name
+                                    let has_local = local_branch_names.contains(&branch_name);
+                                    
+                                    println!("[git_all_branches] Adding remote: {}/{}, has_local: {}", remote, branch_name, has_local);
+                                    
+                                    // Include all remote branches, marking those that have local counterparts
+                                    all_branches.push(BranchInfo {
+                                        name: branch_name,
+                                        is_remote: true,
+                                        is_current: false,
+                                        remote_name: Some(remote),
+                                        upstream: if has_local { Some("local".to_string()) } else { None },
+                                    });
+                                }
+                            }
+                            Ok(None) => {
+                                println!("[git_all_branches] Branch has no name");
+                            }
+                            Err(e) => {
+                                println!("[git_all_branches] Error getting branch name: {}", e);
+                                error_count += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("[git_all_branches] Error iterating branch: {}", e);
+                        error_count += 1;
+                    }
+                }
+            }
+            println!("[git_all_branches] Total remote branches found: {}, errors: {}", remote_count, error_count);
+        }
+        Err(e) => {
+            println!("[git_all_branches] Failed to get remote branches iterator: {}", e);
+        }
+    }
+    
+    // Sort: current branch first, then local branches, then remote branches
+    all_branches.sort_by(|a, b| {
+        if a.is_current != b.is_current {
+            return b.is_current.cmp(&a.is_current);
+        }
+        if a.is_remote != b.is_remote {
+            return a.is_remote.cmp(&b.is_remote);
+        }
+        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    });
+    
+    println!("[git_all_branches] Returning {} total branches ({} local, {} remote)", 
+        all_branches.len(),
+        all_branches.iter().filter(|b| !b.is_remote).count(),
+        all_branches.iter().filter(|b| b.is_remote).count()
+    );
+    
+    Ok(all_branches)
+}
+
+#[command]
+pub async fn git_checkout_remote_branch(repo_path: String, branch_name: String, remote_name: String) -> Result<(), String> {
+    let repo = Repository::open(&repo_path)
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+    
+    // Get the remote branch reference
+    let remote_ref = format!("refs/remotes/{}/{}", remote_name, branch_name);
+    let remote_branch = repo.find_reference(&remote_ref)
+        .map_err(|e| format!("Failed to find remote branch: {}", e))?;
+    
+    let commit = remote_branch.peel_to_commit()
+        .map_err(|e| format!("Failed to get commit: {}", e))?;
+    
+    // Create a local branch tracking the remote
+    let mut local_branch = repo.branch(&branch_name, &commit, false)
+        .map_err(|e| format!("Failed to create local branch: {}", e))?;
+    
+    // Set up tracking for the remote branch
+    local_branch.set_upstream(Some(&format!("{}/{}", remote_name, branch_name)))
+        .map_err(|e| format!("Failed to set upstream: {}", e))?;
+    
+    // Checkout the new branch
+    let obj = repo.revparse_single(&format!("refs/heads/{}", branch_name))
+        .map_err(|e| format!("Failed to find branch: {}", e))?;
+    
+    repo.checkout_tree(&obj, None)
+        .map_err(|e| format!("Failed to checkout: {}", e))?;
+    
+    repo.set_head(&format!("refs/heads/{}", branch_name))
+        .map_err(|e| format!("Failed to set HEAD: {}", e))?;
+    
+    Ok(())
+}
+
 #[command]
 pub async fn git_checkout(repo_path: String, branch_name: String) -> Result<(), String> {
     let repo = Repository::open(&repo_path)
