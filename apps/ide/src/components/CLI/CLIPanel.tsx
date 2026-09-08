@@ -274,65 +274,36 @@ export function CLIPanel() {
       term.loadAddon(fitAddon);
       term.open(terminalRef.current);
       
+      // Wait for font to load
+      await document.fonts.ready;
+      
       // Wait for container to have stable dimensions
-      // This is crucial because flex layout may not be complete immediately
-      const waitForStableDimensions = (): Promise<{ cols: number; rows: number }> => {
-        return new Promise((resolve) => {
-          let lastWidth = 0;
-          let lastHeight = 0;
-          let stableCount = 0;
-          
-          const checkDimensions = () => {
-            const rect = terminalRef.current?.getBoundingClientRect();
-            if (!rect) {
-              setTimeout(checkDimensions, 50);
-              return;
-            }
-            
-            console.log('[CLI] Checking dimensions:', { width: rect.width, height: rect.height, lastWidth, lastHeight });
-            
-            if (rect.width === lastWidth && rect.height === lastHeight && rect.width > 100) {
-              stableCount++;
-              if (stableCount >= 2) {
-                // Dimensions are stable, fit and return
-                fitAddon.fit();
-                console.log('[CLI] Stable dimensions:', { cols: term.cols, rows: term.rows, width: rect.width, height: rect.height });
-                resolve({ cols: term.cols, rows: term.rows });
-                return;
-              }
-            } else {
-              stableCount = 0;
-            }
-            
-            lastWidth = rect.width;
-            lastHeight = rect.height;
-            
-            // Keep checking
-            setTimeout(checkDimensions, 50);
-          };
-          
-          // Start checking after a small delay
-          setTimeout(checkDimensions, 50);
-          
-          // Fallback: resolve after 500ms regardless
-          setTimeout(() => {
-            fitAddon.fit();
-            console.log('[CLI] Fallback dimensions:', { cols: term.cols, rows: term.rows });
-            resolve({ cols: term.cols, rows: term.rows });
-          }, 500);
+      const waitForStableDimensions = async (): Promise<{ cols: number; rows: number }> => {
+        // Multiple fit calls to ensure font metrics are calculated correctly
+        fitAddon.fit();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        fitAddon.fit();
+        
+        // Use xterm's calculated dimensions - fitAddon.fit() handles all the calculations
+        const { cols, rows } = term;
+        const rect = terminalRef.current?.getBoundingClientRect();
+        
+        console.log('[CLI] Dimensions after fit:', { 
+          cols, rows, 
+          containerWidth: rect?.width, 
+          containerHeight: rect?.height 
         });
+        
+        // Ensure valid dimensions (minimum 10x5)
+        const validCols = Math.max(cols, 10);
+        const validRows = Math.max(rows, 5);
+        
+        return { cols: validCols, rows: validRows };
       };
       
       const { cols: initialCols, rows: initialRows } = await waitForStableDimensions();
-      console.log('[CLI] Final dimensions for PTY:', { cols: initialCols, rows: initialRows });
 
-      // Show startup message
-      term.writeln('\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
-      term.writeln(`\x1b[1;33m▶ Starting ${CLI_PRESETS[activeTab.tool].description}\x1b[0m`);
-      term.writeln(`\x1b[90m  Command: ${fullCommand}\x1b[0m`);
-      term.writeln(`\x1b[90m  Directory: ${currentWorkspace?.rootPath || '~'}\x1b[0m`);
-      term.writeln('\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
-      term.writeln('');
+      // Note: No startup messages - let the CLI tool (e.g., Claude Code) draw its own UI cleanly
 
       // Handle user input
       term.onData((data: string) => {
@@ -346,10 +317,21 @@ export function CLIPanel() {
 
       // Create the PTY backend with the stable dimensions we calculated above
       const cwd = currentWorkspace?.rootPath;
-      console.log('[CLI] Creating PTY with stable dimensions:', {
-        rows: initialRows, cols: initialCols, terminalId
+      // Use larger initial dimensions - some TUIs cache initial size
+      // We'll resize to correct dimensions after the command starts
+      const createCols = Math.max(initialCols, 200);
+      const createRows = Math.max(initialRows, 30);
+      
+      console.log('[CLI] Creating PTY with dimensions:', {
+        rows: createRows, cols: createCols, 
+        calculatedRows: initialRows, calculatedCols: initialCols,
+        terminalId
       });
-      await terminalService.create(terminalId, cwd, initialRows, initialCols);
+      
+      // Create PTY with larger dimensions
+      await terminalService.create(terminalId, cwd, createRows, createCols);
+      
+      console.log('[CLI] PTY created');
 
       // Store the instance
       terminalsMapRef.current.set(terminalId, { terminal: term, fitAddon, unlisten });
@@ -390,7 +372,17 @@ export function CLIPanel() {
       resizeObserver.observe(terminalRef.current);
 
       // Longer delay to ensure PTY is fully initialized
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Send another resize before starting the command
+      // This ensures the PTY has correct dimensions when Claude Code starts
+      console.log('[CLI] Pre-start resize:', { rows: initialRows, cols: initialCols });
+      await terminalService.resize(terminalId, initialRows, initialCols);
+      
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      // Now start the command
+      console.log('[CLI] Starting command:', fullCommand);
       await terminalService.write(terminalId, fullCommand + '\n');
 
       updateTabState(tabId, { status: 'running' });

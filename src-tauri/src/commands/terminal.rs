@@ -50,13 +50,27 @@ pub async fn create_terminal(
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
     };
     
+    // Start as a login shell to ensure .zshrc/.bash_profile are sourced
+    // This is needed for CLI tools that store credentials in config files
     let mut cmd = CommandBuilder::new(&shell);
+    
+    // Add -l flag for login shell (works for bash, zsh, etc.)
+    if !cfg!(windows) {
+        cmd.arg("-l");
+    }
     
     if let Some(dir) = cwd {
         cmd.cwd(dir);
     }
     
-    // Set environment variables for better terminal experience
+    // Inherit ALL environment variables from parent process
+    // This ensures CLI tools like Claude Code can find their config/credentials
+    // and access system services like Keychain
+    for (key, value) in std::env::vars() {
+        cmd.env(key, value);
+    }
+    
+    // Set terminal-specific environment variables
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     
@@ -119,20 +133,28 @@ pub async fn write_terminal(terminal_id: String, data: String) -> Result<(), Str
 
 #[command]
 pub async fn resize_terminal(terminal_id: String, rows: u16, cols: u16) -> Result<(), String> {
-    println!("[PTY] Resize request: terminal_id={}, rows={}, cols={}", terminal_id, rows, cols);
+    eprintln!("[PTY] Resize request: terminal_id={}, rows={}, cols={}", terminal_id, rows, cols);
     let terminals = TERMINALS.lock().unwrap();
     
     if let Some(instance) = terminals.get(&terminal_id) {
-        instance.master.resize(PtySize {
+        // Simple resize - the kernel sends SIGWINCH when dimensions change
+        match instance.master.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        }).map_err(|e| format!("Failed to resize terminal: {}", e))?;
-        println!("[PTY] Resize successful");
-        Ok(())
+        }) {
+            Ok(_) => {
+                eprintln!("[PTY] Resize successful: rows={}, cols={}", rows, cols);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[PTY] Resize failed: {}", e);
+                Err(format!("Failed to resize terminal: {}", e))
+            }
+        }
     } else {
-        println!("[PTY] Terminal not found: {}", terminal_id);
+        eprintln!("[PTY] Terminal not found: {}", terminal_id);
         Err(format!("Terminal not found: {}", terminal_id))
     }
 }

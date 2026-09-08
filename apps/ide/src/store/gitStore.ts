@@ -37,10 +37,20 @@ export interface StashEntry {
   message: string;
 }
 
+export interface BranchInfo {
+  name: string;
+  is_remote: boolean;
+  is_current: boolean;
+  remote_name: string | null;
+  upstream: string | null;
+}
+
 interface GitState {
   isRepo: boolean;
   currentBranch: string | null;
   branches: string[];
+  allBranches: BranchInfo[];
+  isFetchingBranches: boolean;
   stagedFiles: GitFile[];
   unstagedFiles: GitFile[];
   commitHistory: GitCommitInfo[];
@@ -62,8 +72,10 @@ interface GitState {
   unstageAll: () => Promise<void>;
   commit: (message: string) => Promise<void>;
   checkout: (branch: string) => Promise<void>;
+  checkoutRemoteBranch: (branchName: string, remoteName: string) => Promise<void>;
   fetchBranches: () => Promise<void>;
-refreshAll: () => Promise<void>;
+  fetchAllBranches: () => Promise<void>;
+  refreshAll: () => Promise<void>;
   fetch: (remoteName?: string) => Promise<void>;
   pull: (remoteName?: string) => Promise<string>;
   push: (remoteName?: string, force?: boolean) => Promise<string>;
@@ -88,6 +100,8 @@ export const useGitStore = create<GitState>((set, get) => ({
   isRepo: false,
   currentBranch: null,
   branches: [],
+  allBranches: [],
+  isFetchingBranches: false,
   stagedFiles: [],
   unstagedFiles: [],
   commitHistory: [],
@@ -277,15 +291,74 @@ export const useGitStore = create<GitState>((set, get) => ({
     }
   },
 
-  fetchBranches: async () => {
+  checkoutRemoteBranch: async (branchName: string, remoteName: string) => {
     const repoPath = getWorkspacePath();
     if (!repoPath) return;
 
+    set({ isLoading: true, error: null });
     try {
+      await invoke('git_checkout_remote_branch', { repoPath, branchName, remoteName });
+      await get().refreshStatus();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      set({ error: errorMsg });
+      console.error('Failed to checkout remote branch:', error);
+      throw error;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  fetchBranches: async () => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) {
+      console.log('[Git] No workspace path for fetchBranches');
+      return;
+    }
+
+    try {
+      console.log('[Git] Fetching local branches for:', repoPath);
       const branches = await invoke<string[]>('git_branches', { repoPath });
+      console.log('[Git] Fetched local branches:', branches);
       set({ branches });
     } catch (error) {
-      console.error('Failed to fetch branches:', error);
+      console.error('[Git] Failed to fetch branches:', error);
+    }
+  },
+
+  fetchAllBranches: async () => {
+    const repoPath = getWorkspacePath();
+    if (!repoPath) {
+      console.log('[Git] No workspace path, skipping fetchAllBranches');
+      return;
+    }
+
+    console.log('[Git] Fetching all branches for:', repoPath);
+    set({ isFetchingBranches: true });
+    try {
+      const allBranches = await invoke<BranchInfo[]>('git_all_branches', { repoPath });
+      console.log('[Git] Fetched branches:', JSON.stringify(allBranches, null, 2));
+      console.log('[Git] Total:', allBranches.length, 'Local:', allBranches.filter(b => !b.is_remote).length, 'Remote:', allBranches.filter(b => b.is_remote).length);
+      set({ allBranches });
+    } catch (error) {
+      console.error('[Git] Failed to fetch all branches:', error);
+      // Fall back to local branches if all branches fails
+      try {
+        const branches = await invoke<string[]>('git_branches', { repoPath });
+        console.log('[Git] Fallback to local branches:', branches);
+        const fallbackBranches: BranchInfo[] = branches.map(name => ({
+          name,
+          is_remote: false,
+          is_current: name === get().currentBranch,
+          remote_name: null,
+          upstream: null,
+        }));
+        set({ allBranches: fallbackBranches });
+      } catch (fallbackError) {
+        console.error('[Git] Fallback also failed:', fallbackError);
+      }
+    } finally {
+      set({ isFetchingBranches: false });
     }
   },
 
@@ -527,6 +600,8 @@ export const useGitStore = create<GitState>((set, get) => ({
       isRepo: false,
       currentBranch: null,
       branches: [],
+      allBranches: [],
+      isFetchingBranches: false,
       stagedFiles: [],
       unstagedFiles: [],
       commitHistory: [],
