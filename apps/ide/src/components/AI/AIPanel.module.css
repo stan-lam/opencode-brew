@@ -4319,7 +4319,7 @@
 .fileOpsItemBtnAccept,
 .fileOpsItemBtnReject,
 .fileOpsItemBtnUndo {
-  width: 24px;
+  padding: 2px 8px;
   height: 24px;
   display: flex;
   align-items: center;
@@ -4327,19 +4327,19 @@
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 14px;
-  font-weight: bold;
+  font-size: 11px;
+  font-weight: 600;
   transition: all 0.2s ease;
 }
 
 .fileOpsItemBtnAccept {
-  background-color: transparent;
-  color: var(--text-muted);
+  background-color: rgba(76, 175, 80, 0.1);
+  color: #4caf50;
 }
 
 .fileOpsItemBtnAccept:hover {
-  background-color: rgba(76, 175, 80, 0.2);
-  color: #4caf50;
+  background-color: rgba(76, 175, 80, 0.25);
+  color: #66bb6a;
 }
 
 .fileOpsItemBtnReject,
@@ -4350,8 +4350,112 @@
 
 .fileOpsItemBtnReject:hover,
 .fileOpsItemBtnUndo:hover {
-  background-color: rgba(244, 67, 54, 0.2);
+  background-color: rgba(244, 67, 54, 0.15);
   color: #f44336;
+}
+
+/* File requires overwrite state */
+.fileOpsItemOverwrite {
+  background-color: rgba(255, 152, 0, 0.08);
+  border-left: 3px solid #ff9800;
+}
+
+.fileOpsItemBtnOverwrite {
+  padding: 2px 8px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  background-color: rgba(255, 152, 0, 0.15);
+  color: #ff9800;
+}
+
+.fileOpsItemBtnOverwrite:hover {
+  background-color: rgba(255, 152, 0, 0.3);
+  color: #ffb74d;
+}
+
+/* Header stats display */
+.fileOpsBarStats {
+  margin-left: 8px;
+  font-size: 12px;
+  font-family: var(--font-family-code);
+}
+
+/* Overwrite badge in header */
+.fileOpsBarOverwriteBadge {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background-color: rgba(255, 152, 0, 0.2);
+  color: #ff9800;
+}
+
+/* File Navigation Bar */
+.fileOpsNavigation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background-color: rgba(0, 122, 204, 0.08);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.fileOpsNavBtn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s ease;
+}
+
+.fileOpsNavBtn:hover:not(:disabled) {
+  background-color: rgba(0, 122, 204, 0.2);
+  color: var(--accent-blue);
+}
+
+.fileOpsNavBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.fileOpsNavPosition {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 50px;
+  text-align: center;
+}
+
+.fileOpsNavFileName {
+  flex: 1;
+  font-size: 12px;
+  font-family: var(--font-family-code);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Current file highlight in list */
+.fileOpsItemCurrent {
+  background-color: rgba(0, 122, 204, 0.12);
+  border-left: 3px solid var(--accent-blue);
 }
 
 /* ── Agent Task Progress Panel ───────────────────────────────────────────── */

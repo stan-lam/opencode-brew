@@ -681,6 +681,7 @@ interface PendingFileOperation {
   wasSkipped?: boolean;
   requiresOverwrite?: boolean;
   errorMessage?: string;
+  gitCommitted?: boolean; // True if file is staged or in a commit (no longer in working tree changes)
 }
 
 const CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
@@ -5310,6 +5311,8 @@ interface GroupedFileOperation {
   totalRemoved: number;
   allApplied: boolean;
   anyApplied: boolean;
+  requiresOverwrite: boolean; // true if any operation in this group requires overwrite
+  allCommitted: boolean; // true if all operations in this group are committed in git
 }
 
 function sanitizeOperationPath(rawPath: string): string {
@@ -5347,24 +5350,39 @@ function groupOperationsByFile(operations: PendingFileOperation[], workspaceRoot
         totalRemoved: 0,
         allApplied: true,
         anyApplied: false,
+        requiresOverwrite: false,
+        allCommitted: true,
       });
     }
     const group = groupMap.get(path)!;
     group.operations.push({ op, originalIndex: index });
     
-    // Aggregate line counts
-    if (op.operation.type === 'edit' && op.operation.newContent && op.operation.oldContent) {
-      const added = op.operation.newContent.split('\n').length;
-      const removed = op.operation.oldContent.split('\n').length;
-      group.totalAdded += added;
-      group.totalRemoved += removed;
-    } else if (op.operation.type === 'create' && op.operation.content) {
-      group.totalAdded += op.operation.content.split('\n').length;
+    // Aggregate line counts - only for operations where we can show accurate stats
+    // Edit operations use snippets (oldContent/newContent) which don't reflect full file diffs
+    // So we don't show stats for edits - users click to see the actual diff
+    if (op.operation.type === 'create') {
+      if (op.requiresOverwrite) {
+        // For files requiring overwrite, don't show stats - "Overwrite" badge indicates review needed
+      } else if (op.operation.content) {
+        // New file creation - all lines are additions (this is accurate)
+        group.totalAdded += op.operation.content.split('\n').length;
+      }
+    } else if (op.operation.type === 'delete') {
+      // For deletes, count the lines that will be removed (this is accurate)
+      const content = op.previousContent || op.operation.content || '';
+      if (content) {
+        group.totalRemoved += content.split('\n').length;
+      }
     }
+    // For 'edit' operations, we don't add stats - the diff editor shows accurate numbers
     
     // Track applied status
     if (!op.applied) group.allApplied = false;
     if (op.applied) group.anyApplied = true;
+    // Track requiresOverwrite
+    if (op.requiresOverwrite) group.requiresOverwrite = true;
+    // Track committed status
+    if (!op.gitCommitted) group.allCommitted = false;
   });
   
   return Array.from(groupMap.values());
@@ -5378,7 +5396,6 @@ function FileOperationsBar({
   onToggleExpanded,
   onKeepAll, 
   onUndoAll, 
-  onSoftUndoAll,
   onReview,
   onViewAll,
   onDismiss,
@@ -5386,6 +5403,8 @@ function FileOperationsBar({
   onAcceptFile,
   onUndoFile,
   isProcessing = false,
+  currentFileIndex,
+  onNavigateFile,
 }: { 
   operations: PendingFileOperation[];
   workspaceRoot?: string;
@@ -5393,7 +5412,6 @@ function FileOperationsBar({
   onToggleExpanded: () => void;
   onKeepAll: () => void;
   onUndoAll: () => void;
-  onSoftUndoAll: () => void;
   onReview: () => void;
   onViewAll: () => void;
   onDismiss: () => void;
@@ -5401,6 +5419,8 @@ function FileOperationsBar({
   onAcceptFile: (index: number) => void;
   onUndoFile: (index: number) => void;
   isProcessing?: boolean;
+  currentFileIndex?: number;
+  onNavigateFile?: (direction: 'prev' | 'next') => void;
 }) {
   if (operations.length === 0) return null;
 
@@ -5505,6 +5525,14 @@ function FileOperationsBar({
   const showBatchActions = pendingCount > 0;
   // Disable Keep All if there's nothing that can be auto-applied
   const canKeepAll = canAutoApplyCount > 0;
+  // Count files requiring overwrite
+  const overwriteCount = groupedOps.filter(g => g.requiresOverwrite).length;
+  const committedCount = groupedOps.filter(g => g.allCommitted).length;
+  const allCommitted = committedCount === fileCount && fileCount > 0;
+  
+  // Calculate total stats across all operations
+  const totalAdded = groupedOps.reduce((sum, g) => sum + g.totalAdded, 0);
+  const totalRemoved = groupedOps.reduce((sum, g) => sum + g.totalRemoved, 0);
 
   return (
     <div className={styles.fileOpsBar}>
@@ -5513,42 +5541,44 @@ function FileOperationsBar({
           <span className={styles.fileOpsBarChevron}>{expanded ? '▼' : '▶'}</span>
           <span className={styles.fileOpsBarText}>
             {fileCount} {fileCount === 1 ? 'File' : 'Files'}
-            {allApplied ? ' (All Applied)' : appliedFileCount > 0 ? ` (${appliedFileCount} applied)` : ''}
+            {(totalAdded > 0 || totalRemoved > 0) && (
+              <span className={styles.fileOpsBarStats}>
+                {totalAdded > 0 && <span style={{ color: '#4caf50' }}>+{totalAdded}</span>}
+                {totalAdded > 0 && totalRemoved > 0 && ' '}
+                {totalRemoved > 0 && <span style={{ color: '#f44336' }}>-{totalRemoved}</span>}
+              </span>
+            )}
+            {allCommitted ? ' (All Committed)' : allApplied ? ' (All Applied)' : appliedFileCount > 0 ? ` (${appliedFileCount} applied)` : ''}
+            {overwriteCount > 0 && !allApplied && (
+              <span className={styles.fileOpsBarOverwriteBadge}>{overwriteCount} need review</span>
+            )}
           </span>
         </div>
         {allApplied ? (
           <div className={styles.fileOpsBarActions}>
             <button
               className={styles.fileOpsBarBtn}
-              onClick={(e) => { e.stopPropagation(); onDismiss(); }}
-              title="Dismiss file operations"
-              disabled={isProcessing}
-            >
-              Dismiss
-            </button>
-            <button 
-              className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
-              title="Undo All"
+              title="Undo all applied changes"
               disabled={isProcessing}
             >
               Undo All
             </button>
             <button
-              className={styles.fileOpsBarBtn}
-              onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
-              title="Soft undo (restore pre-apply content only)"
-              disabled={isProcessing}
-            >
-              Soft Undo
-            </button>
-            <button
               className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
               onClick={(e) => { e.stopPropagation(); onViewAll(); }}
-              title="View All Changes"
+              title="Review all changes"
               disabled={isProcessing}
             >
-              View All
+              Review
+            </button>
+            <button
+              className={styles.fileOpsBarBtn}
+              onClick={(e) => { e.stopPropagation(); onDismiss(); }}
+              title="Dismiss - clear this panel"
+              disabled={isProcessing}
+            >
+              Dismiss
             </button>
           </div>
         ) : showBatchActions && (
@@ -5556,45 +5586,65 @@ function FileOperationsBar({
             <button 
               className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onUndoAll(); }}
-              title="Undo All"
+              title="Undo all changes"
               disabled={isProcessing}
             >
               Undo All
             </button>
-            <button
-              className={styles.fileOpsBarBtn}
-              onClick={(e) => { e.stopPropagation(); onSoftUndoAll(); }}
-              title="Soft undo (restore pre-apply content only)"
-              disabled={isProcessing}
-            >
-              Soft Undo
-            </button>
             <button 
-              className={styles.fileOpsBarBtn}
+              className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
               onClick={(e) => { e.stopPropagation(); onKeepAll(); }}
-              title={canKeepAll ? "Keep All" : "No operations can be auto-applied"}
+              title={canKeepAll ? "Apply all changes" : "No operations can be auto-applied"}
               disabled={isProcessing || !canKeepAll}
             >
               Keep All
             </button>
             <button 
-              className={`${styles.fileOpsBarBtn} ${styles.fileOpsBarBtnPrimary}`}
+              className={styles.fileOpsBarBtn}
               onClick={(e) => { e.stopPropagation(); onViewAll(); }}
-              title="View All Changes"
+              title="Review all changes"
               disabled={isProcessing}
             >
-              View All
+              Review
             </button>
           </div>
         )}
       </div>
+
+      {/* File Navigation Bar - shown when we have files and navigation callback */}
+      {fileCount > 1 && onNavigateFile && currentFileIndex !== undefined && (
+        <div className={styles.fileOpsNavigation}>
+          <button
+            className={styles.fileOpsNavBtn}
+            onClick={() => onNavigateFile('prev')}
+            disabled={currentFileIndex <= 0 || isProcessing}
+            title="Previous file ([)"
+          >
+            ◀
+          </button>
+          <span className={styles.fileOpsNavPosition}>
+            {currentFileIndex + 1} / {fileCount}
+          </span>
+          <button
+            className={styles.fileOpsNavBtn}
+            onClick={() => onNavigateFile('next')}
+            disabled={currentFileIndex >= fileCount - 1 || isProcessing}
+            title="Next file (])"
+          >
+            ▶
+          </button>
+          <span className={styles.fileOpsNavFileName}>
+            {displayPathByCanonical.get(sanitizeOperationPath(groupedOps[currentFileIndex]?.path || '')) || groupedOps[currentFileIndex]?.path}
+          </span>
+        </div>
+      )}
 
       {expanded && (
         <div className={styles.fileOpsList}>
           {groupedOps.map((group, groupIndex) => (
             <div 
               key={groupIndex} 
-              className={`${styles.fileOpsItem} ${group.allApplied ? styles.fileOpsItemApplied : ''}`}
+              className={`${styles.fileOpsItem} ${group.allApplied ? styles.fileOpsItemApplied : ''} ${group.requiresOverwrite ? styles.fileOpsItemOverwrite : ''} ${group.allCommitted ? styles.fileOpsItemCommitted : ''} ${currentFileIndex === groupIndex ? styles.fileOpsItemCurrent : ''}`}
               onClick={() => onViewFile(group.path)}
             >
               <span className={`${styles.fileOpsItemIcon} ${getFileIconClass(group.operations[0].op.operation.type)}`}>
@@ -5606,62 +5656,100 @@ function FileOperationsBar({
                 </span>
               </span>
               <span className={styles.fileOpsItemStats}>
-                {group.totalAdded > 0 && <span style={{ color: '#4caf50' }}>+{group.totalAdded}</span>}
-                {group.totalAdded > 0 && group.totalRemoved > 0 && ' '}
-                {group.totalRemoved > 0 && <span style={{ color: '#f44336' }}>-{group.totalRemoved}</span>}
+                {group.totalAdded > 0 || group.totalRemoved > 0 ? (
+                  <>
+                    {group.totalAdded > 0 && <span style={{ color: '#4caf50' }}>+{group.totalAdded}</span>}
+                    {group.totalAdded > 0 && group.totalRemoved > 0 && ' '}
+                    {group.totalRemoved > 0 && <span style={{ color: '#f44336' }}>-{group.totalRemoved}</span>}
+                  </>
+                ) : (
+                  // For edit operations without stats, show "edit" indicator
+                  <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>edit</span>
+                )}
               </span>
               <div className={styles.fileOpsItemActions}>
                 {!group.allApplied ? (
-                  <>
-                    <button
-                      className={styles.fileOpsItemBtnAccept}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Accept all operations for this file
-                        group.operations.forEach(({ originalIndex }) => {
-                          if (!operations[originalIndex].applied) {
-                            onAcceptFile(originalIndex);
-                          }
-                        });
-                      }}
-                      title="Accept"
-                      disabled={isProcessing}
-                    >
-                      ✓
-                    </button>
-                    <button
-                      className={styles.fileOpsItemBtnReject}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Reject all operations for this file
-                        group.operations.forEach(({ originalIndex }) => {
-                          if (!operations[originalIndex].applied) {
-                            onUndoFile(originalIndex);
-                          }
-                        });
-                      }}
-                      title="Reject"
-                      disabled={isProcessing}
-                    >
-                      ✕
-                    </button>
-                  </>
+                  group.requiresOverwrite ? (
+                    // File requires overwrite - show Overwrite button
+                    <>
+                      <button
+                        className={styles.fileOpsItemBtnOverwrite}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Open file for review - user will click Overwrite in diff editor
+                          onViewFile(group.path);
+                        }}
+                        title="Review and overwrite - file exists with different content"
+                        disabled={isProcessing}
+                      >
+                        Overwrite
+                      </button>
+                      <button
+                        className={styles.fileOpsItemBtnUndo}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          group.operations.forEach(({ originalIndex }) => {
+                            if (!operations[originalIndex].applied) {
+                              onUndoFile(originalIndex);
+                            }
+                          });
+                        }}
+                        title="Undo this file"
+                        disabled={isProcessing}
+                      >
+                        Undo
+                      </button>
+                    </>
+                  ) : (
+                    // Normal pending file - show Keep/Undo
+                    <>
+                      <button
+                        className={styles.fileOpsItemBtnAccept}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          group.operations.forEach(({ originalIndex }) => {
+                            if (!operations[originalIndex].applied) {
+                              onAcceptFile(originalIndex);
+                            }
+                          });
+                        }}
+                        title="Keep this file"
+                        disabled={isProcessing}
+                      >
+                        Keep
+                      </button>
+                      <button
+                        className={styles.fileOpsItemBtnReject}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          group.operations.forEach(({ originalIndex }) => {
+                            if (!operations[originalIndex].applied) {
+                              onUndoFile(originalIndex);
+                            }
+                          });
+                        }}
+                        title="Undo this file"
+                        disabled={isProcessing}
+                      >
+                        Undo
+                      </button>
+                    </>
+                  )
                 ) : (
                   <button
                     className={styles.fileOpsItemBtnUndo}
                     onClick={(e) => {
                       e.stopPropagation();
-                      // Undo all operations for this file
                       group.operations.forEach(({ originalIndex }) => {
                         if (operations[originalIndex].applied) {
                           onUndoFile(originalIndex);
                         }
                       });
                     }}
-                    title="Undo"
+                    title="Undo this file"
                     disabled={isProcessing}
                   >
-                    ✕
+                    Undo
                   </button>
                 )}
               </div>
@@ -5743,6 +5831,7 @@ export function AIPanel() {
   const [fileOpsExpanded, setFileOpsExpanded] = useState(true);
   const [showFileOps, setShowFileOps] = useState(false);
   const [isFileOpsProcessing, setIsFileOpsProcessing] = useState(false);
+  const [currentFileOpIndex, setCurrentFileOpIndex] = useState(0);
   const [showProcessingIndicator, setShowProcessingIndicator] = useState(false);
   const [pendingResponse, setPendingResponse] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -5770,6 +5859,40 @@ export function AIPanel() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewImage]);
+
+  // Keyboard shortcuts for file navigation ([ and ])
+  useEffect(() => {
+    if (!showFileOps || allPendingOps.length === 0) return;
+    
+    const handleFileNavKeyDown = (e: KeyboardEvent) => {
+      // Skip if user is typing in an input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      
+      const grouped = groupOperationsByFile(allPendingOps, currentWorkspace?.rootPath);
+      if (grouped.length <= 1) return;
+      
+      if (e.key === '[') {
+        e.preventDefault();
+        const newIndex = Math.max(0, currentFileOpIndex - 1);
+        setCurrentFileOpIndex(newIndex);
+        if (grouped[newIndex]) {
+          handleViewFileOperation(grouped[newIndex].path);
+        }
+      } else if (e.key === ']') {
+        e.preventDefault();
+        const newIndex = Math.min(grouped.length - 1, currentFileOpIndex + 1);
+        setCurrentFileOpIndex(newIndex);
+        if (grouped[newIndex]) {
+          handleViewFileOperation(grouped[newIndex].path);
+        }
+      }
+    };
+    
+    window.addEventListener('keydown', handleFileNavKeyDown);
+    return () => window.removeEventListener('keydown', handleFileNavKeyDown);
+  }, [showFileOps, allPendingOps, currentFileOpIndex, currentWorkspace?.rootPath]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -5894,9 +6017,73 @@ export function AIPanel() {
     const nextCount = allPendingOps.length;
     if (nextCount > 0 && prevCount === 0) {
       setShowFileOps(true);
+      setCurrentFileOpIndex(0); // Reset navigation index for new set of operations
     }
     lastPendingOpsCountRef.current = nextCount;
   }, [allPendingOps.length]);
+
+  // Check git status periodically to detect when files are committed
+  // Auto-dismiss when all applied files are no longer showing as changed in git
+  useEffect(() => {
+    if (!showFileOps || allPendingOps.length === 0 || !currentWorkspace) return;
+    
+    // Only check git status if there are applied operations
+    const hasApplied = allPendingOps.some(op => op.applied);
+    if (!hasApplied) return;
+    
+    const checkGitStatus = async () => {
+      try {
+        const isRepo = await git.isGitRepo(currentWorkspace.rootPath);
+        if (!isRepo) return;
+        
+        const status = await git.status(currentWorkspace.rootPath);
+        const changedPaths = new Set([
+          ...status.staged.map(e => normalizeRepoRelativePath(currentWorkspace.rootPath, e.path)),
+          ...status.unstaged.map(e => normalizeRepoRelativePath(currentWorkspace.rootPath, e.path)),
+          ...status.untracked.map(e => normalizeRepoRelativePath(currentWorkspace.rootPath, e.path)),
+        ]);
+        
+        // Update gitCommitted status for each operation
+        let allCommitted = true;
+        const updatedOps = allPendingOps.map(op => {
+          const normalizedPath = normalizeRepoRelativePath(currentWorkspace.rootPath, op.operation.path);
+          // File is "committed" if it's applied and no longer showing in git changes
+          const isCommitted = op.applied && !changedPaths.has(normalizedPath);
+          if (op.applied && !isCommitted) {
+            allCommitted = false;
+          }
+          if (op.gitCommitted !== isCommitted) {
+            return { ...op, gitCommitted: isCommitted };
+          }
+          return op;
+        });
+        
+        // Only update state if something changed
+        const hasChanges = updatedOps.some((op, i) => op.gitCommitted !== allPendingOps[i].gitCommitted);
+        if (hasChanges) {
+          setAllPendingOps(updatedOps);
+        }
+        
+        // Auto-dismiss if all applied files are committed
+        if (allCommitted && allPendingOps.every(op => op.applied)) {
+          window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: 'All changes committed - dismissing panel', type: 'success' }
+          }));
+          // Delay dismiss slightly so user sees the notification
+          setTimeout(() => {
+            handleDismissFileOperations();
+          }, 2000);
+        }
+      } catch (error) {
+        console.warn('Failed to check git status for auto-dismiss:', error);
+      }
+    };
+    
+    // Check immediately and then every 5 seconds
+    checkGitStatus();
+    const interval = setInterval(checkGitStatus, 5000);
+    return () => clearInterval(interval);
+  }, [showFileOps, allPendingOps.length, currentWorkspace?.rootPath]);
 
   // Listen for file-op-applied events from AIDiffEditor (when user clicks Overwrite/Apply)
   useEffect(() => {
@@ -6929,12 +7116,24 @@ export function AIPanel() {
       markFileOperationsAsKept(operationIds);
 
       if (overwriteRequiredPaths.size > 0) {
+        // Get the first overwrite path to auto-open
+        const firstOverwritePath = Array.from(overwriteRequiredPaths)[0];
+        
         window.dispatchEvent(new CustomEvent('show-notification', {
           detail: {
-            message: `${overwriteRequiredPaths.size} file(s) require overwrite. Review the AI diff to apply.`,
+            message: `${successCount > 0 ? `Applied ${successCount} file(s). ` : ''}${overwriteRequiredPaths.size} file(s) need review - opening first one`,
             type: 'info'
           }
         }));
+        
+        // Auto-open the first file requiring overwrite for review via event
+        if (firstOverwritePath) {
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('auto-open-file-op', {
+              detail: { path: firstOverwritePath }
+            }));
+          }, 150);
+        }
       }
 
       if (invalidCount > 0) {
@@ -7319,51 +7518,51 @@ export function AIPanel() {
 
   const openAIOperationPreview = useCallback(async (item: PendingFileOperation) => {
     if (!currentWorkspace) return;
+    
+    // For applied files, show the AI operation diff
+    // This ensures users can see what changed even after the file is staged/committed
     if (item.applied) {
-      const relativePath = resolveWorkspaceRelativePath(currentWorkspace.rootPath, item.operation.path);
-      const isRepo = await git.isGitRepo(currentWorkspace.rootPath).catch(() => false);
-      if (!isRepo) {
-        const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
-        openAIDiff(
-          item.operation.path,
-          diffPayload.oldContent,
-          diffPayload.newContent,
-          diffPayload.operationType,
-          diffPayload.requiresOverwrite,
-          item.applied
-        );
-        return;
+      const diskContent = await readWorkspaceFile(currentWorkspace.rootPath, item.operation.path);
+      
+      let oldContent: string;
+      let newContent: string;
+      
+      if (item.operation.type === 'create') {
+        // For create operations: empty → file content
+        oldContent = item.previousContent ?? '';
+        newContent = diskContent ?? item.operation.content ?? '';
+      } else if (item.operation.type === 'edit') {
+        // For edit operations: use stored previousContent if available, 
+        // otherwise fall back to operation's oldContent/newContent
+        if (item.previousContent !== undefined && item.previousContent !== '') {
+          oldContent = item.previousContent;
+          newContent = diskContent ?? item.operation.newContent ?? '';
+        } else {
+          // Fallback to operation's proposed diff if previousContent not stored
+          oldContent = item.operation.oldContent ?? '';
+          newContent = diskContent ?? item.operation.newContent ?? '';
+        }
+      } else if (item.operation.type === 'delete') {
+        // For delete operations: previous content → empty
+        oldContent = item.previousContent ?? item.operation.content ?? '';
+        newContent = '';
+      } else {
+        oldContent = item.previousContent ?? '';
+        newContent = diskContent ?? '';
       }
-      try {
-        const status = await git.status(currentWorkspace.rootPath);
-        const normalizedTarget = normalizeRepoRelativePath(currentWorkspace.rootPath, relativePath);
-        const matchesPath = (entryPath: string) => {
-          const normalizedEntry = normalizeRepoRelativePath(currentWorkspace.rootPath, entryPath);
-          return normalizedEntry === normalizedTarget
-            || normalizedEntry.endsWith(`/${normalizedTarget}`)
-            || normalizedTarget.endsWith(`/${normalizedEntry}`);
-        };
-        const stagedEntry = status.staged.find((entry) => matchesPath(entry.path));
-        const unstagedEntry = status.unstaged.find((entry) => matchesPath(entry.path));
-        const untrackedEntry = status.untracked.find((entry) => matchesPath(entry.path));
-        const entry = stagedEntry ?? unstagedEntry ?? untrackedEntry;
-        const diffStatus = (entry?.status as 'modified' | 'added' | 'deleted' | 'untracked' | 'renamed')
-          || getDiffStatusFromOperation(item.operation);
-        openDiff(currentWorkspace.rootPath, normalizedTarget, Boolean(stagedEntry), diffStatus);
-      } catch (error) {
-        // If status lookup failed (e.g. repo mis-detected), fall back to a disk-based AI diff.
-        const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
-        openAIDiff(
-          item.operation.path,
-          diffPayload.oldContent,
-          diffPayload.newContent,
-          diffPayload.operationType,
-          diffPayload.requiresOverwrite,
-          item.applied
-        );
-      }
+      
+      openAIDiff(
+        item.operation.path,
+        oldContent,
+        newContent,
+        item.operation.type,
+        false, // Not requiring overwrite since already applied
+        true // isApplied
+      );
       return;
     }
+    
+    // For unapplied files, show proposed changes
     const diffPayload = await buildAIOperationDiffFromDisk(currentWorkspace.rootPath, item.operation, item);
     openAIDiff(
       item.operation.path,
@@ -7373,7 +7572,7 @@ export function AIPanel() {
       diffPayload.requiresOverwrite,
       item.applied
     );
-  }, [currentWorkspace, openAIDiff, openDiff]);
+  }, [currentWorkspace, openAIDiff]);
 
   const handleReviewOperations = async () => {
     if (!currentWorkspace) return;
@@ -7422,6 +7621,19 @@ export function AIPanel() {
     }
     setHasReviewedPendingOps(true);
   };
+
+  // Listen for auto-open-file-op event (triggered after Keep All when files need overwrite)
+  useEffect(() => {
+    const handleAutoOpenFileOp = (e: Event) => {
+      const customEvent = e as CustomEvent<{ path: string }>;
+      const { path } = customEvent.detail;
+      if (path) {
+        handleViewFileOperation(path);
+      }
+    };
+    window.addEventListener('auto-open-file-op', handleAutoOpenFileOp);
+    return () => window.removeEventListener('auto-open-file-op', handleAutoOpenFileOp);
+  }, [currentWorkspace, allPendingOps]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -8219,7 +8431,6 @@ export function AIPanel() {
           // Keep All should apply changes without opening a review tab per file.
           onKeepAll={() => { void handleKeepAllOperations({ skipReview: true, openFilesAfterApply: false }); }}
           onUndoAll={handleUndoAllOperations}
-          onSoftUndoAll={handleSoftUndoAllOperations}
           onDismiss={handleDismissFileOperations}
           onReview={handleReviewOperations}
           onViewAll={handleReviewOperations}
@@ -8227,6 +8438,17 @@ export function AIPanel() {
           onAcceptFile={handleAcceptFileOperation}
           onUndoFile={handleUndoFileOperation}
           isProcessing={isFileOpsProcessing}
+          currentFileIndex={currentFileOpIndex}
+          onNavigateFile={(direction) => {
+            const grouped = groupOperationsByFile(allPendingOps, currentWorkspace?.rootPath);
+            const newIndex = direction === 'prev' 
+              ? Math.max(0, currentFileOpIndex - 1)
+              : Math.min(grouped.length - 1, currentFileOpIndex + 1);
+            setCurrentFileOpIndex(newIndex);
+            if (grouped[newIndex]) {
+              handleViewFileOperation(grouped[newIndex].path);
+            }
+          }}
         />
       )}
 

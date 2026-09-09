@@ -320,39 +320,14 @@ function computeDiff(oldContent: string, newContent: string): { hunks: DiffHunk[
     }
   }
   
-  // Group into hunks with context
-  let currentHunk: DiffHunk | null = null;
-  let contextLines = 0;
-  const CONTEXT = 3;
-  
-  for (let i = 0; i < diffLines.length; i++) {
-    const line = diffLines[i];
-    const isChange = line.type !== 'unchanged';
-    
-    if (isChange) {
-      if (!currentHunk) {
-        const startIdx = Math.max(0, i - CONTEXT);
-        currentHunk = {
-          oldStart: diffLines[startIdx]?.oldLineNo || 1,
-          newStart: diffLines[startIdx]?.newLineNo || 1,
-          lines: diffLines.slice(startIdx, i)
-        };
-      }
-      currentHunk.lines.push(line);
-      contextLines = 0;
-    } else if (currentHunk) {
-      currentHunk.lines.push(line);
-      contextLines++;
-      if (contextLines >= CONTEXT * 2) {
-        hunks.push(currentHunk);
-        currentHunk = null;
-        contextLines = 0;
-      }
-    }
-  }
-  
-  if (currentHunk) {
-    hunks.push(currentHunk);
+  // Show all lines as a single hunk for full file view
+  // This ensures users can see the complete file context, not just changed sections
+  if (diffLines.length > 0) {
+    hunks.push({
+      oldStart: 1,
+      newStart: 1,
+      lines: diffLines
+    });
   }
   
   return { hunks, additions, deletions };
