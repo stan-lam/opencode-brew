@@ -67,9 +67,13 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, onRetry, onSkip }) => {
   );
 };
 
-export const WorkflowProgress: React.FC = () => {
+interface WorkflowProgressProps {
+  execution?: ReturnType<typeof useWorkflowOrchestratorStore.getState>['currentExecution'];
+}
+
+export const WorkflowProgress: React.FC<WorkflowProgressProps> = ({ execution: propExecution }) => {
   const {
-    currentExecution,
+    currentExecution: storeExecution,
     pauseWorkflow,
     resumeWorkflow,
     cancelWorkflow,
@@ -77,6 +81,9 @@ export const WorkflowProgress: React.FC = () => {
     skipAgent,
     templates,
   } = useWorkflowOrchestratorStore();
+
+  // Use prop if provided (filtered by conversation), otherwise fall back to store
+  const currentExecution = propExecution !== undefined ? propExecution : storeExecution;
 
   if (!currentExecution) {
     return null;

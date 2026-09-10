@@ -6159,21 +6159,54 @@ export function AIPanel() {
     currentExecution: workflowExecution, 
     completeAgent, 
     failAgent,
+    cancelWorkflow,
     getPendingCheckpoint,
     approveCheckpoint,
     rejectCheckpoint,
     addEventListener,
   } = useWorkflowOrchestratorStore();
   
-  // Only show workflow if it belongs to the active conversation
-  const activeWorkflow = workflowExecution && activeConversation && 
-    workflowExecution.conversationId === activeConversation.id 
-    ? workflowExecution 
-    : null;
+  // Only show workflow if it belongs to the active conversation AND conversation has messages
+  // A new/empty conversation should never show a workflow
+  const activeWorkflow = useMemo(() => {
+    if (!workflowExecution || !activeConversation) return null;
+    
+    // Must match conversation ID
+    if (workflowExecution.conversationId !== activeConversation.id) return null;
+    
+    // Additional safety: new/empty conversations shouldn't show workflow
+    if (activeConversation.messages.length === 0) return null;
+    
+    return workflowExecution;
+  }, [workflowExecution, activeConversation]);
   
   // Get pending checkpoint for workflow status display
   const pendingCheckpoint = activeWorkflow ? getPendingCheckpoint() : null;
   const hasActiveQuestions = batches.length > 0;
+  
+  // Calculate conversation-level usage from messages (fallback when sessionUsage is reset)
+  const conversationUsage = useMemo(() => {
+    if (!activeConversation || activeConversation.messages.length === 0) {
+      return { totalTokens: 0, totalCost: 0, turns: 0 };
+    }
+    
+    let totalTokens = 0;
+    let totalCost = 0;
+    let turns = 0;
+    
+    for (const message of activeConversation.messages) {
+      if (message.role === 'assistant') {
+        turns++;
+        if (message.usage) {
+          totalTokens += message.usage.totalTokens || 0;
+          totalCost += message.usage.estimatedCostUsd || 0;
+        }
+      }
+    }
+    
+    return { totalTokens, totalCost, turns };
+  }, [activeConversation]);
+  
   const lastProcessedQuestionMessageIdRef = useRef<string | null>(null);
   const executingAgentRef = useRef<string | null>(null);
   const agentMessageCountRef = useRef<number>(0); // Track message count when agent started
@@ -7864,6 +7897,13 @@ export function AIPanel() {
 
   const handleNewChat = () => {
     setShowFileOps(false);
+    // Clear any active workflow when starting a new chat
+    // This ensures clean state for the new conversation
+    if (workflowExecution) {
+      cancelWorkflow();
+    }
+    // Reset agent mode to default for new conversation
+    setAgentMode('single');
     createConversation();
   };
 
@@ -8035,7 +8075,50 @@ export function AIPanel() {
       {/* Sticky Workflow Status - Always visible above chat when workflow is active */}
       {agentMode === 'dev-team' && activeWorkflow && (
         <div className={styles.workflowStatusBar}>
-          <WorkflowProgress />
+          {/* Chat title and token usage at the very top */}
+          <div className={styles.workflowStatusHeader}>
+            <div className={styles.workflowChatTitle}>
+              {activeConversation?.title || 'New Conversation'}
+            </div>
+            <div className={styles.workflowTokenStats}>
+              {contextBreakdown && (
+                <button 
+                  className={styles.contextBreakdownBtn}
+                  onClick={() => setShowContextBreakdown(true)}
+                  title="View context breakdown"
+                >
+                  <span className={styles.contextPercent}>{contextBreakdown.percentFull}%</span>
+                  <div className={styles.contextMiniBar}>
+                    <div 
+                      className={styles.contextMiniBarFill}
+                      style={{ width: `${Math.min(contextBreakdown.percentFull, 100)}%` }}
+                    />
+                  </div>
+                </button>
+              )}
+              {conversationUsage.turns > 0 && (
+                <div className={styles.sessionCostStats}>
+                  <span className={styles.sessionCostTokens}>
+                    {conversationUsage.totalTokens.toLocaleString()} tokens
+                  </span>
+                  <span className={styles.sessionCostSeparator}>•</span>
+                  <span className={styles.sessionCostTurns}>
+                    {conversationUsage.turns} {conversationUsage.turns === 1 ? 'turn' : 'turns'}
+                  </span>
+                  {conversationUsage.totalCost > 0 && (
+                    <>
+                      <span className={styles.sessionCostSeparator}>•</span>
+                      <span className={styles.sessionCostAmount}>
+                        ${conversationUsage.totalCost.toFixed(4)}
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          
+          <WorkflowProgress execution={activeWorkflow} />
           {hasActiveQuestions && <QuestionQueue />}
           {pendingCheckpoint && (
             <CheckpointCard
@@ -8169,7 +8252,8 @@ export function AIPanel() {
           </div>
         ) : (
           <>
-            {(sessionUsage.turnCount > 0 || contextBreakdown) && (
+            {/* Hide token stats when workflow is active - they're shown in workflow header instead */}
+            {!activeWorkflow && (sessionUsage.turnCount > 0 || contextBreakdown) && (
               <div className={styles.sessionCostTracker}>
                 {contextBreakdown && (
                   <button 
