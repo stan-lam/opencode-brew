@@ -2843,8 +2843,11 @@ export const useAIStore = create<AIState>()(
             // Clean web and file read operation tags from displayed content during streaming
             const displayContent = cleanFileReadOperationTags(cleanWebOperationTags(responseContent));
             // Update the message as chunks come in
+            // IMPORTANT: Use the captured conversationId, not activeConversation
+            // This ensures messages go to the correct conversation even if activeConversation changes mid-stream
             set((state) => {
-              const conv = state.activeConversation;
+              // Find the target conversation by ID (may be different from activeConversation)
+              const conv = state.conversations.find((c) => c.id === conversationId);
               if (!conv) return state;
               
               const existingMessages = conv.messages;
@@ -2879,9 +2882,12 @@ export const useAIStore = create<AIState>()(
               };
               
               return {
-                activeConversation: updatedConversation,
+                // Only update activeConversation if it matches the target conversation
+                activeConversation: state.activeConversation?.id === conversationId 
+                  ? updatedConversation 
+                  : state.activeConversation,
                 conversations: state.conversations.map((c) =>
-                  c.id === conv.id ? updatedConversation : c
+                  c.id === conversationId ? updatedConversation : c
                 ),
               };
             });
