@@ -960,6 +960,20 @@
   color: var(--text-primary);
 }
 
+/* Sticky workflow status bar - always visible above chat */
+.workflowStatusBar {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+
+.workflowStatusBar:empty {
+  display: none;
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;

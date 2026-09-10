@@ -5,7 +5,7 @@ import { loadPrompt, PROMPT_NAMES, getPromptsPath, ensurePromptsDir } from '../s
 import { useWorkspaceStore } from './workspaceStore';
 
 export type AIProvider = 'ollama' | 'claude' | 'openai' | 'custom' | 'copilot';
-export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan' | 'test';
+export type AgentMode = 'chat' | 'agent' | 'edit' | 'plan' | 'test' | 'dev-team';
 export type AgentTaskStatus = 'pending' | 'in-progress' | 'completed' | 'skipped';
 export type WebAccessStatus = 'idle' | 'searching' | 'fetching' | null;
 

@@ -38,6 +38,12 @@ import type { CopilotCachedAccount, CopilotDeviceCode } from '../../services/tau
 import { useAIStore, AIMessage, MessageAttachment, AgentMode, AgentTask, WebAccessTrace, SubagentProfile, PendingQuestion as StorePendingQuestion, CommandOperation, CommandStatus } from '../../store/aiStore';
 import type { AIProvider } from '../../store/aiStore';
 import { ContextBreakdownModal } from './ContextBreakdownModal';
+import { QuestionQueue } from './QuestionQueue';
+import { DevTeamController } from './DevTeamController';
+import { WorkflowProgress } from './WorkflowProgress';
+import { CheckpointCard } from './CheckpointCard';
+import { useQuestionStore } from '../../store/questionStore';
+import { useWorkflowOrchestratorStore } from '../../store/workflowOrchestratorStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useGitStore } from '../../store/gitStore';
 import { useLayoutStore } from '../../store/layoutStore';
@@ -6147,6 +6153,179 @@ export function AIPanel() {
     }
   }, [activeConversation, lastMessageUsage, isStreaming, isSummarizing, config.model, summarizeConversation]);
 
+  // Detect question tags in assistant messages (Dev Team Mode)
+  const { showQuestions, parseQuestionTags, batches } = useQuestionStore();
+  const { 
+    currentExecution: workflowExecution, 
+    completeAgent, 
+    failAgent,
+    getPendingCheckpoint,
+    approveCheckpoint,
+    rejectCheckpoint,
+    addEventListener,
+  } = useWorkflowOrchestratorStore();
+  
+  // Only show workflow if it belongs to the active conversation
+  const activeWorkflow = workflowExecution && activeConversation && 
+    workflowExecution.conversationId === activeConversation.id 
+    ? workflowExecution 
+    : null;
+  
+  // Get pending checkpoint for workflow status display
+  const pendingCheckpoint = activeWorkflow ? getPendingCheckpoint() : null;
+  const hasActiveQuestions = batches.length > 0;
+  const lastProcessedQuestionMessageIdRef = useRef<string | null>(null);
+  const executingAgentRef = useRef<string | null>(null);
+  const agentMessageCountRef = useRef<number>(0); // Track message count when agent started
+
+  // Handle agent execution for Dev Team Mode
+  const handleExecuteAgent = useCallback(async (agentId: string, promptPath: string, userRequest: string) => {
+    console.log('[AIPanel] handleExecuteAgent called:', { agentId, promptPath, userRequest: userRequest.slice(0, 100) });
+    
+    try {
+      executingAgentRef.current = agentId;
+      // Track current message count so we know when a new response arrives
+      agentMessageCountRef.current = activeConversation?.messages.length ?? 0;
+
+      // Try to load the prompt from the app's public directory
+      let agentPrompt = '';
+      try {
+        // In Vite dev mode, public files are served from root
+        const response = await fetch(`/${promptPath}`);
+        if (response.ok) {
+          agentPrompt = await response.text();
+          console.log('[AIPanel] Loaded prompt from public dir:', promptPath);
+        } else {
+          throw new Error(`HTTP ${response.status}`);
+        }
+      } catch (err) {
+        console.warn('[AIPanel] Could not fetch prompt file, using default:', err);
+        // Use a reasonable default prompt based on agent type
+        const defaultPrompts: Record<string, string> = {
+          'code-reviewer': 'You are a senior code reviewer. Review the code changes provided and report findings by severity (CRITICAL, HIGH, MEDIUM, LOW). Focus on bugs, security issues, and code quality. Output a structured review with a verdict (APPROVE, WARNING, or BLOCK).',
+          'security-reviewer': 'You are a security reviewer specializing in OWASP Top 10 vulnerabilities. Review the code for security issues including: hardcoded secrets, SQL injection, XSS, authentication bypasses, and other vulnerabilities. Output findings by severity with a verdict.',
+          'performance-optimizer': 'You are a performance optimization specialist. Review the code for performance issues including: algorithmic complexity, memory leaks, unnecessary re-renders, bundle size impact, and optimization opportunities.',
+          'verification': 'You are a verification agent. Compile findings from previous reviews and generate a combined report with an overall verdict and fix checklist.',
+        };
+        agentPrompt = defaultPrompts[agentId] || `You are the ${agentId} agent. Complete your assigned task and provide a structured report.`;
+      }
+
+      // Combine prompt with user request
+      const fullMessage = userRequest 
+        ? `${agentPrompt}\n\n---\n\n## Task\n\n${userRequest}`
+        : agentPrompt;
+
+      console.log('[AIPanel] Sending agent message, length:', fullMessage.length);
+      
+      // Send the message to the AI
+      await sendMessage(fullMessage);
+    } catch (error) {
+      console.error('[AIPanel] Agent execution error:', error);
+      failAgent(agentId as any, error instanceof Error ? error.message : String(error));
+      executingAgentRef.current = null;
+    }
+  }, [sendMessage, failAgent, activeConversation]);
+
+  // Subscribe to workflow events to trigger agent execution
+  useEffect(() => {
+    if (agentMode !== 'dev-team') return;
+    
+    const unsubscribe = addEventListener((event) => {
+      console.log('[AIPanel] Workflow event:', event.type);
+      
+      if (event.type === 'AGENT_STARTED') {
+        // Prevent double-triggering if another handler already started this agent
+        if (executingAgentRef.current === event.agentId) {
+          console.log('[AIPanel] Agent already executing, skipping:', event.agentId);
+          return;
+        }
+        
+        // Get fresh execution from store
+        const execution = useWorkflowOrchestratorStore.getState().currentExecution;
+        if (execution) {
+          const agentState = execution.agents[event.agentId as keyof typeof execution.agents];
+          if (agentState) {
+            const userRequest = execution.userRequest || '';
+            console.log('[AIPanel] Triggering agent execution:', event.agentId, agentState.config.promptPath);
+            handleExecuteAgent(event.agentId, agentState.config.promptPath, userRequest);
+          }
+        }
+      }
+    });
+
+    return unsubscribe;
+  }, [agentMode, addEventListener, handleExecuteAgent]);
+
+  // Monitor streaming completion to complete the agent
+  useEffect(() => {
+    // Only process if we have an executing agent, not streaming, and active conversation matches workflow
+    if (executingAgentRef.current && !isStreaming && activeConversation && activeWorkflow) {
+      const agentId = executingAgentRef.current;
+      const messages = activeConversation.messages;
+      const lastMessage = messages[messages.length - 1];
+      const startMessageCount = agentMessageCountRef.current;
+      
+      // Check if we have NEW messages (user + assistant = 2 new messages)
+      // and the last one is a completed assistant response
+      const hasNewMessages = messages.length >= startMessageCount + 2;
+      
+      if (hasNewMessages && lastMessage?.role === 'assistant' && lastMessage.content) {
+        console.log('[AIPanel] Agent completed:', agentId, 'messages:', messages.length, 'started at:', startMessageCount);
+        // Create a simple output document
+        const output = {
+          type: 'code-review' as const,
+          version: 1,
+          createdBy: agentId as any,
+          createdAt: Date.now(),
+          summary: `${agentId} completed review`,
+          riskLevel: 'low' as const,
+          approved: false,
+          blockingIssues: [],
+          content: lastMessage.content,
+        };
+        
+        // IMPORTANT: completeAgent may synchronously start the next agent,
+        // which will set executingAgentRef.current to the next agent's ID.
+        // Only clear the ref if it still matches this agent (hasn't been reassigned).
+        const agentBeforeComplete = executingAgentRef.current;
+        completeAgent(agentId as any, output as any);
+        const agentAfterComplete = executingAgentRef.current;
+        
+        // Only clear ref if no new agent has taken over
+        if (executingAgentRef.current === agentId) {
+          console.log('[AIPanel] No next agent started, clearing ref');
+          executingAgentRef.current = null;
+        } else {
+          console.log('[AIPanel] Next agent took over:', agentBeforeComplete, '->', agentAfterComplete);
+        }
+        agentMessageCountRef.current = messages.length;
+      }
+    }
+  }, [isStreaming, activeConversation, activeWorkflow, completeAgent]);
+  
+  useEffect(() => {
+    // Only process in dev-team mode
+    if (agentMode !== 'dev-team') return;
+    if (!activeConversation || activeConversation.messages.length === 0) return;
+    if (isStreaming) return; // Wait for streaming to complete
+
+    const messages = activeConversation.messages;
+    const lastMessage = messages[messages.length - 1];
+    
+    // Only process assistant messages
+    if (lastMessage.role !== 'assistant') return;
+    // Skip if we already processed this message
+    if (lastProcessedQuestionMessageIdRef.current === lastMessage.id) return;
+    
+    // Check for question tags in the message content
+    const questionBatch = parseQuestionTags(lastMessage.content);
+    
+    if (questionBatch && questionBatch.questions.length > 0) {
+      lastProcessedQuestionMessageIdRef.current = lastMessage.id;
+      showQuestions(questionBatch);
+    }
+  }, [activeConversation, isStreaming, agentMode, parseQuestionTags, showQuestions]);
+
   // Verify and update applied status of pending operations based on actual file state
   useEffect(() => {
     if (!currentWorkspace || allPendingOps.length === 0) return;
@@ -7853,8 +8032,33 @@ export function AIPanel() {
         </div>
       </div>
 
+      {/* Sticky Workflow Status - Always visible above chat when workflow is active */}
+      {agentMode === 'dev-team' && activeWorkflow && (
+        <div className={styles.workflowStatusBar}>
+          <WorkflowProgress />
+          {hasActiveQuestions && <QuestionQueue />}
+          {pendingCheckpoint && (
+            <CheckpointCard
+              checkpoint={pendingCheckpoint}
+              onApprove={(checkpointId, feedback, answers) => approveCheckpoint(checkpointId, feedback, answers)}
+              onReject={(checkpointId, feedback) => rejectCheckpoint(checkpointId, feedback)}
+            />
+          )}
+        </div>
+      )}
+
       <div className={styles.messages} ref={messagesContainerRef} onScroll={handleScroll}>
-        {!activeConversation || activeConversation.messages.length === 0 ? (
+        {/* Dev Team Mode - show workflow selector only when NO active workflow */}
+        {agentMode === 'dev-team' && !activeWorkflow && (!activeConversation || activeConversation.messages.length === 0) ? (
+          <DevTeamController onExecuteAgent={handleExecuteAgent} />
+        ) : agentMode === 'dev-team' && activeWorkflow && (!activeConversation || activeConversation.messages.length === 0) ? (
+          /* Active workflow with no messages yet - show waiting state */
+          <div className={styles.empty}>
+            <Bot size={32} className={styles.spinning} />
+            <h3>Workflow Running</h3>
+            <p>The AI agents are working on your request. Responses will appear here.</p>
+          </div>
+        ) : !activeConversation || activeConversation.messages.length === 0 ? (
           <div className={styles.empty}>
             <Bot size={32} />
             <h3>
@@ -8112,6 +8316,7 @@ export function AIPanel() {
                 </div>
               </div>
             )}
+            {/* Dev Team Mode - workflow status now shown above chat in sticky section */}
             {activeConversation.messages.map((message, idx) => {
               const isLast = idx === activeConversation.messages.length - 1;
               const isStreamingAssistant = Boolean(isStreaming && isLast && message.role === 'assistant');
@@ -8538,6 +8743,7 @@ export function AIPanel() {
                 <option value="agent">∞ Agent</option>
                 <option value="plan">📋 Plan</option>
                 <option value="edit">✏️ Edit</option>
+                <option value="dev-team">👥 Dev Team</option>
               </select>
             </div>
             <div className={styles.modelSelector}>

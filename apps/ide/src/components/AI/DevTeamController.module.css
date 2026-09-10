@@ -1,0 +1,243 @@
+.devTeamController {
+  padding: 16px;
+}
+
+.startSection {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.startHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 12px;
+}
+
+.headerIcon {
+  color: var(--accent-primary, #6366f1);
+  flex-shrink: 0;
+}
+
+.headerTitle {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.headerSubtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary, #888);
+}
+
+.contextSelector {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.selectorLabel {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.contextOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.contextOption {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  background: var(--background-secondary, #1a1a1a);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+  width: 100%;
+}
+
+.contextOption:hover {
+  border-color: var(--accent-primary, #6366f1);
+  background: var(--background-hover, #222);
+}
+
+.contextSelected {
+  border-color: var(--accent-primary, #6366f1);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.contextIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--background-tertiary, #222);
+  color: var(--accent-primary, #6366f1);
+}
+
+.contextSelected .contextIcon {
+  background: var(--accent-primary, #6366f1);
+  color: white;
+}
+
+.contextInfo {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.contextName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.contextDescription {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.contextCheck {
+  color: var(--accent-primary, #6366f1);
+}
+
+.workflowPreview {
+  padding: 12px;
+  background: var(--background-secondary, #1a1a1a);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+}
+
+.previewHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  margin-bottom: 12px;
+}
+
+.previewStages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.previewStage {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--background-tertiary, #222);
+  color: var(--text-primary, #e0e0e0);
+}
+
+.previewStages svg {
+  color: var(--text-secondary, #666);
+}
+
+.startButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 24px;
+  font-size: 15px;
+  font-weight: 600;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent-primary, #6366f1), #8b5cf6);
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.startButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+}
+
+.startButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* PR Review Data Summary */
+.prDataSummary {
+  padding: 12px;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 8px;
+}
+
+.prDataHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #22c55e;
+  margin-bottom: 6px;
+}
+
+.prDataIcon {
+  color: #22c55e;
+}
+
+.prDataDetails {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.prDataDetails span {
+  display: block;
+}
+
+.prDataWarning {
+  color: var(--warning-color, #f59e0b);
+  font-style: italic;
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+  .contextOption {
+    flex-direction: column;
+    text-align: center;
+  }
+  
+  .contextInfo {
+    align-items: center;
+  }
+  
+  .previewStages {
+    justify-content: center;
+  }
+}

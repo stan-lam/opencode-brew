@@ -1,0 +1,327 @@
+.checkpointCard {
+  background: var(--background-primary, #111);
+  border: 2px solid var(--border-color, #333);
+  border-radius: 12px;
+  margin: 16px 0;
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.checkpointCard.status_awaiting_approval {
+  border-color: var(--accent-warning, #f59e0b);
+  box-shadow: 0 0 20px rgba(245, 158, 11, 0.15);
+}
+
+.checkpointCard.status_approved {
+  border-color: var(--accent-success, #22c55e);
+}
+
+.checkpointCard.status_rejected {
+  border-color: var(--accent-error, #ef4444);
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  cursor: pointer;
+  background: var(--background-secondary, #1a1a1a);
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.header:hover {
+  background: var(--background-hover, #222);
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.statusIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.iconPending {
+  color: var(--accent-warning, #f59e0b);
+}
+
+.iconApproved {
+  color: var(--accent-success, #22c55e);
+}
+
+.iconRejected {
+  color: var(--accent-error, #ef4444);
+}
+
+.checkpointName {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.requiredBadge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--accent-warning, #f59e0b);
+  color: #000;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.riskBadge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: white;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.content {
+  padding: 16px;
+}
+
+.documentSection {
+  margin-bottom: 16px;
+}
+
+.documentHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--accent-primary, #6366f1);
+}
+
+.documentType {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.documentVersion {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.documentSummary {
+  font-size: 14px;
+  color: var(--text-primary, #e0e0e0);
+  line-height: 1.6;
+  padding: 12px;
+  background: var(--background-secondary, #1a1a1a);
+  border-radius: 8px;
+}
+
+.blockingIssues {
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+}
+
+.blockingHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-error, #ef4444);
+  margin-bottom: 8px;
+}
+
+.issuesList {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.issuesList li {
+  margin-bottom: 4px;
+}
+
+.questionsSection {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--background-secondary, #1a1a1a);
+  border-radius: 8px;
+}
+
+.question {
+  margin-bottom: 12px;
+}
+
+.question:last-child {
+  margin-bottom: 0;
+}
+
+.questionPrompt {
+  font-size: 14px;
+  color: var(--text-primary, #e0e0e0);
+  margin-bottom: 8px;
+}
+
+.questionOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.optionButton {
+  padding: 8px 16px;
+  font-size: 13px;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary, #e0e0e0);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.optionButton:hover:not(:disabled) {
+  border-color: var(--accent-primary, #6366f1);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.optionButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.optionSelected {
+  border-color: var(--accent-primary, #6366f1);
+  background: rgba(99, 102, 241, 0.2);
+  color: var(--accent-primary, #6366f1);
+}
+
+.feedbackSection {
+  margin-bottom: 16px;
+}
+
+.feedbackHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary, #888);
+  margin-bottom: 8px;
+}
+
+.feedbackInput {
+  width: 100%;
+  min-height: 80px;
+  padding: 12px;
+  font-size: 14px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  background: var(--background-secondary, #1a1a1a);
+  color: var(--text-primary, #e0e0e0);
+  resize: vertical;
+}
+
+.feedbackInput:focus {
+  outline: none;
+  border-color: var(--accent-primary, #6366f1);
+}
+
+.feedbackInput:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rejectWarning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--accent-warning, #f59e0b);
+  background: rgba(245, 158, 11, 0.1);
+  border-radius: 6px;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color, #333);
+}
+
+.approveButton,
+.rejectButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.approveButton {
+  background: var(--accent-success, #22c55e);
+  color: white;
+}
+
+.approveButton:hover:not(:disabled) {
+  background: #16a34a;
+}
+
+.approveButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rejectButton {
+  background: transparent;
+  border: 1px solid var(--border-color, #444);
+  color: var(--text-primary, #e0e0e0);
+}
+
+.rejectButton:hover:not(:disabled) {
+  border-color: var(--accent-error, #ef4444);
+  color: var(--accent-error, #ef4444);
+}
+
+.rejectButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.statusMessage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  font-size: 14px;
+  border-radius: 8px;
+}
+
+.status_approved .statusMessage {
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--accent-success, #22c55e);
+}
+
+.status_rejected .statusMessage {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--accent-error, #ef4444);
+}

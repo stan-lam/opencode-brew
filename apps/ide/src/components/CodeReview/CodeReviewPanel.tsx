@@ -11,23 +11,22 @@ import { useLayoutStore } from '../../store/layoutStore';
 import { useAIStore } from '../../store/aiStore';
 import type { AIProvider } from '../../store/aiStore';
 import { useSettingsStore } from '../../store/settingsStore';
-import { git, github, gitlab, FileDiff, GitHubPullRequest } from '../../services/tauri';
+import { git, github, gitlab, GitHubPullRequest } from '../../services/tauri';
+import type { FileDiff } from '../../services/tauri';
+import {
+  MAX_TOTAL_CHARS,
+  parseGitRemoteInfo,
+  buildGitHubApiBase,
+  buildGitLabApiBase,
+  resolvePrProvider,
+  parseOwnerRepo,
+  buildDiffSectionFromFiles,
+  buildDiffSectionFromText,
+  appendSection,
+  buildReviewPrompt,
+  type DiffSectionTotals,
+} from '../../utils/diffUtils';
 import styles from './CodeReviewPanel.module.css';
-
-const MAX_TOTAL_CHARS = 60000;
-const MAX_FILE_DIFF_CHARS = 8000;
-const BINARY_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'pdf', 'zip', 'tar', 'gz', '7z',
-  'ico', 'icns', 'mp4', 'mov', 'mp3', 'wav', 'ttf', 'otf', 'woff', 'woff2',
-]);
-const SENSITIVE_PATH_PATTERNS = [
-  /\.env/i,
-  /secret/i,
-  /credential/i,
-  /token/i,
-  /api[-_]?key/i,
-  /private/i,
-];
 
 const COPILOT_MODEL_LABELS: Record<string, string> = {
   auto: 'Auto (Variable)',
@@ -44,131 +43,6 @@ const formatModelLabel = (provider: AIProvider, model: string) => {
     return COPILOT_MODEL_LABELS[model] ?? model;
   }
   return model;
-};
-
-interface DiffChunk {
-  filePath: string | null;
-  content: string;
-}
-
-const isSensitivePath = (filePath: string): boolean => {
-  return SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(filePath));
-};
-
-const isBinaryPath = (filePath: string): boolean => {
-  const ext = filePath.split('.').pop()?.toLowerCase();
-  return ext ? BINARY_EXTENSIONS.has(ext) : false;
-};
-
-const normalizeLine = (content: string): string => {
-  return content.endsWith('\n') ? content.slice(0, -1) : content;
-};
-
-const wrapDiffBlock = (diffText: string, filePath?: string | null): string => {
-  // IMPORTANT: Do not use markdown code fences here.
-  // Plan Mode strips ``` blocks, and code review output quality tanks when the model mirrors markdown fences.
-  const normalized = diffText.endsWith('\n') ? diffText.slice(0, -1) : diffText;
-  const label = filePath ? ` (${filePath})` : '';
-  return `--- BEGIN DIFF${label} ---\n${normalized}\n--- END DIFF${label} ---`;
-};
-
-const formatFileDiff = (diff: FileDiff): string => {
-  const filePath = diff.new_path || diff.old_path || 'unknown';
-  const oldPath = diff.old_path || filePath;
-  const newPath = diff.new_path || filePath;
-  const header = `diff --git a/${oldPath} b/${newPath}\n--- a/${oldPath}\n+++ b/${newPath}\n`;
-  const hunks = diff.hunks.map((hunk) => {
-    const lines = hunk.lines.map((line) => {
-      const prefix = line.line_type === 'addition'
-        ? '+'
-        : line.line_type === 'deletion'
-        ? '-'
-        : ' ';
-      return `${prefix}${normalizeLine(line.content)}`;
-    });
-    return [hunk.header, ...lines].join('\n');
-  }).join('\n');
-  return `${header}${hunks}`;
-};
-
-const extractDiffChunks = (diffText: string): DiffChunk[] => {
-  const lines = diffText.split('\n');
-  const chunks: DiffChunk[] = [];
-  let currentLines: string[] = [];
-  let currentPath: string | null = null;
-
-  const pushChunk = () => {
-    if (currentLines.length === 0) return;
-    chunks.push({ filePath: currentPath, content: currentLines.join('\n') });
-  };
-
-  lines.forEach((line) => {
-    if (line.startsWith('diff --git ')) {
-      pushChunk();
-      currentLines = [line];
-      const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-      currentPath = match ? match[2] : null;
-      return;
-    }
-    currentLines.push(line);
-  });
-
-  pushChunk();
-
-  if (chunks.length === 0 && diffText.trim()) {
-    return [{ filePath: null, content: diffText }];
-  }
-
-  return chunks;
-};
-
-const parseGitRemoteInfo = (url: string): { host: string; slug: string } | null => {
-  const trimmed = url.trim();
-  if (!trimmed) return null;
-
-  if (trimmed.includes('://')) {
-    try {
-      const parsed = new URL(trimmed);
-      const host = parsed.host;
-      let path = parsed.pathname.replace(/^\/+/, '').replace(/\.git\/?$/, '');
-      const parts = path.split('/').filter(Boolean);
-      if (parts.length < 2) return null;
-      return { host, slug: `${parts[0]}/${parts[1]}` };
-    } catch {
-      return null;
-    }
-  }
-
-  const scpMatch = trimmed.match(/^(?:.+@)?([^:]+):(.+)$/);
-  if (!scpMatch) return null;
-  const host = scpMatch[1];
-  const path = scpMatch[2].replace(/^\/+/, '').replace(/\.git\/?$/, '');
-  const parts = path.split('/').filter(Boolean);
-  if (parts.length < 2) return null;
-  return { host, slug: `${parts[0]}/${parts[1]}` };
-};
-
-const buildGitHubApiBase = (host: string): string => {
-  if (host === 'github.com' || host === 'api.github.com') {
-    return 'https://api.github.com';
-  }
-  return `https://${host}/api/v3`;
-};
-
-const buildGitLabApiBase = (host: string): string => {
-  return `https://${host}/api/v4`;
-};
-
-const resolvePrProvider = (host: string, preferred: 'auto' | 'github' | 'gitlab') => {
-  if (preferred !== 'auto') return preferred;
-  const lowerHost = host.toLowerCase();
-  return lowerHost.includes('github') ? 'github' : 'gitlab';
-};
-
-const parseOwnerRepo = (slug: string): { owner: string; repo: string } | null => {
-  const parts = slug.split('/');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-  return { owner: parts[0], repo: parts[1] };
 };
 
 export function CodeReviewPanel() {
@@ -269,96 +143,13 @@ export function CodeReviewPanel() {
     window.dispatchEvent(new CustomEvent('show-notification', { detail: { message, type } }));
   };
 
-  const buildPrompt = (sections: string[], skippedFiles: string[], truncated: boolean): string => {
-    const skippedSection = skippedFiles.length > 0
-      ? `\n\nSkipped files:\n${skippedFiles.map((filePath) => `- ${filePath}`).join('\n')}`
-      : '';
-    const truncationNotice = truncated
-      ? '\n\nNote: Some diffs or files were truncated to fit size limits.'
-      : '';
-    return [
-      'Review the changes below.',
-      'Respond in plain text. Do NOT use Markdown headings, tables, or fenced code blocks (no ```).',
-      'Do NOT output tool tags like <read_file>, <search_files>, <search_web>, <fetch_url>, <create_file>, <edit_file>, <delete_file>.',
-      'Use ONLY the provided diff/context. Do not ask to open files or fetch more data.',
-      'Provide findings ordered by severity with file paths/line ranges when possible.',
-      'If no issues, say so and mention test gaps.',
-      'If fixes are needed, include a checklist titled "Review Fix Plan" using "- [ ]" items.',
-      'Be ready to revise the checklist if the user asks to add/remove tasks.',
-      '',
-      sections.join('\n\n'),
-      skippedSection + truncationNotice,
-    ].join('\n');
-  };
-
-  const buildDiffSectionFromFiles = (diffs: FileDiff[], skippedFiles: string[], onTruncate: () => void) => {
-    const parts: string[] = [];
-    diffs.forEach((diff) => {
-      const filePath = diff.new_path || diff.old_path || 'unknown';
-      if (isSensitivePath(filePath) || isBinaryPath(filePath)) {
-        skippedFiles.push(filePath);
-        return;
-      }
-      let diffText = formatFileDiff(diff);
-      if (diffText.length > MAX_FILE_DIFF_CHARS) {
-        diffText = `${diffText.slice(0, MAX_FILE_DIFF_CHARS)}\n...[truncated]`;
-        onTruncate();
-      }
-      parts.push(wrapDiffBlock(diffText, filePath));
-    });
-    return parts.join('\n\n');
-  };
-
-  const buildDiffSectionFromText = (diffText: string, skippedFiles: string[], onTruncate: () => void) => {
-    const parts: string[] = [];
-    const chunks = extractDiffChunks(diffText);
-    if (chunks.length === 0 && diffText.trim()) {
-      chunks.push({ filePath: null, content: diffText });
-    }
-    chunks.forEach((chunk) => {
-      const filePath = chunk.filePath || 'unknown';
-      if (chunk.filePath && (isSensitivePath(filePath) || isBinaryPath(filePath))) {
-        skippedFiles.push(filePath);
-        return;
-      }
-      let chunkText = chunk.content;
-      if (chunkText.length > MAX_FILE_DIFF_CHARS) {
-        chunkText = `${chunkText.slice(0, MAX_FILE_DIFF_CHARS)}\n...[truncated]`;
-        onTruncate();
-      }
-      parts.push(wrapDiffBlock(chunkText, chunk.filePath));
-    });
-    return parts.join('\n\n');
-  };
-
-  const appendSection = (
-    sections: string[],
-    title: string,
-    body: string,
-    totals: { totalChars: number; truncated: boolean; canContinue: boolean }
-  ) => {
-    if (!body.trim() || !totals.canContinue) return;
-    const section = `=== ${title} ===\n${body}`;
-    if (totals.totalChars + section.length <= MAX_TOTAL_CHARS) {
-      sections.push(section);
-      totals.totalChars += section.length;
-      return;
-    }
-    const remaining = MAX_TOTAL_CHARS - totals.totalChars;
-    if (remaining > 0) {
-      sections.push(`${section.slice(0, remaining)}\n...[truncated]`);
-    }
-    totals.truncated = true;
-    totals.canContinue = false;
-  };
-
   const buildPullRequestPrompt = (
     pr: GitHubPullRequest,
     diffText: string
   ): { prompt: string; truncated: boolean } | null => {
     const sections: string[] = [];
     const skippedFiles: string[] = [];
-    const totals = { totalChars: 0, truncated: false, canContinue: true };
+    const totals: DiffSectionTotals = { totalChars: 0, truncated: false, canContinue: true };
     const repoDisplay = repoSlug || 'unknown';
     const prInfo = [
       `Repository: ${repoDisplay}`,
@@ -377,7 +168,7 @@ export function CodeReviewPanel() {
     appendSection(sections, 'Changes', diffSection, totals);
 
     if (sections.length === 0) return null;
-    return { prompt: buildPrompt(sections, skippedFiles, totals.truncated), truncated: totals.truncated };
+    return { prompt: buildReviewPrompt(sections, skippedFiles, totals.truncated), truncated: totals.truncated };
   };
 
   const buildCommitPrompt = (
@@ -387,7 +178,7 @@ export function CodeReviewPanel() {
   ): { prompt: string; truncated: boolean } | null => {
     const sections: string[] = [];
     const skippedFiles: string[] = [];
-    const totals = { totalChars: 0, truncated: false, canContinue: true };
+    const totals: DiffSectionTotals = { totalChars: 0, truncated: false, canContinue: true };
 
     appendSection(sections, title, details, totals);
     const diffSection = buildDiffSectionFromFiles(diffs, skippedFiles, () => {
@@ -396,7 +187,7 @@ export function CodeReviewPanel() {
     appendSection(sections, 'Changes', diffSection, totals);
 
     if (sections.length === 0) return null;
-    return { prompt: buildPrompt(sections, skippedFiles, totals.truncated), truncated: totals.truncated };
+    return { prompt: buildReviewPrompt(sections, skippedFiles, totals.truncated), truncated: totals.truncated };
   };
 
   const resolveGitHubApiBase = () => {

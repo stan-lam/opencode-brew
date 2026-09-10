@@ -1,0 +1,233 @@
+.questionQueue {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--background-primary, #111);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 12px;
+  padding: 16px;
+  margin: 12px 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.queueHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.headerIcon {
+  color: var(--accent-primary, #6366f1);
+}
+
+.headerTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.blockingBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--accent-error, #ef4444);
+  font-weight: 500;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progressText {
+  font-size: 13px;
+  color: var(--text-secondary, #888);
+}
+
+.queueContext {
+  font-size: 13px;
+  color: var(--text-secondary, #888);
+  line-height: 1.5;
+  padding: 8px 12px;
+  background: var(--background-secondary, #1a1a1a);
+  border-radius: 6px;
+}
+
+.questionNav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.navButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.navButton:hover:not(:disabled) {
+  border-color: var(--accent-primary, #6366f1);
+  color: var(--accent-primary, #6366f1);
+}
+
+.navButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.questionIndicators {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--border-color, #444);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: var(--text-secondary, #888);
+}
+
+.indicator:hover {
+  border-color: var(--accent-primary, #6366f1);
+}
+
+.indicatorActive {
+  border-color: var(--accent-primary, #6366f1);
+  background: var(--accent-primary, #6366f1);
+}
+
+.indicatorAnswered {
+  border-color: var(--accent-success, #22c55e);
+  color: var(--accent-success, #22c55e);
+}
+
+.indicatorAnswered.indicatorActive {
+  background: var(--accent-success, #22c55e);
+  color: white;
+}
+
+.indicatorDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary, #888);
+}
+
+.questionContainer {
+  min-height: 150px;
+}
+
+.queueActions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color, #333);
+}
+
+.skipButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.skipButton:hover:not(:disabled) {
+  border-color: var(--accent-warning, #f59e0b);
+  color: var(--accent-warning, #f59e0b);
+}
+
+.skipButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.actionRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.requiredHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--accent-warning, #f59e0b);
+}
+
+.submitButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent-primary, #6366f1);
+  color: white;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.submitButton:hover:not(:disabled) {
+  background: var(--accent-primary-hover, #4f46e5);
+}
+
+.submitButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
