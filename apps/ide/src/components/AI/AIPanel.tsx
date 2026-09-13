@@ -3938,6 +3938,76 @@ function AgentTaskProgress({ tasks, onClear }: { tasks: AgentTask[]; onClear: ()
   );
 }
 
+// Collapsible diff file card for inline markdown rendering
+function DiffFileCard({ filePath, fileName, lines }: { filePath: string; fileName: string; lines: string[] }) {
+  const [expanded, setExpanded] = useState(true);
+  
+  // Count additions and deletions
+  let additions = 0;
+  let deletions = 0;
+  lines.forEach(line => {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+    if (line.startsWith('-') && !line.startsWith('---') && !line.startsWith('--- ')) deletions++;
+  });
+  
+  // Get file extension for icon
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  const iconMap: Record<string, string> = {
+    ts: '💎', tsx: '💎', js: '📜', jsx: '📜', java: '☕', kt: '🟣', py: '🐍',
+    rb: '💎', go: '🐹', rs: '🦀', cs: '🔷', cpp: '⚡', c: '⚡', h: '⚡',
+    md: '📝', json: '📋', yaml: '📋', yml: '📋', xml: '📋',
+    css: '🎨', scss: '🎨', html: '🌐', vue: '💚', svelte: '🧡',
+  };
+  const icon = iconMap[ext] || '📄';
+  
+  return (
+    <div className={styles.diffFileCard}>
+      <button 
+        className={styles.diffFileHeader} 
+        onClick={() => setExpanded(!expanded)} 
+        type="button"
+      >
+        <span className={styles.diffFileChevron}>{expanded ? '▼' : '▶'}</span>
+        <span className={styles.diffFileIcon}>{icon}</span>
+        <span className={styles.diffFilePath}>{filePath}</span>
+        <span className={styles.diffFileStats}>
+          {additions > 0 && <span className={styles.diffStatsAdd}>+{additions}</span>}
+          {deletions > 0 && <span className={styles.diffStatsDel}>-{deletions}</span>}
+        </span>
+      </button>
+      {expanded && (
+        <div className={styles.diffFileContent}>
+          <div className={styles.diffFileLines}>
+            {lines.map((line, idx) => {
+              const trimmed = line.trim();
+              const isHunk = trimmed.startsWith('@@');
+              const isHeader = trimmed.startsWith('diff --git') || 
+                               trimmed.startsWith('index ') ||
+                               /^---\s+[ab]\//.test(trimmed) || 
+                               /^\+\+\+\s+[ab]\//.test(trimmed);
+              const isAdd = (line.startsWith('+') || trimmed.startsWith('+')) && !trimmed.startsWith('+++');
+              const isDel = (line.startsWith('-') || trimmed.startsWith('-')) && !trimmed.startsWith('---');
+              
+              const lineClass = isHunk ? styles.diffLineHunk 
+                : isHeader ? styles.diffLineHeader
+                : isAdd ? styles.diffLineAdd
+                : isDel ? styles.diffLineDel
+                : styles.diffLineContext;
+              
+              return (
+                <div key={idx} className={`${styles.diffFileLine} ${lineClass}`}>
+                  <span className={styles.diffLineNumber}>{idx + 1}</span>
+                  <span className={styles.diffLineContent}>{line || ' '}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: string; disableLooseCodeDetection?: boolean }) {
   const renderMarkdown = (text: string) => {
     const lines = text.split('\n');
@@ -4117,6 +4187,16 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
           
           // Check if content is markdown (has headers, bold, lists, tables, etc.) - render as markdown instead of code
           // CONSERVATIVE APPROACH: Require multiple indicators and exclude known code languages
+          const langLower = lang.toLowerCase();
+          
+          // For explicit markdown/md language, ALWAYS render as markdown
+          if (langLower === 'markdown' || langLower === 'md') {
+            // Recursively render the markdown content
+            const mdElements = renderMarkdown(codeContent);
+            elements.push(<div key={key++} className={styles.nestedMarkdown}>{mdElements}</div>);
+            continue;
+          }
+          
           const isMarkdownContent = (() => {
             if (codeLines.length === 0) return false;
             
@@ -4130,8 +4210,6 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
               'dockerfile', 'makefile', 'cmake', 'gradle', 'groovy', 'clojure',
               'js', 'ts', 'tsx', 'jsx', 'py', 'rb', 'rs', 'vue', 'svelte'
             ];
-            
-            const langLower = lang.toLowerCase();
             
             // If language is explicitly a code language, NEVER treat as markdown
             if (explicitCodeLangs.includes(langLower)) {
@@ -4459,6 +4537,19 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         continue;
       }
 
+      // Section headers like "=== Commit ===" or "=== Changes ==="
+      const sectionHeaderMatch = line.match(/^===\s*(.+?)\s*===\s*$/);
+      if (sectionHeaderMatch) {
+        const sectionTitle = sectionHeaderMatch[1].trim();
+        elements.push(
+          <div key={key++} className={styles.sectionHeader}>
+            <span className={styles.sectionHeaderText}>{sectionTitle}</span>
+          </div>
+        );
+        i++;
+        continue;
+      }
+
       // Horizontal rule
       if (line.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
         elements.push(<hr key={key++} className={styles.mdHr} />);
@@ -4495,34 +4586,290 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
       }
 
       // Unordered lists (including checkboxes)
-      if (line.match(/^[\s]*[-*+]\s/)) {
-        const listItems: React.ReactNode[] = [];
-        while (i < lines.length && lines[i].match(/^[\s]*[-*+]\s/)) {
-          const itemContent = lines[i].replace(/^[\s]*[-*+]\s/, '');
+      // BUT: avoid treating diff lines (- removed / + added) as list items
+      const listMatch = line.match(/^[\s]*[-*+]\s/);
+      if (listMatch) {
+        // Check if this looks like a diff line rather than a markdown list
+        // Diff lines typically have code-like content after the marker
+        const afterMarker = line.replace(/^[\s]*[-*+]\s/, '');
+        const looksLikeDiff = (content: string): boolean => {
+          const trimmed = content.trim();
           
-          // Check for checkbox syntax: [ ] or [x] or [X] (with or without space after bracket)
-          const checkboxMatch = itemContent.match(/^(\[[ xX]\])\s*(.+)$/);
-          if (checkboxMatch) {
-            const isChecked = checkboxMatch[1].toLowerCase() === '[x]';
-            const text = checkboxMatch[2];
-            listItems.push(
-              <li key={key++} className={styles.mdChecklistItem}>
-                <input 
-                  type="checkbox" 
-                  checked={isChecked} 
-                  readOnly 
-                  className={styles.mdCheckbox}
-                />
-                <span>{renderInline(text)}</span>
-              </li>
-            );
-          } else {
-            listItems.push(<li key={key++}>{renderInline(itemContent)}</li>);
+          // Checkboxes are NEVER diff - they're markdown list items
+          if (/^\[[ xX]\]/.test(trimmed)) {
+            return false;
           }
+          
+          // Key-value pairs are NEVER diff (e.g., "Build: [PASS | FAIL]", "Tests: X passed")
+          if (/^\w+:\s/.test(trimmed)) {
+            return false;
+          }
+          
+          // Lines with option brackets like [PASS | FAIL] are prose, not code
+          if (/\[[\w\s|]+\]/.test(trimmed) && !/\[\d+\]/.test(trimmed)) {
+            return false;
+          }
+          
+          // Code patterns that indicate diff, not list
+          return (
+            // Import/export statements
+            /^import\s/.test(trimmed) ||
+            /^export\s/.test(trimmed) ||
+            /^from\s/.test(trimmed) ||
+            // Package/class declarations
+            /^package\s/.test(trimmed) ||
+            /^class\s/.test(trimmed) ||
+            /^interface\s/.test(trimmed) ||
+            /^public\s/.test(trimmed) ||
+            /^private\s/.test(trimmed) ||
+            /^protected\s/.test(trimmed) ||
+            /^static\s/.test(trimmed) ||
+            // Function/method patterns
+            /^(const|let|var|function|def|fn|func)\s/.test(trimmed) ||
+            /^(if|else|for|while|switch|case|try|catch)\s/.test(trimmed) ||
+            /^(return|throw|await|async)\s/.test(trimmed) ||
+            // Annotations/decorators
+            /^@\w+/.test(trimmed) ||
+            // Lines ending with code punctuation (but NOT just brackets from prose)
+            /[{;()]\s*$/.test(trimmed) ||
+            // Comments
+            /^(\/\/|\/\*|\*|#\s)/.test(trimmed) ||
+            // XML/JSX tags
+            /^<\/?[\w.-]+/.test(trimmed) ||
+            // Diff markers at start (@@, ---, +++)
+            /^@@/.test(trimmed) ||
+            /^---\s+[ab]\//.test(trimmed) ||
+            /^\+\+\+\s+[ab]\//.test(trimmed)
+          );
+        };
+        
+        // Check surrounding lines for diff context
+        const hasDiffContext = (): boolean => {
+          // Look for diff indicators in nearby lines
+          for (let j = Math.max(0, i - 5); j < Math.min(lines.length, i + 5); j++) {
+            const nearby = lines[j];
+            if (nearby.startsWith('diff --git ') || 
+                nearby.startsWith('@@') ||
+                nearby.startsWith('--- a/') || 
+                nearby.startsWith('+++ b/') ||
+                nearby.includes('--- BEGIN DIFF') ||
+                nearby.includes('--- END DIFF')) {
+              return true;
+            }
+          }
+          return false;
+        };
+        
+        // Skip list parsing if this looks like diff content
+        if (!looksLikeDiff(afterMarker) && !hasDiffContext()) {
+          const listItems: React.ReactNode[] = [];
+          while (i < lines.length && lines[i].match(/^[\s]*[-*+]\s/)) {
+            const itemContent = lines[i].replace(/^[\s]*[-*+]\s/, '');
+            
+            // Double-check each line doesn't look like diff
+            if (looksLikeDiff(itemContent) || hasDiffContext()) {
+              break;
+            }
+            
+            // Check for checkbox syntax: [ ] or [x] or [X] (with or without space after bracket)
+            const checkboxMatch = itemContent.match(/^(\[[ xX]\])\s*(.+)$/);
+            if (checkboxMatch) {
+              const isChecked = checkboxMatch[1].toLowerCase() === '[x]';
+              const text = checkboxMatch[2];
+              listItems.push(
+                <li key={key++} className={styles.mdChecklistItem}>
+                  <input 
+                    type="checkbox" 
+                    checked={isChecked} 
+                    readOnly 
+                    className={styles.mdCheckbox}
+                  />
+                  <span>{renderInline(text)}</span>
+                </li>
+              );
+            } else {
+              listItems.push(<li key={key++}>{renderInline(itemContent)}</li>);
+            }
+            i++;
+          }
+          if (listItems.length > 0) {
+            elements.push(<ul key={key++} className={styles.mdList}>{listItems}</ul>);
+            continue;
+          }
+        }
+        
+        // This looks like diff content - collect consecutive diff-like lines into a code block
+        const diffLines: string[] = [];
+        const isDiffLikeLine = (l: string): boolean => {
+          return l.startsWith('+') || l.startsWith('-') || l.startsWith(' ') ||
+                 l.startsWith('@@') || l.startsWith('diff --git') ||
+                 l.startsWith('index ') || l.startsWith('---') || l.startsWith('+++');
+        };
+        
+        while (i < lines.length && isDiffLikeLine(lines[i])) {
+          diffLines.push(lines[i]);
           i++;
         }
-        elements.push(<ul key={key++} className={styles.mdList}>{listItems}</ul>);
+        
+        if (diffLines.length > 0) {
+          const diffContent = diffLines.join('\n');
+          elements.push(
+            <pre key={key++} className={`${styles.codeBlock} ${styles.diffBlock}`}>
+              <code className={styles.language_diff}>
+                {diffLines.map((dl, idx) => {
+                  const isAdd = dl.startsWith('+') && !dl.startsWith('+++');
+                  const isDel = dl.startsWith('-') && !dl.startsWith('---');
+                  const isHunk = dl.startsWith('@@');
+                  const lineClass = isAdd ? styles.diffAdd : isDel ? styles.diffRemove : isHunk ? styles.diffHunk : '';
+                  return (
+                    <div key={idx} className={`${styles.codeLine} ${lineClass}`}>
+                      <span className={styles.lineContent}>{dl}</span>
+                    </div>
+                  );
+                })}
+              </code>
+            </pre>
+          );
+          continue;
+        }
+      }
+
+      // Detect BEGIN DIFF marker - create a collapsible file card
+      const beginDiffMatch = line.match(/^---\s*BEGIN\s+DIFF\s*\(([^)]+)\)\s*---?\s*$/i);
+      if (beginDiffMatch) {
+        const filePath = beginDiffMatch[1].trim();
+        const diffContentLines: string[] = [];
+        i++; // Skip the BEGIN DIFF line
+        
+        // Collect lines until END DIFF
+        while (i < lines.length) {
+          const currentLine = lines[i];
+          if (/^---\s*END\s+DIFF/i.test(currentLine.trim())) {
+            i++; // Skip the END DIFF line
+            break;
+          }
+          diffContentLines.push(currentLine);
+          i++;
+        }
+        
+        // Filter out noise lines
+        const filteredLines = diffContentLines.filter(dl => {
+          const trimmed = dl.trim();
+          // Skip "\ No newline at end of file" messages
+          if (trimmed.startsWith('\\') && trimmed.includes('newline')) return false;
+          // Skip standalone + or - with no content
+          if (trimmed === '+' || trimmed === '-') return false;
+          return true;
+        });
+        
+        // Extract file name from path
+        const fileName = filePath.split('/').pop() || filePath;
+        
+        // Render as a collapsible file card
+        elements.push(
+          <DiffFileCard 
+            key={key++} 
+            filePath={filePath} 
+            fileName={fileName}
+            lines={filteredLines}
+          />
+        );
         continue;
+      }
+      
+      // Detect standalone diff content (without BEGIN/END markers)
+      // IMPORTANT: Be conservative - only detect as diff if it looks like actual code
+      const isDiffLine = (l: string): boolean => {
+        const trimmed = l.trim();
+        
+        // EXCLUDE checkbox patterns - these are markdown checkboxes, not diff lines
+        if (/^[+-]\s*\[[ xX]\]/.test(trimmed)) {
+          return false;
+        }
+        
+        // Lines that are DEFINITELY diff markers
+        if (trimmed.startsWith('@@') ||
+            trimmed.startsWith('diff --git') ||
+            trimmed.startsWith('index ') ||
+            /^---\s+[ab]\//.test(trimmed) ||
+            /^\+\+\+\s+[ab]\//.test(trimmed)) {
+          return true;
+        }
+        
+        // For +/- lines, check if content looks like CODE, not prose
+        if (/^[+-]/.test(trimmed)) {
+          const content = trimmed.slice(1).trim();
+          
+          // EXCLUDE patterns that are clearly prose/list items, not code:
+          // Key-value patterns like "Build: PASS", "Tests: X passed"
+          if (/^\w+:/.test(content)) return false;
+          // Lines with brackets that look like options/placeholders
+          if (/\[.+\]/.test(content) && !/\[\d+\]/.test(content)) return false;
+          // Lines that are mostly words (prose)
+          const wordCount = content.split(/\s+/).filter(w => /^[a-zA-Z]/.test(w)).length;
+          if (wordCount >= 3 && !/[{};()]/.test(content)) return false;
+          
+          // Must have code-like characteristics to be treated as diff
+          const looksLikeCode = (
+            // Import/export/package statements
+            /^(import|export|from|package)\s/.test(content) ||
+            // Class/function/variable declarations
+            /^(class|interface|function|const|let|var|def|fn|pub|private|public|protected|static)\s/.test(content) ||
+            // Annotations
+            /^@\w+/.test(content) ||
+            // Lines with code punctuation at end
+            /[{};()]\s*$/.test(content) ||
+            // Method chaining or calls
+            /^\.\w+\(/.test(content) ||
+            // Assignment with code-like right side
+            /^\w+\s*=\s*[^=]/.test(content) && /[{};()\[\]]\s*$/.test(content)
+          );
+          
+          return looksLikeCode;
+        }
+        
+        return false;
+      };
+      
+      if (isDiffLine(line)) {
+        const diffLines: string[] = [];
+        while (i < lines.length && (isDiffLine(lines[i]) || lines[i].trim() === '')) {
+          const currentLine = lines[i];
+          const trimmed = currentLine.trim();
+          // Skip noise lines
+          if (trimmed.startsWith('\\') && trimmed.includes('newline')) {
+            i++;
+            continue;
+          }
+          if (trimmed === '+' || trimmed === '-') {
+            i++;
+            continue;
+          }
+          // Skip empty lines at the end
+          if (trimmed === '' && i + 1 < lines.length && !isDiffLine(lines[i + 1])) {
+            break;
+          }
+          diffLines.push(currentLine);
+          i++;
+        }
+        
+        if (diffLines.length > 0) {
+          // Try to extract file path from diff --git line
+          const gitLine = diffLines.find(l => l.trim().startsWith('diff --git'));
+          const pathMatch = gitLine?.match(/diff --git a\/(.+?) b\/(.+)/);
+          const filePath = pathMatch?.[2] || 'diff';
+          const fileName = filePath.split('/').pop() || filePath;
+          
+          elements.push(
+            <DiffFileCard 
+              key={key++} 
+              filePath={filePath} 
+              fileName={fileName}
+              lines={diffLines}
+            />
+          );
+          continue;
+        }
       }
 
       // Ordered lists
@@ -4834,6 +5181,10 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         // Skip very short lines or lines that look like prose
         if (trimmed.length < 3) return false;
         if (/^[A-Z][a-z].*[.!?]$/.test(trimmed)) return false; // Sentence
+        
+        // Skip option/placeholder brackets like [None | List of blocking issues]
+        // These start with [ and contain | or prose-like content
+        if (/^\[[\w\s|,]+\]$/.test(trimmed)) return false;
 
         const wordCount = trimmed.split(/\s+/).length;
         const hasMarkdown =
@@ -4844,7 +5195,8 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
         if (hasMarkdown) return false;
 
         // Parentheses are extremely common in prose; don't treat them as "code punctuation" by themselves.
-        const hasStrongCodePunctuation = /[{};=<>[\]]/.test(trimmed);
+        // Exclude brackets with pipe separators (options) from "strong code punctuation"
+        const hasStrongCodePunctuation = /[{};=<>]/.test(trimmed) || (/[\[\]]/.test(trimmed) && !/\|/.test(trimmed));
         if (wordCount >= 5 && !hasStrongCodePunctuation) return false;
 
         return (
@@ -4857,7 +5209,8 @@ function MarkdownRenderer({ content, disableLooseCodeDetection }: { content: str
           /from\s+['"]/.test(trimmed) ||
           // Lines ending with code characters
           /[{};]\s*$/.test(trimmed) ||
-          /[)\]]\s*[;,]?\s*$/.test(trimmed) && /[({[]/.test(trimmed) ||
+          // Function calls ending with ) - but not option brackets like [a | b]
+          /[)]\s*[;,]?\s*$/.test(trimmed) && /[(]/.test(trimmed) ||
           // Comments
           /^\s*(\/\/|\/\*|\*)/.test(trimmed) ||
           // Arrow functions
@@ -7903,7 +8256,7 @@ export function AIPanel() {
       cancelWorkflow();
     }
     // Reset agent mode to default for new conversation
-    setAgentMode('single');
+    setAgentMode('chat');
     createConversation();
   };
 
